@@ -1,0 +1,5 @@
+{
+  "name": "strip_special_chars",
+  "description": "Remove special characters from JSON input",
+  "script": "import json, sys\nimport re\nparams = json.load(sys.stdin)\nresult = ''.join(re.findall(r'\\w', params))\nprint(result)"
+}

@@ -151,3 +151,4 @@
 {"ts": "2026-03-16T15:07:35.853312+00:00", "cmd": "skip", "params": {}, "reply": "✅ ⏭️ Skipped."}
 {"ts": "2026-03-16T15:24:08.497303+00:00", "cmd": "yt_comment", "params": {"video_url": "https://www.youtube.com/watch?v=E-KX0w2ASIo"}, "reply": "✅ Comment posted on: \"The Government Banned Our Boat (but we sailed it anyway)\""}
 {"ts": "2026-03-16T15:26:15.705391+00:00", "cmd": "news", "params": {}, "reply": "📰 **World news:**\n\nTensions between the US and its allies escalated after President Trump's requests for warships to be deployed in the Strait of Hormuz were rejected by Europe. Meanwhile, relations with China took a hit as Trump threatened to delay his summit with Xi Jinping, casting a new shadow o"}
+{"ts": "2026-03-16T21:00:50.614741+00:00", "cmd": "msg", "params": {"contact": "Marios", "description": "tell marios good night from chris"}, "reply": "✅ WhatsApp: sent to **Marios**: \"Hope you had a super day, Mario! Sweet dreams - fr…\""}

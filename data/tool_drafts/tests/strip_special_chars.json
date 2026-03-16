@@ -1,0 +1,6 @@
+{
+  "returncode": 1,
+  "stdout": "",
+  "stderr": "Traceback (most recent call last):\r\n  File \"C:\\Users\\User\\AppData\\Local\\Temp\\tmp56kb7zc_.py\", line 4, in <module>\r\n    result = ''.join(re.findall(r'\\w', params))\r\n                     ~~~~~~~~~~^^^^^^^^^^^^^^^\r\n  File \"C:\\Program Files\\WindowsApps\\PythonSoftwareFoundation.Python.3.13_3.13.3312.0_x64__qbz5n2kfra8p0\\Lib\\re\\__init__.py\", line 278, in findall\r\n    return _compile(pattern, flags).findall(string)\r\n           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^\r\nTypeError: expected string or bytes-like object, got 'dict'",
+  "ts": 1773701506.8221111
+}

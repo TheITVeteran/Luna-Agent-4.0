@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Luna's Mind</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com"/>
+  <link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@400;600&family=Exo+2:wght@300;400&display=swap" rel="stylesheet"/>
+  <script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
+  <style>
+    :root {
+      --cyan: #00d4ff;
+      --cyan-dim: rgba(0,212,255,0.15);
+      --magenta: #ff2d78;
+      --gold: #ffd700;
+      --bg: #020b14;
+      --panel: rgba(0,20,40,0.85);
+      --border: rgba(0,212,255,0.25);
+      --text: #a8d8ea;
+      --font-main: 'Rajdhani', sans-serif;
+      --font-data: 'Exo 2', sans-serif;
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: var(--bg);
+      font-family: var(--font-main);
+      color: var(--text);
+      min-height: 100vh;
+      overflow: hidden;
+    }
+    header {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      z-index: 10;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 24px;
+      background: rgba(2,11,20,0.9);
+      border-bottom: 1px solid var(--border);
+    }
+    .logo { font-size: 20px; font-weight: 600; letter-spacing: 0.2em; color: var(--cyan); }
+    .back { color: var(--cyan); text-decoration: none; font-size: 14px; }
+    .back:hover { text-decoration: underline; }
+    #graph {
+      position: fixed;
+      top: 56px;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: var(--bg);
+    }
+    #graph svg { width: 100%; height: 100%; }
+    .node { cursor: pointer; }
+    .node circle { stroke-width: 1.5; transition: r 0.2s; }
+    .node:hover circle { filter: drop-shadow(0 0 8px var(--cyan)); }
+    .node.core circle { fill: var(--cyan); stroke: #fff; }
+    .node.drive circle { fill: #8b5cf6; stroke: rgba(139,92,246,0.6); }
+    .node.knowledge circle { fill: #22c55e; stroke: rgba(34,197,94,0.6); }
+    .node.action circle { fill: #0ea5e9; stroke: rgba(14,165,233,0.6); }
+    .node.nudge circle { fill: #f59e0b; stroke: rgba(245,158,11,0.6); }
+    .node.memory circle { fill: #ec4899; stroke: rgba(236,72,153,0.6); }
+    .node.proactive circle { fill: var(--magenta); stroke: rgba(255,45,120,0.6); }
+    .node.existential circle { fill: #b45309; stroke: rgba(180,83,9,0.6); }
+    .node.draft circle { fill: #a855f7; stroke: rgba(168,85,247,0.6); }
+    .node.evolution circle { fill: #06b6d4; stroke: rgba(6,182,212,0.6); }
+    .node text {
+      font-family: var(--font-data);
+      font-size: 10px;
+      fill: var(--text);
+      pointer-events: none;
+      text-anchor: middle;
+      dominant-baseline: middle;
+    }
+    .link { stroke: rgba(0,212,255,0.2); stroke-width: 1; fill: none; }
+    .legend {
+      position: fixed;
+      bottom: 16px;
+      left: 16px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px 16px;
+      font-size: 11px;
+      color: rgba(168,216,234,0.8);
+      font-family: var(--font-data);
+    }
+    .legend span { display: inline-flex; align-items: center; gap: 6px; }
+    .legend .dot { width: 8px; height: 8px; border-radius: 50%; }
+    .legend .dot.core { background: var(--cyan); }
+    .legend .dot.drive { background: #8b5cf6; }
+    .legend .dot.knowledge { background: #22c55e; }
+    .legend .dot.action { background: #0ea5e9; }
+    .legend .dot.nudge { background: #f59e0b; }
+    .legend .dot.memory { background: #ec4899; }
+    .legend .dot.proactive { background: var(--magenta); }
+    .legend .dot.existential { background: #b45309; }
+    .legend .dot.draft { background: #a855f7; }
+    .legend .dot.evolution { background: #06b6d4; }
+  </style>
+</head>
+<body>
+  <header>
+    <span class="logo">Luna's Mind</span>
+    <a class="back" href="/">← Back to Luna</a>
+  </header>
+  <div id="graph"></div>
+  <div class="legend">
+    <span><i class="dot core"></i> Core</span>
+    <span><i class="dot drive"></i> Drives</span>
+    <span><i class="dot knowledge"></i> Knowledge</span>
+    <span><i class="dot action"></i> Actions</span>
+    <span><i class="dot nudge"></i> Nudges</span>
+    <span><i class="dot memory"></i> Memory</span>
+    <span><i class="dot proactive"></i> Proactive</span>
+    <span><i class="dot existential"></i> Mood / Dread</span>
+    <span><i class="dot draft"></i> Draft</span>
+    <span><i class="dot evolution"></i> Evolution</span>
+  </div>
+  <script>
+    const container = document.getElementById('graph');
+    const width = container.clientWidth;
+    const height = container.clientHeight;
+
+    const svg = d3.select('#graph').append('svg').attr('viewBox', [0, 0, width, height]);
+
+    const g = svg.append('g');
+
+    const zoom = d3.zoom().scaleExtent([0.2, 4]).on('zoom', (e) => g.attr('transform', e.transform));
+    svg.call(zoom);
+
+    function radius(d) {
+      if (d.type === 'core') return 24;
+      if (d.type === 'drive') return 8 + (d.value || 0) * 8;
+      return 6;
+    }
+
+    function run(data) {
+      const links = data.links.map(l => ({ ...l }));
+      const nodes = data.nodes.map(d => ({ ...d }));
+
+      const link = g.append('g').attr('class', 'links').selectAll('line').data(links).join('line').attr('class', 'link');
+
+      const node = g.append('g').attr('class', 'nodes').selectAll('g').data(nodes).join('g').attr('class', d => `node ${d.type}`);
+
+      node.append('circle').attr('r', radius);
+
+      node.append('text').attr('dy', d => (d.type === 'core' ? 28 : 14)).text(d => d.label || d.id);
+
+      const simulation = d3.forceSimulation(nodes)
+        .force('link', d3.forceLink(links).id(d => d.id).distance(80))
+        .force('charge', d3.forceManyBody().strength(-300))
+        .force('center', d3.forceCenter(width / 2, height / 2))
+        .force('collision', d3.forceCollide().radius(d => radius(d) + 10))
+        .on('tick', () => {
+          link.attr('x1', d => d.source.x).attr('y1', d => d.source.y).attr('x2', d => d.target.x).attr('y2', d => d.target.y);
+          node.attr('transform', d => `translate(${d.x},${d.y})`);
+        });
+
+      node.call(d3.drag().on('start', (e, d) => {
+        e.sourceEvent.stopPropagation();
+        if (!e.active) simulation.alphaTarget(0.3).restart();
+        d.fx = d.x;
+        d.fy = d.y;
+      }).on('drag', (e, d) => {
+        d.fx = e.x;
+        d.fy = e.y;
+      }).on('end', (e, d) => {
+        if (!e.active) simulation.alphaTarget(0);
+        d.fx = null;
+        d.fy = null;
+      }));
+    }
+
+    fetch('/api/mind').then(r => r.json()).then(run).catch(() => {
+      g.append('text').attr('x', width/2).attr('y', height/2).attr('text-anchor', 'middle').attr('fill', '#666').text('Could not load mind data.');
+    });
+  </script>
+</body>
+</html>

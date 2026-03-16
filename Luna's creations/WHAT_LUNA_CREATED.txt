@@ -1,0 +1,13 @@
+# What Luna created — new programs, skills, absorbed tools
+# Date       | Type           | File        | Description
+# ----------------------------------------------------------------------
+2026-03-16 22:11 | absorbed tool  | to_lower.py  | Convert all keys in a JSON object to lowercase
+2026-03-16 22:11 | evolved        | to_lower.py  | Convert all keys in a JSON object to lowercase
+2026-03-16 22:21 | absorbed tool  | to_lower_list.py | Convert list of JSON strings to lowercase list
+2026-03-16 22:21 | evolved        | to_lower_list.py | Convert list of JSON strings to lowercase list
+2026-03-16 22:31 | absorbed tool  | trim_whitespace.py | Removes whitespace from each string in a JSON object
+2026-03-16 22:31 | evolved        | trim_whitespace.py | Removes whitespace from each string in a JSON object
+2026-03-16 22:41 | absorbed tool  | to_title_case.py | Converts input text to title case
+2026-03-16 22:41 | evolved        | to_title_case.py | Converts input text to title case
+2026-03-16 23:01 | absorbed tool  | words_count.py | Counts the number of unique words in a JSON array
+2026-03-16 23:01 | evolved        | words_count.py | Counts the number of unique words in a JSON array

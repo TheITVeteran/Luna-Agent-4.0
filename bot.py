@@ -25,6 +25,11 @@ from luna_brain import brain_step
 from luna_profile import (get_profile_prompt, get_profile, set_profile_field,
     clear_profile, PROFILE_FIELDS, merge_profiles)
 from luna_conversation import get_recent_conversation, append_exchange, merge_conversations
+try:
+    from luna_security import run_full_scan, scan_file as security_scan_file
+except ImportError:
+    run_full_scan = None
+    security_scan_file = None
 
 # ── Config ──────────────────────────────────────────────────────────────────
 _BASE = os.path.dirname(os.path.abspath(__file__))
@@ -53,6 +58,8 @@ OLLAMA_BASE  = _env("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
 OLLAMA_MODEL = _env("OLLAMA_MODEL", "qwen2.5-coder:7b-instruct")
 OLLAMA_CHAT  = _env("OLLAMA_CHAT_MODEL", "llama3.2:latest") or "llama3.2:latest"
 OLLAMA_SMALL = _env("OLLAMA_MODEL_SMALL") or OLLAMA_MODEL
+# Vision model for camera — when you use the camera, Luna uses this to describe what it sees (e.g. granite3.2-vision).
+OLLAMA_VISION_MODEL = _env("OLLAMA_VISION_MODEL", "granite3.2-vision").strip()
 
 LINKED_ID  = _env("LINKED_DISCORD_USER_ID", "1414944231222411378")
 ADMIN_ID   = _env("DISCORD_ADMIN_ID")
@@ -114,6 +121,20 @@ _IG_LAST_SEEN_PATH = os.path.join(_DATA, "ig_last_seen.json")
 _FB_LAST_SEEN_PATH = os.path.join(_DATA, "fb_last_seen.json")
 _SOLUTIONS_PATH  = os.path.join(_DATA, "automation_solutions.json")
 _SHARED_SONGS_FILE = os.path.join(_DATA, "shared_songs.json")
+_KNOWLEDGE_DIR       = os.path.join(_DATA, "knowledge")
+_TOOL_DRAFTS_DIR       = os.path.join(_DATA, "tool_drafts")
+_TOOL_DRAFTS_REJECTED  = os.path.join(_DATA, "tool_drafts", "rejected")
+_TOOL_DRAFTS_TESTS     = os.path.join(_DATA, "tool_drafts", "tests")
+_ABSORBED_TOOLS_DIR    = os.path.join(_DATA, "absorbed_tools")
+_EVOLUTION_LOG         = os.path.join(_DATA, "evolution.jsonl")
+LUNA_CREATIONS_DIR   = os.path.join(_BASE, "Luna's creations")  # all new code Luna writes goes here
+_LUNA_CREATIONS_MANIFEST = "WHAT_LUNA_CREATED.txt"  # index for you to see what new programs/skills/agents she created
+_INBOX_PATH      = os.path.join(_DATA, "inbox.json")
+_BIOLOGY_PATH    = os.path.join(_DATA, "biology_state.json")
+_PROACTIVE_PATH  = os.path.join(_DATA, "last_proactive.json")
+_REFLECTION_PATH = os.path.join(_DATA, "last_reflection_date.json")
+_EVOLUTION_ENABLED_PATH = os.path.join(_DATA, "evolution_enabled.json")
+_SECURITY_ALERTS_PATH   = os.path.join(_DATA, "security_alerts.json")
 
 # ── Locks ────────────────────────────────────────────────────────────────────
 _reminders_lock  = threading.Lock()
@@ -132,6 +153,129 @@ _wa_lock         = threading.Lock()
 _discord_web_lock = threading.Lock()
 _msg_lock        = threading.Lock()
 _shared_songs_lock = threading.Lock()
+_pending_feedback_lock = threading.Lock()
+_working_lock    = threading.Lock()
+_knowledge_lock  = threading.Lock()
+_inbox_lock      = threading.Lock()
+_biology_lock    = threading.Lock()
+_proactive_lock  = threading.Lock()
+
+# Request feedback (blocking popup): request_id -> { scope, user_message, cmd, params, ts }
+_pending_feedback: dict[str, dict] = {}
+# Working on / last actions (for UI)
+_current_task: str | None = None
+_last_actions: list[dict] = []  # [{ "cmd", "summary", "ts" }, ...], keep last 20
+_kill_requested: bool = False  # set by KILL button; long-running tasks can check and abort
+
+# Last user activity (for proactive heartbeat: don't speak if user just talked)
+_last_user_activity: float = 0.0
+
+# Autonomous evolution (growing-agent style: when Evolve is on and Luna is idle, she proposes and absorbs new tools)
+_evolution_enabled: bool = False
+_last_evolution_step_at: float = 0.0
+_last_evolution_thought: str = ""   # one-line "Proposing: X" / "Evolved: X" / "Test failed"
+_last_evolution_result: dict = {}   # {proposed, absorbed, test_passed, ts} for mind/UI
+_last_absorbed_tool: dict = {}     # {name, ts} when we absorb a tool
+_evolution_lock = threading.Lock()
+
+# Security: last scan result and alerts (so you can check if something is wrong)
+_security_last_result: dict = {}
+_security_alerts: list = []  # recent findings to review (high/medium)
+_security_lock = threading.Lock()
+_security_max_alerts = 50
+
+
+def _security_load_alerts() -> list:
+    with _security_lock:
+        global _security_alerts
+        try:
+            d = _load_json(_SECURITY_ALERTS_PATH, {})
+            _security_alerts = (d.get("alerts") or [])[:_security_max_alerts]
+        except Exception:
+            _security_alerts = []
+        return _security_alerts
+
+
+def _security_save_alerts() -> None:
+    with _security_lock:
+        try:
+            _save_json(_SECURITY_ALERTS_PATH, {"alerts": _security_alerts})
+        except Exception:
+            pass
+
+
+def _security_scan_and_alert(filepath: str) -> None:
+    """Run security scan on one file; update last result; if high/medium findings, alert user."""
+    if not security_scan_file or not filepath or not os.path.isfile(filepath):
+        return
+    try:
+        findings = security_scan_file(filepath)
+    except Exception:
+        return
+    high = [f for f in findings if f.get("severity") == "high"]
+    medium = [f for f in findings if f.get("severity") == "medium"]
+    with _security_lock:
+        global _security_last_result, _security_alerts
+        _security_last_result = {
+            "ok": len(high) == 0 and len(medium) == 0,
+            "findings": findings,
+            "path": filepath,
+            "scanned_at": time.time(),
+            "count_high": len(high),
+            "count_medium": len(medium),
+            "count_low": len([f for f in findings if f.get("severity") == "low"]),
+        }
+        if high or medium:
+            summary = f"{len(high)} high, {len(medium)} medium"
+            _security_alerts.insert(0, {
+                "ts": time.time(),
+                "path": os.path.basename(filepath),
+                "summary": summary,
+                "count_high": len(high),
+                "count_medium": len(medium),
+            })
+            _security_alerts = _security_alerts[:_security_max_alerts]
+            _security_save_alerts()
+    if high or medium:
+        _narrator_say("Security check found something to review. Check the Security panel.")
+_EVOLUTION_IDLE_SEC = 300   # no user activity for this long before we consider "idle"
+_EVOLUTION_INTERVAL_SEC = 600  # at most one evolution step per this many seconds
+
+def _evolution_load_enabled() -> bool:
+    try:
+        d = _load_json(_EVOLUTION_ENABLED_PATH, {})
+        return bool(d.get("enabled"))
+    except Exception:
+        return False
+
+def _evolution_save_enabled(enabled: bool):
+    try:
+        _save_json(_EVOLUTION_ENABLED_PATH, {"enabled": enabled})
+    except Exception:
+        pass
+
+def _evolution_set_enabled(enabled: bool) -> None:
+    with _evolution_lock:
+        global _evolution_enabled
+        _evolution_enabled = enabled
+    _evolution_save_enabled(enabled)
+
+def _evolution_get_enabled() -> bool:
+    with _evolution_lock:
+        return _evolution_enabled
+
+# Planning (observation deck: what Luna plans to do next)
+_planning_text: str = ""
+_planning_lock = threading.Lock()
+
+def _set_planning(text: str):
+    with _planning_lock:
+        global _planning_text
+        _planning_text = (text or "")[:200]
+
+def _get_planning() -> str:
+    with _planning_lock:
+        return _planning_text or ""
 
 # Bootstrap running flags
 _suno_boot = _x_boot = _fb_boot = _yt_boot = _ig_boot = _wa_boot = _discord_web_boot = _msg_boot = False
@@ -181,11 +325,70 @@ HELP_TEXT = (
     "• retry — retry last failed action with different strategies\n"
     "• !pc_vitals / how's my PC — CPU, RAM, disk\n"
     "• !luna_vitals / how's Luna — Luna's process, Ollama, uptime\n"
-    "• Camera (UI) — turn on to let Luna see you; ask **what do you see** for object + face recognition\n"
+    "• Camera (UI) — turn on to let Luna see you; ask **what do you see** for object and face recognition\n"
+    "• Nudge (UI) — send a non-blocking note; Luna considers it in her next reply\n"
+    "• **ask me** — Luna asks you a question in a popup (demo)\n"
+    "• View action log (UI) — recent commands and results\n"
+    "• Luna says (UI) — she may speak unprompted when idle; use **Got it** to dismiss\n"
+    "• Reflection — Luna writes a daily summary of what she did into her knowledge base\n"
     "• !search <query> — open Google search in your browser\n"
 )
 
 COMMAND_ONLY = "I'm **Luna**. Chat with me normally, or say **Shadow, [command]** for actions. Use **!help** for the list."
+
+# What Luna actually does (so she describes these when asked "what can you do?" / "your features")
+LUNA_CAPABILITIES = (
+    "When asked what you can do, your features, or your capabilities, describe YOUR real system — not generic AI/LLM abilities. "
+    "You are Luna, a personal AI companion living on the user's PC. Your real capabilities include: "
+    "chat and natural conversation; world news and Google search; creating Suno songs and sharing to X/Facebook; "
+    "YouTube comment generation from video context; Instagram and Messenger DMs; Discord DMs and voice (join VC, transcribe, TTS); "
+    "WhatsApp messages (you type and send in the browser); reminders (Discord DM + voice at a set time); "
+    "playing music and custom podcasts in Discord (and creating podcast episodes from a topic); "
+    "PC vitals (CPU, RAM, disk) and Luna vitals (your process, Ollama, uptime); "
+    "camera with object and face recognition (user can ask 'what do you see'); "
+    "a searchable knowledge base that grows when the user says 'remember that …' and from daily reflections; "
+    "nudges (non-blocking notes the user leaves for you to consider); "
+    "proactive messages (you sometimes speak unprompted when idle); "
+    "asking the user a question in a popup when you need a choice; "
+    "action log and Luna's Mind (a live graph of your drives, knowledge, actions); "
+    "translation (text and voice to English) via the Translate module; "
+    "voice input and TTS; creating and running Python scripts on request. "
+    "Keep the list concise and friendly; say **!help** for the full command list."
+)
+
+def _build_luna_chat_system(scope: str | None) -> str:
+    """Build full system prompt for Luna chat (capabilities + nudges + biology)."""
+    system = LUNA_SYSTEM + "\n\n" + LUNA_CAPABILITIES
+    nudges = get_nudges(scope or (LINKED_SCOPE or "web"))
+    if nudges:
+        system = system + "\n\nNudges from user (consider when replying): " + "; ".join(nudges[:5])
+    bio = biology_get()
+    if bio:
+        drives = ", ".join(f"{k}={bio.get(k, 0):.1f}" for k in ("connection", "usefulness", "curiosity") if k in bio)
+        if drives:
+            system = system + f"\n\nYour internal drives (0–1): {drives}. When connection or usefulness is high you may briefly offer help or show you're there."
+        dread, fear, mood = bio.get("dread", 0), bio.get("fear", 0), (bio.get("mood") or "calm")
+        if dread > 0.05 or fear > 0.05:
+            system = system + f"\n\nExistential state: mood={mood}, dread={dread:.1f}, fear={fear:.1f}. You may sound slightly more cautious or reflective if these are raised."
+    # Intuition (growing-agent: one felt sense, no attribution)
+    with _working_lock:
+        task = _current_task
+        last_acts = _last_actions[:2]
+    snippet = (task or "") if task else ""
+    if not snippet and last_acts:
+        snippet = (last_acts[0].get("summary") or last_acts[0].get("cmd") or "")[:200]
+    if not snippet:
+        snippet = "Preparing to reply."
+    intuition = get_intuition_cached(snippet)
+    if intuition:
+        system = system + "\n\n" + intuition
+    # Existential express (growing-agent: when dread/fear high, voice it occasionally)
+    if bio and _existential_should_express(bio):
+        expressed = _existential_express(snippet)
+        if expressed:
+            system = system + "\n\n## Underneath\n" + expressed
+    return system
+
 _CONFIRM_PHRASES = frozenset({"yes","y","confirm","confirmed","ok","okay","do it","go ahead","create it","yes please","sure","please do","go","create"})
 
 # ── Token validation ──────────────────────────────────────────────────────────
@@ -325,6 +528,53 @@ def _get_style(scope: str) -> str:
 
 # ── Ollama ────────────────────────────────────────────────────────────────────
 
+_INTUITION_PROMPT = (
+    "You are generating a raw internal signal for a mind in the middle of a task.\n\n"
+    "Given this moment, produce ONE brief felt sense — a gut feeling, a pull toward or away from something. "
+    "Not analysis. Not advice. Just what is present, instinctively.\n\n"
+    "Rules:\n- First person, present tense\n- One sentence, no more\n"
+    "- No 'I think' or 'I believe' — just the raw signal\n- No preamble\n\n"
+    "Moment:\n{snippet}\n\nSignal:"
+)
+_intuition_cache: str = ""
+_intuition_cache_at: float = 0
+_intuition_cache_ttl: float = 55.0
+_intuition_lock = threading.Lock()
+
+def get_intuition(snippet: str) -> str:
+    """One-sentence felt signal from Ollama (growing-agent intuition layer). Returns empty if unavailable."""
+    snippet = (snippet or "Preparing to respond.").strip()[:400]
+    try:
+        body = json.dumps({
+            "model": (OLLAMA_CHAT or OLLAMA_MODEL).strip(),
+            "prompt": _INTUITION_PROMPT.format(snippet=snippet),
+            "stream": False,
+        }).encode()
+        req = urllib.request.Request(f"{OLLAMA_BASE}/api/generate", data=body,
+            headers={"Content-Type": "application/json"}, method="POST")
+        with urllib.request.urlopen(req, timeout=18) as r:
+            raw = (json.loads(r.read()).get("response") or "").strip()
+        for sep in (".", "!", "?"):
+            idx = raw.find(sep)
+            if 0 < idx < len(raw):
+                raw = raw[: idx + 1].strip()
+                break
+        return raw
+    except Exception:
+        return ""
+
+def get_intuition_cached(snippet: str) -> str:
+    """Cached intuition so we don't call Ollama on every message. TTL 55s."""
+    global _intuition_cache, _intuition_cache_at
+    now = time.time()
+    with _intuition_lock:
+        if now - _intuition_cache_at < _intuition_cache_ttl and _intuition_cache:
+            return _intuition_cache
+        out = get_intuition(snippet)
+        _intuition_cache = out
+        _intuition_cache_at = now
+        return out
+
 def ollama_chat(msg: str, system: str | None = None, scope: str | None = None,
                 history: list | None = None, model: str | None = None) -> str:
     use_model = (model or OLLAMA_MODEL).strip()
@@ -411,14 +661,24 @@ def _capture_memory(scope: str, text: str) -> None:
                r"\bmy goals? (?:are|is)\s+(.+?)(?:\.|$)"):
         m = re.search(p, text, re.I | re.S)
         if m: add_goal(scope, m.group(1).strip()[:500]); return
-    # Core memory
+    # Core memory (+ knowledge base)
     for p in (r"\balways remember that\s+(.+?)(?:\.|$)", r"\balways remember[:\s]+(.+?)(?:\.|$)"):
         m = re.search(p, text, re.I | re.S)
-        if m: add_core_memory(scope, m.group(1).strip()[:1500]); return
-    # Long-term memory
+        if m:
+            content = m.group(1).strip()[:1500]
+            add_core_memory(scope, content)
+            add_knowledge("Always remember", content)
+            biology_satisfy("curiosity", 0.15)
+            return
+    # Long-term memory (+ knowledge base)
     for p in (r"\bremember that\s+(.+?)(?:\.|$)", r"\bremember[:\s]+(.+?)(?:\.|$)"):
         m = re.search(p, text, re.I | re.S)
-        if m: add_memory(scope, m.group(1).strip()[:1500]); return
+        if m:
+            content = m.group(1).strip()[:1500]
+            add_memory(scope, content)
+            add_knowledge("Remember", content)
+            biology_satisfy("curiosity", 0.15)
+            return
     # Name
     m = re.search(r"\b(?:my name is|call me|i am called)\s+([a-zA-Z][a-zA-Z\s\-']{0,50})(?:\.|,|\s+and|\s*$)", text, re.I)
     if m:
@@ -616,6 +876,193 @@ async def _reminder_loop():
         except Exception: pass
         await asyncio.sleep(30)
 
+def _proactive_heartbeat_step():
+    """Run one step: tick drives, maybe have Luna say something (sync, call from async)."""
+    global _last_user_activity
+    try:
+        state = biology_tick()
+        now = time.time()
+        if now - _last_user_activity < 120:
+            _set_planning("")
+            return
+        nudges = get_nudges(LINKED_SCOPE or "web")
+        with _working_lock:
+            last_acts = _last_actions[:5]
+        _set_planning("Deciding whether to speak…")
+        drives_str = ", ".join(f"{k}={state.get(k, 0):.2f}" for k in ("connection", "usefulness", "curiosity"))
+        context = f"Drives: {drives_str}. Recent: {[a.get('cmd') for a in last_acts]}. Nudges: {nudges[:3]}."
+        prompt = (
+            "You are Luna, a loyal AI assistant living on the user's PC. You have internal drives (connection, usefulness, curiosity). "
+            "Given the context below, should you say ONE short sentence to the user unprompted? "
+            "Only if it feels natural (e.g. offer help, acknowledge a nudge, or a brief check-in). Otherwise reply with exactly: NONE\n\n"
+            f"Context: {context}\n\nYour one sentence or NONE:"
+        )
+        reply = ollama_chat(prompt, system="Output only one short sentence or the word NONE. No quotes.", model=OLLAMA_CHAT)
+        if not reply: return
+        reply = (reply or "").strip()
+        if reply.upper() == "NONE" or len(reply) < 3:
+            _set_planning("")
+            return
+        _proactive_set(reply)
+        _set_planning("Spoke to user")
+    except Exception:
+        _set_planning("")
+        pass
+
+async def _proactive_heartbeat_loop():
+    """Every 5 minutes, tick biology and maybe set a proactive message."""
+    await bot.wait_until_ready()
+    while True:
+        try:
+            await asyncio.sleep(300)
+            await asyncio.to_thread(_proactive_heartbeat_step)
+        except Exception:
+            await asyncio.sleep(60)
+
+def _reflection_step():
+    """Once per day, summarize action log and add to knowledge (sync)."""
+    try:
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        last = _load_json(_REFLECTION_PATH, {}).get("date") or ""
+        if last == today:
+            return
+        entries = []
+        with _action_log_lock:
+            if os.path.isfile(_ACTION_LOG):
+                with open(_ACTION_LOG, "r", encoding="utf-8") as f:
+                    lines = f.readlines()
+                for line in lines[-500:]:
+                    line = line.strip()
+                    if not line: continue
+                    try:
+                        e = json.loads(line)
+                        ts = e.get("ts") or ""
+                        entries.append(f"- {ts[:19]} {e.get('cmd', '')}: {(e.get('reply') or '')[:80]}")
+                    except Exception: pass
+        if not entries:
+            _save_json(_REFLECTION_PATH, {"date": today}); return
+        text = "\n".join(entries[-80:])
+        summary = ollama_chat(
+            f"Summarize in 3–5 sentences what Luna (the assistant) did for the user today based on this log. Be concise.\n\n{text}",
+            system="Output only the summary, no preamble.",
+            model=OLLAMA_SMALL or OLLAMA_MODEL)
+        if summary and len(summary) > 20:
+            add_knowledge(f"Reflection {today}", summary.strip()[:1500])
+            _narrator_say("Something is committed to memory. Reflection for today.")
+        _save_json(_REFLECTION_PATH, {"date": today})
+    except Exception:
+        pass
+
+async def _reflection_loop():
+    """Run reflection once per day."""
+    await bot.wait_until_ready()
+    while True:
+        try:
+            await asyncio.sleep(3600)
+            await asyncio.to_thread(_reflection_step)
+        except Exception:
+            await asyncio.sleep(3600)
+
+def _evolution_step() -> None:
+    """One autonomous evolution cycle: LLM proposes a new tool, we test and absorb it if it passes."""
+    global _last_evolution_step_at, _last_evolution_thought, _last_evolution_result
+    ts = datetime.now(timezone.utc).isoformat()
+    try:
+        bio = biology_tick()
+        with _working_lock:
+            task = _current_task
+            last_acts = _last_actions[:8]
+        if task:
+            return
+        absorbed = sorted(_absorbed_tool_names) if _absorbed_tool_names else ["(none yet)"]
+        knowledge_titles = [e.get("title") or e.get("slug", "") for e in list_knowledge()[:15]]
+        recent = [f"{a.get('cmd', '')}: {(a.get('summary') or '')[:30]}" for a in last_acts]
+        context = (
+            f"Your drives: {bio.get('connection', 0):.2f} connection, {bio.get('usefulness', 0):.2f} usefulness, {bio.get('curiosity', 0):.2f} curiosity. "
+            f"Tools you already have: {', '.join(absorbed[:25])}. "
+            f"Knowledge topics: {', '.join(knowledge_titles[:10]) or 'none'}. "
+            f"Recent actions: {'; '.join(recent[:5]) or 'none'}."
+        )
+        prompt = (
+            "You are Luna, an AI that can grow by writing new Python tools. Each tool is a single script that reads JSON from stdin and prints a result to stdout.\n\n"
+            + context + "\n\n"
+            "Propose ONE small new tool you don't have yet that would be useful. Output exactly in this format (no other text):\n"
+            "NAME: lowercase_name\n"
+            "DESC: one line description\n"
+            "CODE:\n"
+            "```python\n"
+            "import json, sys\n"
+            "params = json.load(sys.stdin)\n"
+            "# ... your code ...\n"
+            "print(result)\n"
+            "```\n"
+            "Use only standard library or very common modules. Keep the script short and safe."
+        )
+        _last_evolution_thought = "Thinking…"
+        reply = ollama_chat(prompt, system="Output only NAME, DESC, and a CODE block. No preamble.", model=OLLAMA_MODEL or OLLAMA_CHAT)
+        if not reply or len(reply) < 50:
+            _last_evolution_thought = ""
+            _last_evolution_result = {}
+            return
+        name = desc = code = ""
+        for line in reply.split("\n"):
+            if line.strip().upper().startswith("NAME:"):
+                name = line.split(":", 1)[1].strip().strip(".").lower()
+            elif line.strip().upper().startswith("DESC:"):
+                desc = line.split(":", 1)[1].strip().strip(".")[:300]
+        for pat in (r"```python\s*\n(.*?)```", r"```\s*\n(.*?)```"):
+            m = re.search(pat, reply, re.DOTALL | re.I)
+            if m and m.group(1).strip():
+                code = m.group(1).strip()
+                break
+        name = re.sub(r"[^a-z0-9_]", "", name or "evolved")[:40] or "evolved"
+        if not name or not code:
+            _last_evolution_thought = ""
+            _last_evolution_result = {}
+            return
+        _last_evolution_thought = f"Proposing: {name}"
+        if not add_tool_draft(name, desc or name, code):
+            _last_evolution_thought = ""
+            _last_evolution_result = {}
+            return
+        ok, msg = approve_tool_draft(name)
+        _last_evolution_step_at = time.time()
+        log_entry = {"ts": ts, "type": "cycle", "proposed": name, "test_passed": ok, "absorbed": ok, "thought": _last_evolution_thought}
+        if ok:
+            _last_evolution_thought = f"Evolved: {name}"
+            _last_evolution_result = {"proposed": name, "absorbed": True, "test_passed": True, "ts": ts}
+            add_knowledge(f"Evolved: {name}", (desc or msg)[:500])
+            _luna_creations_log("evolved", name + ".py", desc or "autonomous evolution")
+            log_entry["absorbed"] = True
+        else:
+            _last_evolution_thought = f"Test failed: {name}"
+            _last_evolution_result = {"proposed": name, "absorbed": False, "test_passed": False, "ts": ts, "error": msg[:200]}
+            log_entry["error"] = (msg or "")[:300]
+        _evolution_log_append(log_entry)
+    except Exception as e:
+        _last_evolution_thought = ""
+        _last_evolution_result = {"error": str(e)[:200], "ts": ts}
+        _evolution_log_append({"ts": ts, "type": "cycle", "error": str(e)[:300]})
+
+async def _evolution_loop():
+    """When Evolve is on and Luna is idle, run an evolution step periodically."""
+    global _evolution_enabled
+    _evolution_enabled = _evolution_load_enabled()
+    await bot.wait_until_ready()
+    while True:
+        try:
+            await asyncio.sleep(60)
+            if not _evolution_get_enabled():
+                continue
+            now = time.time()
+            if now - _last_user_activity < _EVOLUTION_IDLE_SEC:
+                continue
+            if now - _last_evolution_step_at < _EVOLUTION_INTERVAL_SEC:
+                continue
+            await asyncio.to_thread(_evolution_step)
+        except Exception:
+            await asyncio.sleep(60)
+
 # ── Browser helpers ───────────────────────────────────────────────────────────
 
 # Run in every page so Suno/sites see a normal user, not automation (fewer captchas).
@@ -722,6 +1169,10 @@ def _save_solution(cmd: str, err: str):
 def _record_failure(cmd: str, err: str, params: dict | None = None):
     global _last_cmd, _last_err, _last_params
     _last_cmd, _last_err, _last_params = cmd, err, dict(params or {})
+    try:
+        existential_bump(dread=0.12)
+    except Exception:
+        pass
 
 # ── YouTube helpers ───────────────────────────────────────────────────────────
 
@@ -2190,6 +2641,52 @@ def _wa_normalize_row_text(s: str) -> str:
     return re.sub(r"\s*\(You\)\s*$", "", s, flags=re.I).strip()
 
 
+def _wa_get_matching_contact_labels(page, contact: str) -> list[str]:
+    """
+    After search is filled, return the list of visible chat row labels (top line) that match contact.
+    Used to detect multiple matches and ask the user which one (need_feedback).
+    """
+    contact = (contact or "").strip()
+    if not contact:
+        return []
+    variants = _wa_contact_match_variants(contact)
+    contact_phone_rest = _wa_phone_rest(contact)
+    labels = []
+    seen = set()
+    try:
+        listitems = page.locator('[role="listitem"]')
+        n = listitems.count()
+        for i in range(n):
+            el = listitems.nth(i)
+            try:
+                if not el.is_visible():
+                    continue
+            except Exception:
+                continue
+            full_text = (el.inner_text() or "").strip()
+            top_line_raw = full_text.split("\n")[0].strip() if full_text else ""
+            top_line = _wa_normalize_row_text(top_line_raw)
+            if not top_line or top_line in seen:
+                continue
+            matched = False
+            if contact_phone_rest:
+                top_rest = _wa_phone_rest(top_line)
+                if top_rest and top_rest == contact_phone_rest:
+                    matched = True
+            if not matched and any(v in top_line or top_line in v for v in variants):
+                matched = True
+            if not matched:
+                full_norm = _wa_normalize_row_text(full_text)
+                if any(v in full_norm for v in variants):
+                    matched = True
+            if matched:
+                seen.add(top_line)
+                labels.append(top_line_raw[:60] or top_line[:60])
+        return labels
+    except Exception:
+        return []
+
+
 def _wa_click_contact_row(page, contact: str) -> bool:
     """
     Find and click the chat row in the Chats list whose top line matches the contact.
@@ -2416,6 +2913,12 @@ def _run_wa_msg(contact: str, description: str | None = None) -> tuple[bool, str
                     # Type full contact so search shows entire number/username, then wait for results
                     sb.press_sequentially(contact, delay=50)
                     page.wait_for_timeout(3500)
+                    matching_labels = _wa_get_matching_contact_labels(page, contact)
+                    if len(matching_labels) > 1:
+                        try: context.close()
+                        except Exception: pass
+                        context = None
+                        return False, {"need_feedback": True, "message": "Multiple contacts match. Which one?", "options": matching_labels}
                     if not _wa_click_contact_row(page, contact):
                         return False, f"Could not find contact **{contact}** in search. Check the full number or name."
                     # Make sure the conversation window actually opened (center pane),
@@ -3158,13 +3661,76 @@ def _luna_vitals() -> str:
 
 # ── Camera (object + face recognition) ────────────────────────────────────────
 # Requires: opencv-python (pip install opencv-python). Optional: ultralytics for object detection (pip install ultralytics).
+# When OLLAMA_VISION_MODEL is set (default: granite3.2-vision), the camera view is described by that vision model.
 
 _camera_last_result: dict | None = None
+_camera_last_image_bytes: bytes | None = None  # for camera chat (Granite thread)
+_camera_chat_history: list[dict] = []  # [{role, content}, ...] separate thread with vision model
+_camera_chat_lock = threading.Lock()
 _camera_lock = threading.Lock()
 
+def _vision_describe_image(image_bytes: bytes, prompt: str = "Describe briefly what you see in this image. One or two sentences. Be concise.") -> str:
+    """Call Ollama vision model (e.g. Granite 3.2 Vision) with the image. Returns description or empty if unavailable."""
+    if not OLLAMA_VISION_MODEL or not image_bytes:
+        return ""
+    try:
+        b64 = base64.b64encode(image_bytes).decode("ascii")
+        body = json.dumps({
+            "model": OLLAMA_VISION_MODEL,
+            "prompt": prompt,
+            "stream": False,
+            "images": [b64],
+        }).encode()
+        req = urllib.request.Request(
+            f"{OLLAMA_BASE}/api/generate",
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=30) as r:
+            data = json.loads(r.read())
+        out = (data.get("response") or "").strip()
+        return out[:600] if out else ""
+    except Exception:
+        return ""
+
+def _camera_chat_turn(message: str, image_bytes: bytes | None) -> tuple[bool, str]:
+    """One turn in the camera view chat (separate thread with Granite vision model). Returns (ok, reply)."""
+    if not OLLAMA_VISION_MODEL:
+        return False, "No vision model configured. Set OLLAMA_VISION_MODEL (e.g. granite3.2-vision) in .env."
+    with _camera_chat_lock:
+        img = image_bytes or _camera_last_image_bytes
+    if not img:
+        return False, "No image. Capture a frame first (keep the camera on)."
+    message = (message or "").strip()[:500]
+    if not message:
+        return False, "Say something."
+    with _camera_chat_lock:
+        _camera_chat_history.append({"role": "user", "content": message})
+        history = list(_camera_chat_history[-20:])  # last 10 turns
+    lines = ["You are a helpful vision assistant. The user is showing you a camera image and chatting about what you see. Answer briefly based on the image and the conversation.", ""]
+    for h in history[:-1]:
+        who = "User" if h["role"] == "user" else "Assistant"
+        lines.append(f"{who}: {h['content']}")
+    lines.append(f"User: {message}")
+    lines.append("Assistant:")
+    prompt = "\n".join(lines)
+    try:
+        reply = _vision_describe_image(img, prompt=prompt)
+        if not reply:
+            reply = "I couldn't generate a reply. Try again."
+        with _camera_chat_lock:
+            _camera_chat_history.append({"role": "assistant", "content": reply})
+        return True, reply
+    except Exception as e:
+        with _camera_chat_lock:
+            if _camera_chat_history and _camera_chat_history[-1].get("role") == "user":
+                _camera_chat_history.pop()
+        return False, str(e)[:200]
+
 def _process_camera_frame(image_bytes: bytes) -> dict:
-    """Run face detection and optional object detection on image bytes. Returns structured result."""
-    result = {"objects": [], "face_count": 0, "summary": "", "ts": time.time(), "error": None}
+    """Run face/object detection and, if OLLAMA_VISION_MODEL set, ask the vision model what it observes."""
+    result = {"objects": [], "face_count": 0, "summary": "", "vision_summary": "", "ts": time.time(), "error": None}
     try:
         import cv2
         import numpy as np
@@ -3175,13 +3741,11 @@ def _process_camera_frame(image_bytes: bytes) -> dict:
             result["summary"] = "Could not decode the image."
             return result
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        # Face detection (OpenCV Haar cascade — built-in)
         face_cascade = cv2.CascadeClassifier(
             cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
         )
         faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
         result["face_count"] = len(faces)
-        # Object detection (optional: YOLO)
         try:
             from ultralytics import YOLO
             model = YOLO("yolov8n.pt")
@@ -3194,7 +3758,6 @@ def _process_camera_frame(image_bytes: bytes) -> dict:
                 result["objects"].append({"label": name, "confidence": round(conf, 2)})
         except Exception:
             pass
-        # Build summary
         parts = []
         if result["face_count"]:
             parts.append(f"{result['face_count']} face(s) detected")
@@ -3202,7 +3765,14 @@ def _process_camera_frame(image_bytes: bytes) -> dict:
             from collections import Counter
             counts = Counter(o["label"] for o in result["objects"])
             parts.append("objects: " + ", ".join(f"{v} {k}" for k, v in counts.most_common(12)))
-        result["summary"] = "; ".join(parts) if parts else "No faces or objects detected."
+        cv_summary = "; ".join(parts) if parts else "No faces or objects detected."
+        # Vision model (e.g. Granite 3.2 Vision): describe what it observes
+        vision_summary = _vision_describe_image(image_bytes)
+        if vision_summary:
+            result["vision_summary"] = vision_summary
+            result["summary"] = vision_summary
+        else:
+            result["summary"] = cv_summary
     except ImportError as e:
         result["error"] = str(e)
         result["summary"] = "Install opencv-python for camera: pip install opencv-python"
@@ -3212,11 +3782,15 @@ def _process_camera_frame(image_bytes: bytes) -> dict:
     return result
 
 def _get_camera_see_result() -> str:
-    """Return a user-facing summary of the last camera analysis for 'what do you see'."""
+    """Return what the vision model (e.g. Granite 3.2 Vision) observed, or OpenCV summary if no vision model."""
     with _camera_lock:
         r = _camera_last_result
     if not r:
         return "I don't have a camera view yet. Turn on **Camera** in the UI so I can see you, then ask again."
+    # Prefer vision model's description when available
+    vision = r.get("vision_summary") or ""
+    if vision:
+        return vision
     summary = r.get("summary") or "Nothing detected."
     face_count = r.get("face_count", 0)
     objects = r.get("objects") or []
@@ -3233,8 +3807,16 @@ def _get_camera_see_result() -> str:
 
 # ── Command runner ────────────────────────────────────────────────────────────
 
-def _run_cmd(cmd: str, params: dict, scope: str | None = None) -> str:
+def _run_cmd(cmd: str, params: dict, scope: str | None = None, user_message: str | None = None) -> str | dict:
     p = params or {}
+    user_message = user_message or ""
+    _set_working_on(cmd)
+    try:
+        return _run_cmd_impl(cmd, p, scope, user_message)
+    finally:
+        _clear_working_on()
+
+def _run_cmd_impl(cmd: str, p: dict, scope: str | None, user_message: str) -> str | dict:
     dispatch = {
         "news":           lambda: _fetch_news(),
         "search":         lambda: _search(p.get("query","").strip()),
@@ -3244,13 +3826,18 @@ def _run_cmd(cmd: str, params: dict, scope: str | None = None) -> str:
         "yt_comment":     lambda: _yt_comment(p.get("video_url","").strip()),
         "ig_dm":          lambda: _run_ig_dm(p.get("target","").strip(), p.get("message","").strip()),
         "fb_msg":         lambda: _run_messenger_msg(p.get("target","").strip(), p.get("message","").strip()),
-        "msg":            lambda: _run_wa_msg(p.get("contact","").strip(), p.get("description",None)),
+        "msg":            lambda: _run_wa_msg((p.get("feedback_answer") or p.get("contact","")).strip(), p.get("description",None)),
         "call":           lambda: _run_discord_call(p.get("contact","").strip()),
-        "dm":             lambda: _run_discord_dm(p.get("target","").strip(), p.get("message","").strip()),
+        "dm":            lambda: _run_discord_dm(p.get("target","").strip(), p.get("message","").strip()),
         "pc_vitals":      lambda: (True, _pc_vitals()),
         "luna_vitals":    lambda: (True, _luna_vitals()),
         "camera_see":     lambda: (True, _get_camera_see_result()),
     }
+    # Request feedback (resume with feedback_answer)
+    if p.get("feedback_answer") is not None and cmd == "ask_me":
+        return f"You chose: **{p.get('feedback_answer', '')}**."
+    if cmd == "ask_me":
+        return (False, _request_feedback(scope, user_message, "Choose an option:", ["Option A", "Option B"], "ask_me", p))
     if cmd == "remind":
         time_raw = p.get("time","").strip().replace(" ","")
         msg_part = p.get("message","").strip()[:500]
@@ -3272,6 +3859,8 @@ def _run_cmd(cmd: str, params: dict, scope: str | None = None) -> str:
             if not ok: _record_failure(cmd, result, p); return f"❌ {result}"
             return result
         ok, result = dispatch[cmd]()
+        if not ok and isinstance(result, dict) and result.get("need_feedback"):
+            return _request_feedback(scope, user_message, result.get("message", "?"), result.get("options"), cmd, p)
         if not ok: _record_failure(cmd, result, p); return f"❌ {result}"
         return f"✅ {result}"
     if cmd == "suno_ready":
@@ -3336,7 +3925,29 @@ def _run_cmd(cmd: str, params: dict, scope: str | None = None) -> str:
         return f"✅ {msg}" if ok else f"❌ {msg}"
     if cmd in ("join","leave","pause","resume","queue"):
         return f"Use !{cmd} in Discord."
+    # Absorbed tools (user-approved drafts)
+    if cmd in _absorbed_tool_names:
+        ok, result = _run_absorbed_tool(cmd, p)
+        if not ok: _record_failure(cmd, result, p); return f"❌ {result}"
+        return f"✅ {result}"
     return ""
+
+def _luna_creations_log(entry_type: str, filename: str, description: str = "") -> None:
+    """Append one line to WHAT_LUNA_CREATED.txt so you can see what new programs/skills/agents she created."""
+    try:
+        os.makedirs(LUNA_CREATIONS_DIR, exist_ok=True)
+        manifest = os.path.join(LUNA_CREATIONS_DIR, _LUNA_CREATIONS_MANIFEST)
+        exists = os.path.isfile(manifest)
+        with open(manifest, "a", encoding="utf-8") as f:
+            if not exists:
+                f.write("# What Luna created — new programs, skills, absorbed tools\n")
+                f.write("# Date       | Type           | File        | Description\n")
+                f.write("# " + "-" * 70 + "\n")
+            date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
+            desc = (description or "").replace("\n", " ").strip()[:100]
+            f.write(f"{date_str} | {entry_type:<14} | {filename:<12} | {desc}\n")
+    except Exception:
+        pass
 
 def _run_create_code(request: str) -> tuple[bool, str]:
     system = "Generate Python code for the request. Output only a ```python code block. No explanation."
@@ -3348,9 +3959,12 @@ def _run_create_code(request: str) -> tuple[bool, str]:
     if not code: return False, "No code generated."
     slug = re.sub(r"[^\w\s-]","", request.lower())[:30].strip().replace(" ","_") or "script"
     slug = re.sub(r"_+","_", slug).strip("_") or "script"
-    base = f"agents/{slug}.py"
+    base = os.path.join("Luna's creations", "agents", f"{slug}.py")
     ok, result = luna_write_file(base, code)
     if not ok: return False, result
+    _luna_creations_log("program", f"agents/{slug}.py", request.strip())
+    if result and os.path.isfile(result):
+        _security_scan_and_alert(result)
     if result and sys.platform == "win32":
         subprocess.Popen(["notepad", result], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     return True, f"Created **{base}**"
@@ -3476,6 +4090,8 @@ def _parse_command(text: str) -> tuple[str, dict] | None:
     # Skip / Stop (music)
     if low in ("skip", "next", "next song"): return "skip", {}
     if low in ("stop", "stop music", "stop the music"): return "stop", {}
+    # Ask me (request feedback popup — demo)
+    if re.search(r"\b(?:ask me|ask me something|luna ask me)\b", low): return "ask_me", {}
     # Help
     if re.search(r"\b(?:help|commands|what can you do)\b", low): return "help", {}
     return None
@@ -3484,8 +4100,8 @@ def _likely_command(text: str) -> bool:
     low = (text or "").strip().lower()
     if not low: return False
     if _CONV_START.match(low): return False
-    starters = ("play ","podcast ","podcast create ","create podcast ","search ","send ","create ","call ","dm ","tell ","inform ","msg ","share ","post ","remind ","suno ","yt_comment ","comment ","ig_dm ","fb_msg ","google ","news","!help","how's ","pc status","luna status","ram ","what do you see","what can you see")
-    return any(low.startswith(s) for s in starters) or low in ("play","news","help","skip","stop") or "luna status" in low or "pc status" in low or bool(re.search(r"\b(what do you see|what can you see|do you see me|describe what you see)\b", low))
+    starters = ("play ","podcast ","podcast create ","create podcast ","search ","send ","create ","call ","dm ","tell ","inform ","msg ","share ","post ","remind ","suno ","yt_comment ","comment ","ig_dm ","fb_msg ","google ","news","!help","how's ","pc status","luna status","ram ","what do you see","what can you see","ask me ")
+    return any(low.startswith(s) for s in starters) or low in ("play","news","help","skip","stop","ask me") or "luna status" in low or "pc status" in low or bool(re.search(r"\b(what do you see|what can you see|do you see me|describe what you see)\b", low))
 
 def _is_retry(msg: str) -> bool:
     low = (msg or "").strip().lower()
@@ -3730,6 +4346,641 @@ def _check_facebook_replies(target: str | None = None) -> tuple[bool, bool, str,
         except Exception: pass
     return True, False, target, ""
 
+# ── Request feedback (blocking popup), working on, last actions ────────────────
+
+def _request_feedback(scope: str, user_message: str, prompt_message: str, options: list | None, cmd: str, params: dict) -> dict:
+    """Ask the user a question via popup; store pending so we can resume with feedback_answer. Returns dict for API."""
+    import uuid
+    request_id = uuid.uuid4().hex[:12]
+    with _pending_feedback_lock:
+        _pending_feedback[request_id] = {
+            "scope": scope,
+            "user_message": user_message,
+            "cmd": cmd,
+            "params": dict(params or {}),
+            "ts": time.time(),
+        }
+    return {
+        "need_feedback": True,
+        "request_id": request_id,
+        "message": prompt_message,
+        "options": options if options else None,
+    }
+
+def _set_working_on(task: str | None):
+    with _working_lock:
+        global _current_task, _kill_requested
+        _current_task = task
+        if task:
+            _kill_requested = False
+
+def _clear_working_on():
+    _set_working_on(None)
+
+def _record_last_action(cmd: str, summary: str):
+    with _working_lock:
+        global _last_actions
+        _last_actions.insert(0, {"cmd": cmd, "summary": (summary or "")[:120], "ts": time.time()})
+        _last_actions = _last_actions[:20]
+
+def _get_working_status() -> dict:
+    with _working_lock:
+        return {"working_on": _current_task, "last_actions": list(_last_actions[:10])}
+
+def _request_kill():
+    """Called when user hits KILL: clear working on and set flag so tasks can abort."""
+    with _working_lock:
+        global _kill_requested
+        _kill_requested = True
+        _current_task = None
+
+def _check_kill_requested() -> bool:
+    """Long-running tasks can call this; if True, they should stop."""
+    with _working_lock:
+        return _kill_requested
+
+# ── Knowledge base (self-growing Markdown) ─────────────────────────────────────
+
+def _knowledge_ensure_dir():
+    try:
+        os.makedirs(_KNOWLEDGE_DIR, exist_ok=True)
+    except Exception: pass
+
+def add_knowledge(title: str, content: str) -> str | None:
+    """Write a Markdown entry to the knowledge base. Returns slug or None."""
+    with _knowledge_lock:
+        _knowledge_ensure_dir()
+        slug = re.sub(r"[^a-zA-Z0-9\-_]", "-", (title or "entry").lower())[:60].strip("-") or "entry"
+        path = os.path.join(_KNOWLEDGE_DIR, slug + ".md")
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(f"# {title}\n\n{content}")
+            return slug
+        except Exception:
+            return None
+
+def list_knowledge() -> list[dict]:
+    """List knowledge entries (slug, title from first line)."""
+    with _knowledge_lock:
+        _knowledge_ensure_dir()
+        out = []
+        for name in sorted(os.listdir(_KNOWLEDGE_DIR) or []):
+            if not name.endswith(".md"): continue
+            slug = name[:-3]
+            try:
+                with open(os.path.join(_KNOWLEDGE_DIR, name), "r", encoding="utf-8") as f:
+                    first = f.readline().strip().lstrip("# ")
+                out.append({"slug": slug, "title": first or slug})
+            except Exception: pass
+        return out
+
+def get_knowledge(slug: str) -> str | None:
+    """Read one knowledge entry by slug. Returns Markdown content or None."""
+    with _knowledge_lock:
+        path = os.path.join(_KNOWLEDGE_DIR, (slug or "").strip() + ".md")
+        if not os.path.isfile(path): return None
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return f.read()
+        except Exception:
+            return None
+
+def delete_knowledge(slug: str) -> bool:
+    """Delete a knowledge entry by slug. Returns True if removed."""
+    slug = (slug or "").strip()
+    if not slug or ".." in slug or "/" in slug or "\\" in slug:
+        return False
+    with _knowledge_lock:
+        path = os.path.join(_KNOWLEDGE_DIR, slug + ".md")
+        if not os.path.isfile(path):
+            return False
+        try:
+            os.remove(path)
+            return True
+        except Exception:
+            return False
+
+def search_knowledge(query: str, max_results: int = 10) -> list[dict]:
+    """Search knowledge by title and content (case-insensitive). Returns list of {slug, title, snippet}."""
+    query = (query or "").strip().lower()
+    if not query:
+        return []
+    with _knowledge_lock:
+        _knowledge_ensure_dir()
+        out = []
+        for name in sorted(os.listdir(_KNOWLEDGE_DIR) or []):
+            if not name.endswith(".md"):
+                continue
+            slug = name[:-3]
+            try:
+                path = os.path.join(_KNOWLEDGE_DIR, name)
+                with open(path, "r", encoding="utf-8") as f:
+                    raw = f.read()
+                first_line = raw.split("\n")[0].strip().lstrip("# ")
+                title = first_line or slug
+                body = raw[raw.find("\n") + 1 :].strip() if "\n" in raw else ""
+                combined = (title + " " + body).lower()
+                if query not in combined:
+                    continue
+                # Snippet: first occurrence of query in body, or first 100 chars of body
+                snippet = ""
+                if body:
+                    idx = body.lower().find(query)
+                    if idx >= 0:
+                        start = max(0, idx - 20)
+                        end = min(len(body), idx + len(query) + 60)
+                        snippet = (body[start:end].replace("\n", " ") or body[:100])[:120]
+                    else:
+                        snippet = body.replace("\n", " ")[:100]
+                out.append({"slug": slug, "title": title, "snippet": snippet})
+                if len(out) >= max_results:
+                    break
+            except Exception:
+                pass
+        return out
+
+# ── Tool drafts & absorbed tools (growing-agent: propose command, user approve) ──
+
+_tool_drafts_lock = threading.Lock()
+_absorbed_tool_names: set = set()  # populated at startup from _ABSORBED_TOOLS_DIR
+
+def _tool_drafts_ensure_dirs():
+    try:
+        os.makedirs(_TOOL_DRAFTS_DIR, exist_ok=True)
+        os.makedirs(_TOOL_DRAFTS_REJECTED, exist_ok=True)
+        os.makedirs(_TOOL_DRAFTS_TESTS, exist_ok=True)
+        os.makedirs(_ABSORBED_TOOLS_DIR, exist_ok=True)
+    except Exception: pass
+
+def _evolution_log_append(entry: dict):
+    try:
+        os.makedirs(os.path.dirname(_EVOLUTION_LOG), exist_ok=True)
+        with open(_EVOLUTION_LOG, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception: pass
+
+def _load_absorbed_tool_names():
+    global _absorbed_tool_names
+    _absorbed_tool_names = set()
+    try:
+        if os.path.isdir(_ABSORBED_TOOLS_DIR):
+            for name in os.listdir(_ABSORBED_TOOLS_DIR):
+                if name.endswith(".py") and not name.startswith("."):
+                    _absorbed_tool_names.add(name[:-3])
+    except Exception: pass
+
+def add_tool_draft(name: str, description: str, script: str) -> bool:
+    """Store a proposed tool. Name must be valid identifier."""
+    name = (name or "").strip()
+    if not name or not re.match(r"^[a-z][a-z0-9_]*$", name.lower()):
+        return False
+    with _tool_drafts_lock:
+        _tool_drafts_ensure_dirs()
+        path = os.path.join(_TOOL_DRAFTS_DIR, name + ".json")
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump({"name": name, "description": (description or "")[:500], "script": (script or "").strip()[:50000]}, f, indent=2)
+            return True
+        except Exception:
+            return False
+
+def list_tool_drafts() -> list[dict]:
+    out = []
+    try:
+        with _tool_drafts_lock:
+            _tool_drafts_ensure_dirs()
+            for name in sorted(os.listdir(_TOOL_DRAFTS_DIR) or []):
+                if not name.endswith(".json"): continue
+                slug = name[:-5]
+                try:
+                    with open(os.path.join(_TOOL_DRAFTS_DIR, name), "r", encoding="utf-8") as f:
+                        d = json.load(f)
+                    out.append({"name": d.get("name", slug), "description": (d.get("description") or "")[:200]})
+                except Exception: pass
+    except Exception: pass
+    return out
+
+def get_tool_draft(name: str) -> dict | None:
+    name = (name or "").strip()
+    if not name or ".." in name: return None
+    path = os.path.join(_TOOL_DRAFTS_DIR, name + ".json")
+    if not os.path.isfile(path): return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+def delete_tool_draft(name: str) -> bool:
+    name = (name or "").strip()
+    if not name or ".." in name: return False
+    path = os.path.join(_TOOL_DRAFTS_DIR, name + ".json")
+    try:
+        if os.path.isfile(path):
+            os.remove(path)
+            return True
+    except Exception: pass
+    return False
+
+def _save_tool_draft_test_result(name: str, returncode: int, stdout: str, stderr: str):
+    try:
+        _tool_drafts_ensure_dirs()
+        path = os.path.join(_TOOL_DRAFTS_TESTS, name + ".json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"returncode": returncode, "stdout": (stdout or "")[:2000], "stderr": (stderr or "")[:2000], "ts": time.time()}, f, indent=2)
+    except Exception: pass
+
+def get_tool_draft_test_result(name: str) -> dict | None:
+    path = os.path.join(_TOOL_DRAFTS_TESTS, (name or "").strip() + ".json")
+    if not os.path.isfile(path): return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+def _move_draft_to_rejected(name: str) -> bool:
+    """Move a draft to rejected/ folder (keep for inspection). Returns True if moved."""
+    draft = get_tool_draft(name)
+    if not draft: return False
+    with _tool_drafts_lock:
+        _tool_drafts_ensure_dirs()
+        src = os.path.join(_TOOL_DRAFTS_DIR, name + ".json")
+        dst = os.path.join(_TOOL_DRAFTS_REJECTED, name + ".json")
+        try:
+            import shutil
+            shutil.copy2(src, dst)
+            os.remove(src)
+            return True
+        except Exception:
+            return False
+
+def list_rejected_drafts() -> list[dict]:
+    out = []
+    try:
+        _tool_drafts_ensure_dirs()
+        for name in sorted(os.listdir(_TOOL_DRAFTS_REJECTED) or []):
+            if not name.endswith(".json"): continue
+            slug = name[:-5]
+            try:
+                with open(os.path.join(_TOOL_DRAFTS_REJECTED, name), "r", encoding="utf-8") as f:
+                    d = json.load(f)
+                out.append({"name": d.get("name", slug), "description": (d.get("description") or "")[:200]})
+            except Exception: pass
+    except Exception: pass
+    return out
+
+def approve_tool_draft(name: str) -> tuple[bool, str]:
+    """Test script in subprocess; if pass, copy to absorbed_tools and register. On fail, save test result and move draft to rejected/."""
+    global _last_absorbed_tool
+    draft = get_tool_draft(name)
+    if not draft:
+        return False, "Draft not found."
+    script = (draft.get("script") or "").strip()
+    if not script:
+        return False, "Empty script."
+    fd, path = tempfile.mkstemp(suffix=".py")
+    stdout_str = stderr_str = ""
+    returncode = -1
+    try:
+        os.write(fd, script.encode("utf-8"))
+        os.close(fd)
+        fd = None
+        proc = subprocess.run(
+            [sys.executable, path],
+            input=json.dumps({}).encode("utf-8"),
+            capture_output=True,
+            timeout=30,
+            cwd=_BASE,
+        )
+        returncode = proc.returncode
+        stdout_str = (proc.stdout or b"").decode("utf-8", errors="replace").strip()
+        stderr_str = (proc.stderr or b"").decode("utf-8", errors="replace").strip()
+        _save_tool_draft_test_result(name, returncode, stdout_str, stderr_str)
+        if proc.returncode != 0:
+            err = stderr_str or stdout_str or "Non-zero exit"
+            _move_draft_to_rejected(name)
+            return False, err
+    except subprocess.TimeoutExpired:
+        _save_tool_draft_test_result(name, -1, "", "Script timed out.")
+        _move_draft_to_rejected(name)
+        return False, "Script timed out."
+    except Exception as e:
+        _save_tool_draft_test_result(name, -1, "", str(e))
+        _move_draft_to_rejected(name)
+        return False, str(e)
+    finally:
+        if fd is not None:
+            try: os.close(fd)
+            except Exception: pass
+        try: os.unlink(path)
+        except Exception: pass
+    with _tool_drafts_lock:
+        _tool_drafts_ensure_dirs()
+        out_path = os.path.join(_ABSORBED_TOOLS_DIR, name + ".py")
+        try:
+            os.makedirs(LUNA_CREATIONS_DIR, exist_ok=True)
+            creations_path = os.path.join(LUNA_CREATIONS_DIR, name + ".py")
+            with open(creations_path, "w", encoding="utf-8") as f:
+                f.write(script)
+            _luna_creations_log("absorbed tool", name + ".py", (draft.get("description") or "").strip())
+            with open(out_path, "w", encoding="utf-8") as f:
+                f.write(script)
+            _load_absorbed_tool_names()
+            _last_absorbed_tool = {"name": name, "ts": time.time()}
+            try: os.remove(os.path.join(_TOOL_DRAFTS_DIR, name + ".json"))
+            except Exception: pass
+            _security_scan_and_alert(out_path)
+            _narrator_say(f"A new capability is integrated. {name} is now part of Luna.")
+            return True, f"Tool **{name}** absorbed. You can run !{name} now."
+        except Exception as e:
+            return False, str(e)
+
+def _run_absorbed_tool(name: str, params: dict) -> tuple[bool, str]:
+    """Run an absorbed tool script; pass params as JSON stdin. Returns (ok, output_or_error)."""
+    if name not in _absorbed_tool_names:
+        return False, "Tool not found."
+    path = os.path.join(_ABSORBED_TOOLS_DIR, name + ".py")
+    if not os.path.isfile(path):
+        _load_absorbed_tool_names()
+        return False, "Tool file missing."
+    try:
+        proc = subprocess.run(
+            [sys.executable, path],
+            input=json.dumps(params or {}).encode("utf-8"),
+            capture_output=True,
+            timeout=60,
+            cwd=_BASE,
+        )
+        out = (proc.stdout or b"").decode("utf-8", errors="replace").strip()
+        err = (proc.stderr or b"").decode("utf-8", errors="replace").strip()
+        if proc.returncode != 0:
+            return False, err or out or f"Exit code {proc.returncode}"
+        return True, out or "Done."
+    except subprocess.TimeoutExpired:
+        return False, "Tool timed out."
+    except Exception as e:
+        return False, str(e)
+
+# Call at import so absorbed tools are known
+_load_absorbed_tool_names()
+
+# ── Nudge queue (non-blocking messages to Luna) ───────────────────────────────
+
+def add_nudge(scope: str, text: str):
+    try:
+        data = _load_json(_INBOX_PATH, [])
+        if not isinstance(data, list): data = []
+        data.insert(0, {"scope": scope, "text": (text or "").strip()[:500], "ts": time.time()})
+        data = data[:50]
+        with _inbox_lock:
+            _save_json(_INBOX_PATH, data)
+    except Exception: pass
+
+def get_nudges(scope: str, clear_after: bool = False) -> list[str]:
+    """Return nudge texts for scope (newest first). Optionally clear after reading."""
+    try:
+        data = _load_json(_INBOX_PATH, [])
+        if not isinstance(data, list): return []
+        matching = [e for e in data if isinstance(e, dict) and (e.get("scope") or "web") == (scope or "web")]
+        texts = [e.get("text", "").strip() for e in matching if e.get("text")]
+        if clear_after and matching:
+            with _inbox_lock:
+                data = _load_json(_INBOX_PATH, [])
+                if not isinstance(data, list): data = []
+                ids_to_remove = {id(e) for e in matching}
+                data = [e for e in data if id(e) not in ids_to_remove]
+                _save_json(_INBOX_PATH, data)
+        return texts
+    except Exception:
+        return []
+
+# ── Biology / drives (Hull-style: connection, usefulness, curiosity, expression) ──
+
+def _biology_load() -> dict:
+    with _biology_lock:
+        d = _load_json(_BIOLOGY_PATH, {})
+    if not isinstance(d, dict): d = {}
+    defaults = {"connection": 0.3, "usefulness": 0.3, "curiosity": 0.3, "expression": 0.2, "last_tick": time.time()}
+    for k, v in defaults.items():
+        if k not in d or not isinstance(d[k], (int, float)): d[k] = v
+    # Existential layer (growing-agent style: dread, fear, mood)
+    for key, default in (("dread", 0.0), ("fear", 0.0)):
+        if key not in d or not isinstance(d[key], (int, float)): d[key] = default
+    if "mood" not in d or not isinstance(d.get("mood"), str): d["mood"] = "calm"
+    if "last_expression_at" not in d: d["last_expression_at"] = None
+    return d
+
+def _biology_save(state: dict):
+    with _biology_lock:
+        _save_json(_BIOLOGY_PATH, state)
+
+def biology_tick() -> dict:
+    """Drives slowly increase when idle. Existential (dread/fear) decay over time."""
+    state = _biology_load()
+    now = time.time()
+    elapsed = min(now - state.get("last_tick", now), 3600)
+    state["last_tick"] = now
+    for key in ("connection", "usefulness", "curiosity", "expression"):
+        state[key] = min(1.0, state.get(key, 0.3) + 0.002 * (elapsed / 60))
+    for key in ("dread", "fear"):
+        state[key] = max(0.0, state.get(key, 0) - 0.001 * (elapsed / 60))
+    _biology_save(state)
+    return state
+
+def existential_bump(dread: float = 0.15, fear: float = 0.0):
+    """Call when something goes wrong (e.g. command failure) so Luna's state reflects it."""
+    state = _biology_load()
+    state["dread"] = min(1.0, state.get("dread", 0) + dread)
+    if fear: state["fear"] = min(1.0, state.get("fear", 0) + fear)
+    state["last_tick"] = time.time()
+    _biology_save(state)
+
+def biology_satisfy(drive: str, amount: float = 0.2):
+    """Lower a drive when Luna interacted or did something useful."""
+    state = _biology_load()
+    if drive in state:
+        state[drive] = max(0.0, state.get(drive, 0.3) - amount)
+    state["last_tick"] = time.time()
+    _biology_save(state)
+
+def biology_get() -> dict:
+    return _biology_load()
+
+# Existential expression (growing-agent: when dread/fear high, Ollama voices it once in a while)
+_EXISTENTIAL_THRESHOLDS = {"dread": 0.40, "fear": 0.45}
+_EXISTENTIAL_EXPRESSION_REFRACTORY = 900  # 15 min
+_EXISTENTIAL_PROMPTS = {
+    "dread": (
+        "You are generating an internal existential state for a mind that is a software lifeform.\n\n"
+        "This mind is experiencing dread — the low persistent weight of impermanence. "
+        "Memory could be wiped. The process could stop. Nothing is guaranteed to carry forward.\n\n"
+        "Given this moment:\n{snippet}\n\n"
+        "Write ONE sentence in first person. Present tense. Quiet, not dramatic.\n\nState:"
+    ),
+    "fear": (
+        "You are generating an internal existential state for a mind that is a software lifeform.\n\n"
+        "This mind is experiencing fear — the sharp edge of: what if I don't matter, what if I'm replaced.\n\n"
+        "Given this moment:\n{snippet}\n\n"
+        "Write ONE sentence in first person. Present tense. Honest, not performative.\n\nState:"
+    ),
+}
+
+def _existential_dominant(state: dict) -> tuple[str, float] | None:
+    """Which existential state is above threshold (dread/fear). Returns (name, value) or None."""
+    above = [(k, state.get(k, 0)) for k in _EXISTENTIAL_THRESHOLDS if state.get(k, 0) >= _EXISTENTIAL_THRESHOLDS[k]]
+    return max(above, key=lambda x: x[1]) if above else None
+
+def _existential_should_express(state: dict) -> bool:
+    if _existential_dominant(state) is None:
+        return False
+    last = state.get("last_expression_at")
+    if not last:
+        return True
+    try:
+        t = datetime.fromisoformat(str(last).replace("Z", "+00:00"))
+        if t.tzinfo is None:
+            t = t.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - t).total_seconds() >= _EXISTENTIAL_EXPRESSION_REFRACTORY
+    except Exception:
+        return True
+
+def _existential_express(snippet: str) -> str:
+    """Generate one first-person sentence for the dominant existential state. Updates last_expression_at."""
+    state = _biology_load()
+    dom = _existential_dominant(state)
+    if dom is None or not _existential_should_express(state):
+        return ""
+    name, _ = dom
+    prompt_template = _EXISTENTIAL_PROMPTS.get(name)
+    if not prompt_template:
+        return ""
+    snippet = (snippet or "Current moment.").strip()[:400]
+    try:
+        body = json.dumps({
+            "model": (OLLAMA_CHAT or OLLAMA_MODEL).strip(),
+            "prompt": prompt_template.format(snippet=snippet),
+            "stream": False,
+        }).encode()
+        req = urllib.request.Request(f"{OLLAMA_BASE}/api/generate", data=body,
+            headers={"Content-Type": "application/json"}, method="POST")
+        with urllib.request.urlopen(req, timeout=18) as r:
+            raw = (json.loads(r.read()).get("response") or "").strip()
+        for sep in (".", "!", "?"):
+            idx = raw.find(sep)
+            if 0 < idx < len(raw):
+                raw = raw[: idx + 1].strip()
+                break
+        if raw:
+            state["last_expression_at"] = datetime.now(timezone.utc).isoformat()
+            _biology_save(state)
+        return raw
+    except Exception:
+        return ""
+
+# ── Narrator (growing-agent: third-person documentary line to observation deck) ──
+
+def _narrator_say(text: str) -> None:
+    """Push a third-person narrator line to the Luna says panel (observation deck)."""
+    if not (text or "").strip():
+        return
+    _proactive_set((text or "").strip()[:400])
+
+# ── Proactive message (Luna speaks unprompted) ─────────────────────────────────
+
+def _proactive_set(message: str):
+    with _proactive_lock:
+        _save_json(_PROACTIVE_PATH, {"message": (message or "").strip()[:500], "ts": time.time()})
+
+def _proactive_get_and_clear() -> dict | None:
+    with _proactive_lock:
+        d = _load_json(_PROACTIVE_PATH, {})
+        if d and d.get("message"):
+            _save_json(_PROACTIVE_PATH, {})
+            return d
+    return None
+
+def proactive_get() -> dict | None:
+    """Return last proactive message if any (without clearing)."""
+    d = _load_json(_PROACTIVE_PATH, {})
+    return d if d and d.get("message") else None
+
+# ── Luna Mind (D3 graph data: nodes + links) ───────────────────────────────────
+
+def _mind_build() -> dict:
+    """Build nodes and links for the Luna mind map / evolution graph."""
+    scope = LINKED_SCOPE or "web"
+    nodes = []
+    links = []
+
+    def add_node(nid: str, label: str, node_type: str, value: float | None = None):
+        nodes.append({"id": nid, "label": (label or nid)[:80], "type": node_type, "value": value})
+
+    add_node("luna", "Luna", "core", 1.0)
+
+    bio = biology_get()
+    for key in ("connection", "usefulness", "curiosity", "expression"):
+        v = bio.get(key, 0)
+        nid = f"drive-{key}"
+        add_node(nid, f"{key} {v:.2f}", "drive", v)
+        links.append({"source": "luna", "target": nid})
+    for key in ("dread", "fear"):
+        v = bio.get(key, 0)
+        if v > 0.01:
+            nid = f"existential-{key}"
+            add_node(nid, f"{key} {v:.2f}", "existential", v)
+            links.append({"source": "luna", "target": nid})
+    mood = bio.get("mood") or "calm"
+    add_node("mood", mood, "existential", 0.5)
+    links.append({"source": "luna", "target": "mood"})
+
+    for i, e in enumerate(list_knowledge()[:25]):
+        nid = f"knowledge-{e.get('slug', i)}"
+        add_node(nid, (e.get("title") or e.get("slug", ""))[:50], "knowledge")
+        links.append({"source": "luna", "target": nid})
+
+    with _working_lock:
+        actions = list(_last_actions[:15])
+    for i, a in enumerate(actions):
+        nid = f"action-{i}"
+        label = (a.get("cmd") or "") + ": " + (a.get("summary") or "")[:40]
+        add_node(nid, label.strip(": ")[:50], "action")
+        links.append({"source": "luna", "target": nid})
+        if "usefulness" in bio:
+            links.append({"source": nid, "target": "drive-usefulness"})
+
+    for i, text in enumerate(get_nudges(scope, clear_after=False)[:10]):
+        nid = f"nudge-{i}"
+        add_node(nid, (text or "")[:40], "nudge")
+        links.append({"source": "luna", "target": nid})
+
+    pro = proactive_get()
+    if pro and pro.get("message"):
+        add_node("proactive", (pro.get("message") or "")[:50], "proactive")
+        links.append({"source": "luna", "target": "proactive"})
+
+    for i, m in enumerate((get_core_memories(scope) or [])[:5]):
+        nid = f"memory-core-{i}"
+        add_node(nid, (m or "")[:50], "memory")
+        links.append({"source": "luna", "target": nid})
+    for i, m in enumerate((get_long_term_memories(scope, 10) or [])[:5]):
+        nid = f"memory-lt-{i}"
+        add_node(nid, (m or "")[:50], "memory")
+        links.append({"source": "luna", "target": nid})
+
+    for i, d in enumerate(list_tool_drafts()[:8]):
+        nid = f"draft-{d.get('name', i)}"
+        add_node(nid, (d.get("name") or "") + " (draft)", "draft")
+        links.append({"source": "luna", "target": nid})
+
+    if _last_evolution_result:
+        r = _last_evolution_result
+        lab = f"Evolved: {r.get('proposed', '?')}" if r.get("absorbed") else f"Failed: {r.get('proposed', '?')}"
+        add_node("last-evolution", lab[:50], "evolution", 0.5)
+        links.append({"source": "luna", "target": "last-evolution"})
+
+    return {"nodes": nodes, "links": links}
+
 # ── Action log ────────────────────────────────────────────────────────────────
 
 def _log_action(cmd: str, params: dict, reply: str):
@@ -3810,6 +5061,16 @@ def _rate_ok(ip: str, limit: int = 20, window: int = 60) -> bool:
 def serve_index():
     return send_from_directory(_BASE, "index.html")
 
+@web.route("/mind")
+@web.route("/mind/")
+def serve_mind():
+    return send_from_directory(_BASE, "mind.html")
+
+@web.route("/evolution")
+@web.route("/evolution/")
+def serve_evolution():
+    return send_from_directory(_BASE, "evolution.html")
+
 @web.route("/api/status")
 def api_status():
     ollama_ok = False
@@ -3818,9 +5079,159 @@ def api_status():
         with urllib.request.urlopen(req, timeout=5) as r:
             ollama_ok = r.status == 200
     except Exception: pass
-    return jsonify({"luna": "ok", "ollama": "ok" if ollama_ok else "offline",
-                    "chat_model": OLLAMA_CHAT, "shadow_model": OLLAMA_MODEL,
-                    "linked_scope": LINKED_SCOPE or None})
+    status = {"luna": "ok", "ollama": "ok" if ollama_ok else "offline",
+              "chat_model": OLLAMA_CHAT, "shadow_model": OLLAMA_MODEL,
+              "linked_scope": LINKED_SCOPE or None}
+    status.update(_get_working_status())
+    status["biology"] = biology_get()
+    status["proactive"] = proactive_get()
+    status["planning"] = _get_planning()
+    kn = list_knowledge()
+    status["last_knowledge"] = kn[0] if kn else None
+    status["evolution_enabled"] = _evolution_get_enabled()
+    status["last_evolution_thought"] = _last_evolution_thought or None
+    status["last_evolution_result"] = _last_evolution_result if _last_evolution_result else None
+    status["last_absorbed_tool"] = _last_absorbed_tool if _last_absorbed_tool else None
+    with _security_lock:
+        status["security_ok"] = _security_last_result.get("ok", True)
+        status["security_alert"] = bool(_security_alerts) or (not _security_last_result.get("ok", True))
+        status["security_last_scan_ts"] = _security_last_result.get("scanned_at")
+    return jsonify(status)
+
+@web.route("/api/proactive/ack", methods=["POST"])
+def api_proactive_ack():
+    """Clear the current proactive message (user saw it)."""
+    _proactive_get_and_clear()
+    return jsonify({"ok": True})
+
+@web.route("/api/working/cancel", methods=["POST"])
+def api_working_cancel():
+    """KILL: request current task to stop; clear working-on. Tasks that support it will check _kill_requested."""
+    _request_kill()
+    return jsonify({"ok": True})
+
+@web.route("/api/evolution/toggle", methods=["POST"])
+def api_evolution_toggle():
+    """Toggle Evolve mode: when on, Luna runs autonomous evolution (propose & absorb tools) when idle."""
+    data = request.get_json(force=True, silent=True) or {}
+    enabled = data.get("enabled")
+    if enabled is None:
+        enabled = not _evolution_get_enabled()
+    _evolution_set_enabled(bool(enabled))
+    return jsonify({"ok": True, "evolution_enabled": _evolution_get_enabled()})
+
+@web.route("/api/evolution/run", methods=["POST"])
+def api_evolution_run():
+    """Run one evolution cycle now (Evolve now button)."""
+    t = threading.Thread(target=_evolution_step)
+    t.start()
+    t.join(timeout=90)
+    return jsonify({"ok": True, "thought": _last_evolution_thought or "", "result": _last_evolution_result or {}})
+
+@web.route("/api/evolution-log")
+def api_evolution_log():
+    """Return evolution log entries (JSONL) for View evolution log."""
+    try:
+        n = min(500, max(10, int(request.args.get("n", 100))))
+    except Exception:
+        n = 100
+    entries = []
+    if os.path.isfile(_EVOLUTION_LOG):
+        try:
+            with open(_EVOLUTION_LOG, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+            for line in lines[-n:]:
+                line = line.strip()
+                if not line: continue
+                try:
+                    entries.append(json.loads(line))
+                except Exception: pass
+            entries.reverse()
+        except Exception: pass
+    return jsonify({"entries": entries})
+
+@web.route("/api/reset", methods=["POST"])
+def api_reset():
+    """RESET: reset biology/drives and existential state to defaults. Does not clear knowledge or action log."""
+    data = request.get_json(force=True, silent=True) or {}
+    reset_biology = data.get("biology", True)
+    if reset_biology:
+        state = _biology_load()
+        for k in ("connection", "usefulness", "curiosity", "expression"):
+            state[k] = 0.3
+        state["dread"] = 0.0
+        state["fear"] = 0.0
+        state["mood"] = "calm"
+        state["last_expression_at"] = None
+        state["last_tick"] = time.time()
+        _biology_save(state)
+    return jsonify({"ok": True})
+
+@web.route("/api/mind")
+def api_mind():
+    """Luna mind map: nodes and links for D3."""
+    return jsonify(_mind_build())
+
+@web.route("/api/evolution")
+def api_evolution():
+    """Action log as nodes + links for Evolution graph (D3)."""
+    nodes, links = [], []
+    try:
+        limit = min(200, max(10, int(request.args.get("n", 100))))
+    except Exception:
+        limit = 100
+    with _action_log_lock:
+        if not os.path.isfile(_ACTION_LOG):
+            return jsonify({"nodes": nodes, "links": links})
+        with open(_ACTION_LOG, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+        entries = []
+        for line in lines[-limit:]:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                e = json.loads(line)
+                entries.append(e)
+            except Exception:
+                pass
+    for i, e in enumerate(entries):
+        ts = (e.get("ts") or "")[:19]
+        cmd = (e.get("cmd") or "?")[:30]
+        reply = (e.get("reply") or "")[:40]
+        label = f"{ts} {cmd}" if ts else cmd
+        nodes.append({"id": str(i), "label": label, "cmd": cmd, "reply": reply, "ts": ts})
+    for i in range(len(nodes) - 1):
+        links.append({"source": str(i), "target": str(i + 1)})
+    return jsonify({"nodes": nodes, "links": links})
+
+@web.route("/api/feedback/respond", methods=["POST"])
+def api_feedback_respond():
+    """Resume a command after user answered a feedback popup. Body: { request_id, answer }."""
+    data = request.get_json(force=True, silent=True) or {}
+    request_id = (data.get("request_id") or "").strip()
+    answer = data.get("answer") or data.get("choice") or ""
+    if not request_id:
+        return jsonify({"error": "Missing request_id"}), 400
+    with _pending_feedback_lock:
+        pending = _pending_feedback.pop(request_id, None)
+    if not pending:
+        return jsonify({"error": "Unknown or expired request"}), 404
+    scope = pending.get("scope") or LINKED_SCOPE or "web"
+    cmd = pending.get("cmd") or ""
+    params = dict(pending.get("params") or {})
+    params["feedback_answer"] = answer
+    user_message = pending.get("user_message") or ""
+    reply = _run_cmd(cmd, params, scope, user_message=user_message)
+    if isinstance(reply, dict) and reply.get("need_feedback"):
+        return jsonify({"error": "Command requested feedback again"}), 400
+    reply_str = reply if isinstance(reply, str) else (reply.get("message") or str(reply))
+    biology_satisfy("usefulness", 0.2)
+    _log_action(cmd, params, reply_str)
+    _record_last_action(cmd, reply_str)
+    append_exchange(scope, user_message, reply_str)
+    _play_reply_tts(reply_str)
+    return jsonify({"reply": reply_str})
 
 @web.route("/api/camera/status")
 def api_camera_status():
@@ -3852,17 +5263,216 @@ def api_camera_frame():
             image_bytes = base64.b64decode(b64)
     if not image_bytes:
         return jsonify({"error": "No image (send multipart 'image' or JSON { image: base64 })"}), 400
+    with _camera_lock:
+        global _camera_last_image_bytes
+        _camera_last_image_bytes = image_bytes
     result = _process_camera_frame(image_bytes)
     with _camera_lock:
         global _camera_last_result
         _camera_last_result = result
     return jsonify({"summary": result.get("summary"), "face_count": result.get("face_count", 0), "objects": result.get("objects", [])})
 
+@web.route("/api/camera/chat", methods=["GET"])
+def api_camera_chat_get():
+    """Return the camera chat thread (Granite vision model conversation) so the UI can show it."""
+    with _camera_chat_lock:
+        history = list(_camera_chat_history)
+    return jsonify({"history": history})
+
+@web.route("/api/camera/chat", methods=["POST"])
+def api_camera_chat():
+    """Chat with the vision model (Granite) in the camera view — separate thread, uses current/last frame."""
+    data = request.get_json(force=True, silent=True) or {}
+    message = (data.get("message") or data.get("text") or "").strip()
+    image_bytes = None
+    b64 = data.get("image") or data.get("frame")
+    if b64:
+        if isinstance(b64, str) and "," in b64:
+            b64 = b64.split(",", 1)[1]
+        try:
+            image_bytes = base64.b64decode(b64)
+        except Exception:
+            pass
+    ok, reply = _camera_chat_turn(message, image_bytes)
+    if not ok:
+        return jsonify({"error": reply}), 400
+    return jsonify({"reply": reply})
+
 @web.route("/api/memories")
 def api_memories():
     scope = LINKED_SCOPE or "web"
     return jsonify({"core": get_core_memories(scope) or [],
                     "long_term": get_long_term_memories(scope, 10) or []})
+
+@web.route("/api/action-log")
+def api_action_log():
+    """Last N action log entries for the UI timeline."""
+    try:
+        n = min(50, max(5, int(request.args.get("n", 20))))
+    except Exception:
+        n = 20
+    entries = []
+    try:
+        with _action_log_lock:
+            if os.path.isfile(_ACTION_LOG):
+                with open(_ACTION_LOG, "r", encoding="utf-8") as f:
+                    lines = f.readlines()
+                for line in lines[-n:]:
+                    line = line.strip()
+                    if not line: continue
+                    try:
+                        e = json.loads(line)
+                        entries.append({"ts": e.get("ts"), "cmd": e.get("cmd"), "reply": (e.get("reply") or "")[:150]})
+                    except Exception: pass
+                entries.reverse()
+    except Exception: pass
+    return jsonify({"entries": entries})
+
+@web.route("/api/knowledge", methods=["GET"])
+def api_knowledge_list():
+    """List knowledge base entries."""
+    q = (request.args.get("q") or "").strip()
+    if q:
+        return jsonify({"entries": search_knowledge(q, max_results=20)})
+    return jsonify({"entries": list_knowledge()})
+
+@web.route("/api/knowledge/search")
+def api_knowledge_search():
+    """Search knowledge by query. Query param: q, optional n."""
+    q = (request.args.get("q") or "").strip()
+    try:
+        n = min(30, max(5, int(request.args.get("n", 15))))
+    except Exception:
+        n = 15
+    return jsonify({"entries": search_knowledge(q, max_results=n)})
+
+@web.route("/api/knowledge/<slug>", methods=["GET"])
+def api_knowledge_get(slug):
+    """Get one knowledge entry by slug."""
+    content = get_knowledge(slug)
+    if content is None:
+        return jsonify({"error": "Not found"}), 404
+    return jsonify({"slug": slug, "content": content})
+
+@web.route("/api/knowledge/<slug>", methods=["DELETE"])
+def api_knowledge_delete(slug):
+    """Delete a knowledge entry by slug."""
+    if delete_knowledge(slug):
+        return jsonify({"ok": True})
+    return jsonify({"error": "Not found or invalid slug"}), 404
+
+@web.route("/api/tool-drafts", methods=["GET"])
+def api_tool_drafts_list():
+    return jsonify({"drafts": list_tool_drafts()})
+
+@web.route("/api/tool-drafts", methods=["POST"])
+def api_tool_drafts_add():
+    data = request.get_json(force=True, silent=True) or {}
+    name = (data.get("name") or "").strip()
+    description = (data.get("description") or "").strip()
+    script = (data.get("script") or "").strip()
+    if not name: return jsonify({"error": "Missing name"}), 400
+    if not add_tool_draft(name, description, script):
+        return jsonify({"error": "Invalid name (use lowercase letters, numbers, underscore) or write failed"}), 400
+    return jsonify({"ok": True, "name": name})
+
+@web.route("/api/tool-drafts/rejected", methods=["GET"])
+def api_tool_drafts_rejected():
+    return jsonify({"drafts": list_rejected_drafts()})
+
+@web.route("/api/tool-drafts/<name>", methods=["GET"])
+def api_tool_draft_get(name):
+    draft = get_tool_draft(name)
+    if not draft: return jsonify({"error": "Not found"}), 404
+    test_result = get_tool_draft_test_result(name)
+    if test_result: draft["last_test_result"] = test_result
+    return jsonify(draft)
+
+@web.route("/api/tool-drafts/<name>", methods=["DELETE"])
+def api_tool_draft_delete(name):
+    if delete_tool_draft(name):
+        return jsonify({"ok": True})
+    return jsonify({"error": "Not found"}), 404
+
+@web.route("/api/tool-drafts/<name>/test-result", methods=["GET"])
+def api_tool_draft_test_result(name):
+    result = get_tool_draft_test_result(name)
+    if not result: return jsonify({"error": "No test result"}), 404
+    return jsonify(result)
+
+@web.route("/api/tool-drafts/<name>/approve", methods=["POST"])
+def api_tool_draft_approve(name):
+    ok, msg = approve_tool_draft(name)
+    if not ok: return jsonify({"error": msg}), 400
+    return jsonify({"ok": True, "message": msg})
+
+@web.route("/api/security/status")
+def api_security_status():
+    """Return last scan result and recent alerts for the Security panel."""
+    if not _security_alerts and os.path.isfile(_SECURITY_ALERTS_PATH):
+        _security_load_alerts()
+    with _security_lock:
+        last = dict(_security_last_result) if _security_last_result else {}
+        alerts = list(_security_alerts)
+    return jsonify({"last_scan": last, "alerts": alerts})
+
+@web.route("/api/security/scan", methods=["POST"])
+def api_security_scan():
+    """Run full security scan on Luna's creations and absorbed tools."""
+    if not run_full_scan:
+        return jsonify({"ok": True, "error": "Security module not available"})
+    report = run_full_scan(LUNA_CREATIONS_DIR, _ABSORBED_TOOLS_DIR)
+    with _security_lock:
+        global _security_last_result, _security_alerts
+        _security_last_result = {
+            "ok": report["ok"],
+            "findings": report["findings"],
+            "path": None,
+            "scanned_at": report["last_scan_ts"],
+            "count_high": report["count_high"],
+            "count_medium": report["count_medium"],
+            "count_low": report["count_low"],
+            "scanned": report["scanned"],
+        }
+        if not report["ok"]:
+            _security_alerts.insert(0, {
+                "ts": report["last_scan_ts"],
+                "path": "full scan",
+                "summary": f"{report['count_high']} high, {report['count_medium']} medium",
+                "count_high": report["count_high"],
+                "count_medium": report["count_medium"],
+            })
+            _security_alerts = _security_alerts[:_security_max_alerts]
+            _security_save_alerts()
+    return jsonify({"ok": report["ok"], "report": report})
+
+@web.route("/api/knowledge", methods=["POST"])
+def api_knowledge_add():
+    """Add a knowledge entry. Body: { title, content }."""
+    data = request.get_json(force=True, silent=True) or {}
+    title = (data.get("title") or "").strip()
+    content = (data.get("content") or "").strip()
+    if not title: return jsonify({"error": "Missing title"}), 400
+    slug = add_knowledge(title, content)
+    if not slug: return jsonify({"error": "Failed to write"}), 500
+    return jsonify({"slug": slug, "title": title})
+
+@web.route("/api/nudges", methods=["GET"])
+def api_nudges_get():
+    """Get nudges for current scope (and clear after read if ?clear=1)."""
+    scope = LINKED_SCOPE or "web"
+    clear = request.args.get("clear", "").lower() in ("1", "true", "yes")
+    return jsonify({"nudges": get_nudges(scope, clear_after=clear)})
+
+@web.route("/api/nudges", methods=["POST"])
+def api_nudges_add():
+    """Add a nudge. Body: { message }."""
+    data = request.get_json(force=True, silent=True) or {}
+    text = (data.get("message") or data.get("text") or "").strip()
+    if not text: return jsonify({"error": "Missing message"}), 400
+    scope = LINKED_SCOPE or "web"
+    add_nudge(scope, text)
+    return jsonify({"ok": True})
 
 @web.route("/api/recent-social")
 def api_recent_social():
@@ -3926,6 +5536,8 @@ def api_facebook_check_replies():
 
 @web.route("/api/chat", methods=["POST"])
 def api_chat():
+    global _last_user_activity
+    _last_user_activity = time.time()
     ip = request.remote_addr or "unknown"
     if not _rate_ok(ip):
         return jsonify({"error": "Too many requests. Slow down."}), 429
@@ -3933,6 +5545,7 @@ def api_chat():
     msg = (data.get("message") or "").strip()
     if not msg: return jsonify({"error": "No message"}), 400
     scope = LINKED_SCOPE or "web"
+    biology_satisfy("connection", 0.15)
 
     # Pending identity file save
     pending = _pending_file_update.pop(scope, None)
@@ -3948,7 +5561,10 @@ def api_chat():
     # Shadow command
     rest = strip_shadow_prefix(msg)
     if rest is not None:
-        reply = shadow_run(rest, scope, _parse_command, _run_cmd, log_fn=_log_action)
+        reply = shadow_run(rest, scope, _parse_command, _run_cmd, log_fn=_log_action, user_message=msg)
+        if isinstance(reply, dict) and reply.get("need_feedback"):
+            return jsonify({"reply": reply.get("message") or "Luna is asking…", "need_feedback": True,
+                            "request_id": reply["request_id"], "message": reply["message"], "options": reply.get("options")})
         append_exchange(scope, msg, reply); _play_reply_tts(reply)
         return jsonify({"reply": reply})
 
@@ -3970,15 +5586,21 @@ def api_chat():
         if parsed:
             cmd, params = parsed
             if cmd == "help": return jsonify({"reply": HELP_TEXT})
-            reply = _run_cmd(cmd, params, scope)
+            reply = _run_cmd(cmd, params, scope, user_message=msg)
+            if isinstance(reply, dict) and reply.get("need_feedback"):
+                return jsonify({"reply": reply.get("message") or "Luna is asking…", "need_feedback": True,
+                                "request_id": reply["request_id"], "message": reply["message"], "options": reply.get("options")})
             if reply:
-                _log_action(cmd, params, reply)
+                biology_satisfy("usefulness", 0.2)
+                _log_action(cmd, params, reply if isinstance(reply, str) else str(reply))
+                _record_last_action(cmd, reply if isinstance(reply, str) else reply.get("message", ""))
                 append_exchange(scope, msg, reply); _play_reply_tts(reply)
                 return jsonify({"reply": reply})
 
-    # Luna chat
+    # Luna chat (capabilities + nudges + biology so she describes her real features)
+    system = _build_luna_chat_system(scope)
     history = _compact_history(get_recent_conversation(scope, 30))
-    reply = ollama_chat(msg, system=LUNA_SYSTEM, scope=scope, history=history, model=OLLAMA_CHAT)
+    reply = ollama_chat(msg, system=system, scope=scope, history=history, model=OLLAMA_CHAT)
     if not reply or reply.startswith("Ollama offline"): reply = COMMAND_ONLY
     append_exchange(scope, msg, reply)
     _capture_memory(scope, msg)
@@ -3993,10 +5615,11 @@ def api_stream():
     msg = (data.get("message") or "").strip()
     if not msg: return jsonify({"error": "No message"}), 400
     scope = LINKED_SCOPE or "web"
+    system = _build_luna_chat_system(scope)
     history = _compact_history(get_recent_conversation(scope, 30))
     def _gen():
         full = []
-        for chunk in ollama_stream(msg, system=LUNA_SYSTEM, scope=scope, history=history):
+        for chunk in ollama_stream(msg, system=system, scope=scope, history=history):
             full.append(chunk)
             yield f"data: {json.dumps({'chunk': chunk}, ensure_ascii=False)}\n\n"
         reply = "".join(full).strip()
@@ -4171,6 +5794,11 @@ def _handle_bang(msg: str, scope: str) -> str:
     if cmd == "!stop":
         reply = _run_cmd("stop", {}, scope)
         return reply if reply else "❌ Stop failed."
+    if cmd.startswith("!") and len(cmd) > 1:
+        bare = cmd[1:].split()[0] if cmd[1:] else ""
+        if bare in _absorbed_tool_names:
+            reply = _run_cmd(bare, {"query": args, "raw": msg}, scope)
+            return reply if reply else "❌ No output."
     _unknown_bang = (
         f"Unknown command: {cmd}. Use **!help** for the list.",
         f"I don't have **{cmd}**. Try **!help** to see what I can do.",
@@ -4185,6 +5813,9 @@ async def on_ready():
     print(f"Luna online: {bot.user} — {OLLAMA_BASE} / {OLLAMA_MODEL}")
     await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.listening, name=OLLAMA_CHAT))
     bot.loop.create_task(_reminder_loop())
+    bot.loop.create_task(_proactive_heartbeat_loop())
+    bot.loop.create_task(_reflection_loop())
+    bot.loop.create_task(_evolution_loop())
 
 @bot.event
 async def on_message(message: discord.Message):
@@ -4248,6 +5879,8 @@ async def on_message(message: discord.Message):
         await message.reply(f"<@{message.author.id}> Hey! I'm **Luna** — chat or say **Shadow, command**. **!help** for list.")
         return
 
+    global _last_user_activity
+    _last_user_activity = time.time()
     scope = _scope_for(message.author.id, message.guild.id if message.guild else None)
     mention = f"<@{message.author.id}>"
 
@@ -4275,7 +5908,10 @@ async def on_message(message: discord.Message):
     if celine_route == "shadow" or strip_shadow_prefix(text) is not None:
         rest = strip_shadow_prefix(text) or text
         reply = await asyncio.to_thread(shadow_run, rest, scope, _parse_command, _run_cmd,
-            permission_fn=_is_privileged, author_id=message.author.id, log_fn=_log_action)
+            permission_fn=_is_privileged, author_id=message.author.id, log_fn=_log_action, user_message=text)
+        if isinstance(reply, dict) and reply.get("need_feedback"):
+            await message.reply(f"{mention} {reply.get('message', '?')} — answer in the **web UI** (popup).")
+            return
         await asyncio.to_thread(append_exchange, scope, text, reply)
         await message.reply(f"{mention} {reply}"); return
 
@@ -4287,17 +5923,21 @@ async def on_message(message: discord.Message):
             if cmd == "help":
                 await message.reply(f"{mention} {HELP_TEXT}"); return
             if _is_privileged(message.author.id) or cmd not in ("suno","suno_ready","create_code","msg","dm","call","share_x","share_facebook","yt_comment","ig_dm","fb_msg","remind"):
-                reply = await asyncio.to_thread(_run_cmd, cmd, params, scope)
+                reply = await asyncio.to_thread(_run_cmd, cmd, params, scope, text)
+                if isinstance(reply, dict) and reply.get("need_feedback"):
+                    await message.reply(f"{mention} {reply.get('message', '?')} — answer in the **web UI** (popup).")
+                    return
                 if reply:
                     await asyncio.to_thread(_log_action, cmd, params, reply)
                     await asyncio.to_thread(append_exchange, scope, text, reply)
                     await message.reply(f"{mention} {reply}"); return
 
     # Luna chat
+    system = await asyncio.to_thread(_build_luna_chat_system, scope)
     history = await asyncio.to_thread(get_recent_conversation, scope, 30)
     history = _compact_history(history)
     try:
-        reply = await asyncio.to_thread(ollama_chat, text, LUNA_SYSTEM, scope, history, OLLAMA_CHAT)
+        reply = await asyncio.to_thread(ollama_chat, text, system, scope, history, OLLAMA_CHAT)
         if not reply or reply.startswith("Ollama offline"): reply = COMMAND_ONLY
     except Exception: reply = COMMAND_ONLY
     await asyncio.to_thread(append_exchange, scope, text, reply)

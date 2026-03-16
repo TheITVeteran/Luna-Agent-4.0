@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Luna Evolution</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com"/>
+  <link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@400;600&family=Exo+2:wght@300;400&display=swap" rel="stylesheet"/>
+  <script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
+  <style>
+    :root {
+      --cyan: #00d4ff;
+      --magenta: #ff2d78;
+      --bg: #020b14;
+      --border: rgba(0,212,255,0.25);
+      --text: #a8d8ea;
+      --font-main: 'Rajdhani', sans-serif;
+      --font-data: 'Exo 2', sans-serif;
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: var(--bg);
+      font-family: var(--font-main);
+      color: var(--text);
+      min-height: 100vh;
+      overflow: hidden;
+    }
+    header {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      z-index: 10;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 24px;
+      background: rgba(2,11,20,0.9);
+      border-bottom: 1px solid var(--border);
+    }
+    .logo { font-size: 20px; font-weight: 600; letter-spacing: 0.2em; color: var(--cyan); }
+    .back { color: var(--cyan); text-decoration: none; font-size: 14px; }
+    .back:hover { text-decoration: underline; }
+    #graph {
+      position: fixed;
+      top: 56px;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: var(--bg);
+    }
+    #graph svg { width: 100%; height: 100%; }
+    .node { cursor: pointer; }
+    .node circle { stroke-width: 1.5; fill: #0ea5e9; stroke: rgba(14,165,233,0.6); }
+    .node:hover circle { filter: drop-shadow(0 0 8px var(--cyan)); }
+    .node text {
+      font-family: var(--font-data);
+      font-size: 9px;
+      fill: var(--text);
+      pointer-events: none;
+      text-anchor: middle;
+      dominant-baseline: middle;
+    }
+    .link { stroke: rgba(0,212,255,0.35); stroke-width: 1; fill: none; }
+    .legend {
+      position: fixed;
+      bottom: 16px;
+      left: 16px;
+      font-size: 11px;
+      color: rgba(168,216,234,0.8);
+      font-family: var(--font-data);
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <span class="logo">Evolution</span>
+    <a class="back" href="/">← Back to Luna</a>
+  </header>
+  <div id="graph"></div>
+  <div class="legend">Action log over time — each node is one action; chain is chronological.</div>
+  <script>
+    const container = document.getElementById('graph');
+    const width = container.clientWidth;
+    const height = container.clientHeight;
+
+    const svg = d3.select('#graph').append('svg').attr('viewBox', [0, 0, width, height]);
+    const g = svg.append('g');
+
+    const zoom = d3.zoom().scaleExtent([0.2, 4]).on('zoom', (e) => g.attr('transform', e.transform));
+    svg.call(zoom);
+
+    function run(data) {
+      const links = data.links.map(l => ({ ...l }));
+      const nodes = data.nodes.map(d => ({ ...d, type: 'action' }));
+
+      const link = g.append('g').attr('class', 'links').selectAll('line').data(links).join('line').attr('class', 'link');
+      const node = g.append('g').attr('class', 'nodes').selectAll('g').data(nodes).join('g').attr('class', 'node action');
+
+      node.append('circle').attr('r', 6);
+      node.append('text').attr('dy', 14).text(d => d.label || d.cmd || d.id);
+
+      const simulation = d3.forceSimulation(nodes)
+        .force('link', d3.forceLink(links).id(d => d.id).distance(70))
+        .force('charge', d3.forceManyBody().strength(-200))
+        .force('center', d3.forceCenter(width / 2, height / 2))
+        .force('collision', d3.forceCollide().radius(12))
+        .on('tick', () => {
+          link.attr('x1', d => d.source.x).attr('y1', d => d.source.y).attr('x2', d => d.target.x).attr('y2', d => d.target.y);
+          node.attr('transform', d => `translate(${d.x},${d.y})`);
+        });
+
+      node.call(d3.drag().on('start', (e, d) => {
+        e.sourceEvent.stopPropagation();
+        if (!e.active) simulation.alphaTarget(0.3).restart();
+        d.fx = d.x;
+        d.fy = d.y;
+      }).on('drag', (e, d) => {
+        d.fx = e.x;
+        d.fy = e.y;
+      }).on('end', (e, d) => {
+        if (!e.active) simulation.alphaTarget(0);
+        d.fx = null;
+        d.fy = null;
+      }));
+    }
+
+    fetch('/api/evolution').then(r => r.json()).then(data => {
+      if (!data.nodes || data.nodes.length === 0) {
+        g.append('text').attr('x', width/2).attr('y', height/2).attr('text-anchor', 'middle').attr('fill', '#666').text('No actions yet.');
+        return;
+      }
+      run(data);
+    }).catch(() => {
+      g.append('text').attr('x', width/2).attr('y', height/2).attr('text-anchor', 'middle').attr('fill', '#666').text('Could not load evolution data.');
+    });
+  </script>
+</body>
+</html>

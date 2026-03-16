@@ -6,7 +6,7 @@
 <title>Luna</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"/>
 <link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@300;400;500;600&family=Exo+2:ital,wght@0,100;0,200;0,300;1,100&display=swap" rel="stylesheet"/>
-<script type="module" src="https://unpkg.com/@splinetool/viewer@1/build/spline-viewer.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
 <style>
   :root {
     --cyan: #00d4ff;
@@ -483,6 +483,108 @@
     min-height: 44px;
   }
   .camera-popup-analysis.empty { color: rgba(168,216,234,0.4); font-style: italic; }
+  .camera-popup-chat { margin-top: 10px; border-top: 1px solid var(--border); padding-top: 10px; display: flex; flex-direction: column; gap: 8px; max-height: 200px; }
+  .camera-popup-chat-title { font-size: 11px; color: var(--cyan); opacity: 0.9; }
+  .camera-popup-chat-messages { flex: 1; overflow-y: auto; font-size: 12px; color: var(--text); line-height: 1.4; max-height: 120px; padding: 6px 0; }
+  .camera-popup-chat-messages .msg { margin-bottom: 6px; }
+  .camera-popup-chat-messages .msg.user { color: var(--cyan); }
+  .camera-popup-chat-messages .msg.assistant { color: var(--text); }
+  .camera-popup-chat-row { display: flex; gap: 6px; }
+  .camera-popup-chat-input { flex: 1; padding: 6px 8px; font-size: 13px; background: rgba(0,20,40,0.6); border: 1px solid var(--border); border-radius: 6px; color: var(--text); }
+  .camera-popup-chat-send { padding: 6px 12px; font-size: 12px; background: var(--cyan); color: var(--bg); border: none; border-radius: 6px; cursor: pointer; font-family: var(--font-main); }
+  .camera-popup-chat-send:hover { opacity: 0.9; }
+  .camera-popup-chat-send:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  /* Feedback popup (Luna asks) */
+  .feedback-popup-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.6);
+    z-index: 1001;
+    align-items: center;
+    justify-content: center;
+    backdrop-filter: blur(6px);
+  }
+  .feedback-popup-overlay.open { display: flex; }
+  .feedback-popup {
+    width: 90%;
+    max-width: 400px;
+    background: linear-gradient(145deg, rgba(2,15,28,0.98), rgba(1,8,16,0.98));
+    border: 1px solid rgba(0,212,255,0.35);
+    border-radius: 12px;
+    padding: 20px 22px;
+    box-shadow: 0 12px 40px rgba(0,0,0,0.5);
+  }
+  .feedback-popup-title {
+    font-family: var(--font-data);
+    font-size: 11px;
+    letter-spacing: 0.1em;
+    color: var(--cyan);
+    margin-bottom: 10px;
+  }
+  .feedback-popup-message {
+    color: var(--text);
+    font-size: 14px;
+    margin-bottom: 14px;
+    line-height: 1.5;
+  }
+  .feedback-popup-options {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 14px;
+  }
+  .feedback-popup-options .opt-btn {
+    background: rgba(0,212,255,0.15);
+    border: 1px solid var(--cyan);
+    color: var(--cyan);
+    padding: 8px 14px;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 13px;
+  }
+  .feedback-popup-options .opt-btn:hover { background: rgba(0,212,255,0.25); }
+  .feedback-popup-cancel {
+    background: transparent;
+    border: 1px solid rgba(255,255,255,0.3);
+    color: rgba(255,255,255,0.7);
+    padding: 6px 12px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 12px;
+  }
+  .feedback-popup-cancel:hover { color: #fff; }
+
+  /* Working on strip */
+  .working-strip {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 14px;
+    background: rgba(0,20,40,0.6);
+    border-bottom: 1px solid rgba(0,212,255,0.15);
+    font-size: 11px;
+    color: rgba(168,216,234,0.85);
+  }
+  .working-strip.empty { display: none; }
+  .working-strip-label { color: var(--cyan); font-weight: 500; }
+  .working-strip-list { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .working-panel { font-size: 11px; color: rgba(168,216,234,0.7); min-height: 20px; margin-bottom: 6px; }
+  .action-log-box { max-height: 160px; overflow-y: auto; font-size: 10px; color: rgba(168,216,234,0.6); margin-top: 6px; padding: 8px; background: rgba(0,20,40,0.4); border-radius: 6px; }
+  .action-log-box .log-entry { margin-bottom: 4px; }
+  .knowledge-search-input { width: 100%; margin-top: 6px; padding: 6px 8px; font-size: 12px; background: rgba(0,20,40,0.6); border: 1px solid var(--border); border-radius: 6px; color: var(--text); box-sizing: border-box; }
+  .log-entry-snippet { font-size: 9px; color: rgba(168,216,234,0.5); margin-top: 2px; margin-left: 4px; }
+  .log-entry-row { display: flex; align-items: flex-start; gap: 4px; }
+  .log-entry-content { flex: 1; min-width: 0; }
+  .knowledge-del-btn { flex-shrink: 0; width: 18px; height: 18px; padding: 0; font-size: 14px; line-height: 1; background: rgba(255,45,120,0.2); border: 1px solid rgba(255,45,120,0.4); border-radius: 4px; color: var(--magenta); cursor: pointer; }
+  .knowledge-del-btn:hover { background: rgba(255,45,120,0.35); }
+  .tool-draft-add { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
+  .tool-draft-add textarea { resize: vertical; min-height: 60px; }
+  .tool-drafts-list-entry { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; }
+  .tool-drafts-list-entry .name { font-weight: 500; }
+  .tool-drafts-list-entry .desc { font-size: 10px; color: rgba(168,216,234,0.6); }
+  .luna-says-msg { font-size: 12px; color: var(--text); line-height: 1.4; margin-bottom: 8px; }
 
   /* ── CHAT AREA ── */
   .chat-area {
@@ -491,7 +593,65 @@
     flex-direction: column;
     overflow: hidden;
     position: relative;
+    min-width: 0;
   }
+
+  /* ── MIND PANEL (D3 graph next to chat) ── */
+  .mind-panel {
+    width: 280px;
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    border-left: 1px solid var(--border);
+    background: rgba(0,8,20,0.6);
+    position: relative;
+  }
+  .mind-panel.collapsed { width: 0; min-width: 0; overflow: hidden; border-left: none; }
+  .mind-panel-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 12px;
+    border-bottom: 1px solid rgba(0,212,255,0.15);
+    flex-shrink: 0;
+  }
+  .mind-panel-title {
+    font-family: var(--font-data);
+    font-size: 10px;
+    letter-spacing: 0.2em;
+    color: var(--cyan);
+    text-transform: uppercase;
+  }
+  .mind-panel-toggle, .mind-panel-full {
+    background: none;
+    border: none;
+    color: rgba(0,212,255,0.7);
+    cursor: pointer;
+    font-size: 11px;
+    padding: 2px 6px;
+  }
+  .mind-panel-toggle:hover, .mind-panel-full:hover { color: var(--cyan); }
+  .mind-panel-full { text-decoration: none; }
+  #mind-graph-container {
+    flex: 1;
+    min-height: 200px;
+    position: relative;
+  }
+  #mind-graph-container svg { width: 100%; height: 100%; display: block; }
+  #mind-graph-container .node { cursor: pointer; }
+  #mind-graph-container .node circle { stroke-width: 1; }
+  #mind-graph-container .node.core circle { fill: var(--cyan); stroke: #fff; }
+  #mind-graph-container .node.drive circle { fill: #8b5cf6; }
+  #mind-graph-container .node.knowledge circle { fill: #22c55e; }
+  #mind-graph-container .node.action circle { fill: #0ea5e9; }
+  #mind-graph-container .node.nudge circle { fill: #f59e0b; }
+  #mind-graph-container .node.memory circle { fill: #ec4899; }
+  #mind-graph-container .node.proactive circle { fill: var(--magenta); }
+  #mind-graph-container .node.existential circle { fill: #b45309; stroke: rgba(180,83,9,0.6); }
+  #mind-graph-container .node.draft circle { fill: #a855f7; stroke: rgba(168,85,247,0.6); }
+  #mind-graph-container .node.evolution circle { fill: #06b6d4; stroke: rgba(6,182,212,0.6); }
+  #mind-graph-container .node text { font-size: 8px; fill: var(--text); text-anchor: middle; dominant-baseline: middle; pointer-events: none; }
+  #mind-graph-container .link { stroke: rgba(0,212,255,0.2); stroke-width: 0.8; fill: none; }
 
   /* Luna full-page Spline 3D + Spotlight background */
   .luna-bg-layer {
@@ -501,6 +661,7 @@
     overflow: hidden;
     pointer-events: none;
   }
+  .luna-bg-layer #spline-canvas,
   .luna-bg-layer spline-viewer {
     position: absolute;
     inset: 0;
@@ -508,6 +669,9 @@
     height: 100%;
     pointer-events: auto;
   }
+  .luna-bg-layer #spline-canvas { display: none; }
+  .luna-bg-layer.spline-runtime #spline-canvas { display: block; }
+  .luna-bg-layer.spline-runtime spline-viewer { display: none !important; }
   .luna-spotlight {
     position: absolute;
     top: -20%;
@@ -973,11 +1137,60 @@
 </head>
 <body>
 
-<!-- Full-page Spline 3D + Spotlight background -->
-<div class="luna-bg-layer" aria-hidden="true">
+<!-- Full-page Spline 3D + Spotlight background (runtime canvas for hand-follow; fallback viewer if runtime fails) -->
+<div class="luna-bg-layer" id="luna-bg-layer" aria-hidden="true">
   <div class="luna-spotlight"></div>
-  <spline-viewer url="https://prod.spline.design/kZDDjO5HuC9GJUM2/scene.splinecode" loading="eager" events-target="global"></spline-viewer>
+  <canvas id="spline-canvas"></canvas>
+  <spline-viewer id="spline-viewer-fallback" url="https://prod.spline.design/kZDDjO5HuC9GJUM2/scene.splinecode" loading="eager" events-target="global"></spline-viewer>
 </div>
+<script type="module">
+(function() {
+  const SCENE_URL = 'https://prod.spline.design/kZDDjO5HuC9GJUM2/scene.splinecode';
+  const canvas = document.getElementById('spline-canvas');
+  const fallback = document.getElementById('spline-viewer-fallback');
+  const layer = document.getElementById('luna-bg-layer');
+  if (!canvas || !layer) return;
+  const possibleHandNames = ['Hand Left', 'Hand Right', 'Left Hand', 'Right Hand', 'hand_left', 'hand_right', 'HandLeft', 'HandRight', 'LeftHand', 'RightHand', 'Hand_L', 'Hand_R'];
+  try {
+    const { Application } = await import('https://unpkg.com/@splinetool/runtime@1/build/runtime.js');
+    const splineApp = new Application(canvas);
+    await splineApp.load(SCENE_URL);
+    layer.classList.add('spline-runtime');
+    if (fallback) fallback.style.setProperty('display', 'none');
+    let handObjects = [];
+    const all = splineApp.getAllObjects ? splineApp.getAllObjects() : [];
+    if (typeof console !== 'undefined' && console.log) console.log('Spline objects (check names for hands):', all.map(function(o) { return o.name || o.id; }));
+    for (let i = 0; i < possibleHandNames.length; i++) {
+      try {
+        const obj = splineApp.findObjectByName(possibleHandNames[i]);
+        if (obj) handObjects.push(obj);
+      } catch (_) {}
+    }
+    if (handObjects.length === 0 && all.length) {
+      for (let j = 0; j < all.length; j++) {
+        if ((all[j].name || '').toLowerCase().indexOf('hand') !== -1) handObjects.push(all[j]);
+      }
+    }
+    if (handObjects.length) {
+      const maxRot = 0.4;
+      window.addEventListener('mousemove', function onMove(e) {
+        const x = (e.clientX / window.innerWidth) * 2 - 1;
+        const y = -((e.clientY / window.innerHeight) * 2 - 1);
+        for (let k = 0; k < handObjects.length; k++) {
+          const hand = handObjects[k];
+          if (hand && hand.rotation) {
+            hand.rotation.y = x * maxRot;
+            hand.rotation.x = y * maxRot;
+          }
+        }
+      });
+    }
+  } catch (err) {
+    if (typeof console !== 'undefined' && console.warn) console.warn('Spline runtime failed, using viewer:', err);
+  }
+})();
+</script>
+<script type="module" src="https://unpkg.com/@splinetool/viewer@1/build/spline-viewer.js"></script>
 
 <!-- Header -->
 <header>
@@ -1008,6 +1221,10 @@
     <div class="time-display" id="clock">—</div>
   </div>
 </header>
+<div class="working-strip empty" id="working-strip">
+  <span class="working-strip-label">Working on:</span>
+  <span class="working-strip-list" id="working-strip-text">—</span>
+</div>
 
 <!-- Main -->
 <div class="main">
@@ -1083,6 +1300,67 @@
       <a class="cmd-btn" href="/transcribeme/" style="text-decoration:none;color:inherit;display:inline-flex;align-items:center;gap:6px;" title="Voice to text, translate, ask, reminders">
         <span class="cmd-icon">🔊</span> TranscribeMe
       </a>
+      <a class="cmd-btn" href="/mind/" style="text-decoration:none;color:inherit;display:inline-flex;align-items:center;gap:6px;" title="Full Luna mind map (D3 graph)">
+        <span class="cmd-icon">🧠</span> Luna's Mind
+      </a>
+      <a class="cmd-btn" href="/evolution/" style="text-decoration:none;color:inherit;display:inline-flex;align-items:center;gap:6px;" title="Action log as evolution graph">
+        <span class="cmd-icon">📈</span> Evolution
+      </a>
+    </div>
+
+    <div class="panel-section" id="luna-says-section" style="display:none;">
+      <div class="panel-title">✨ Luna says</div>
+      <p id="luna-says-message" class="luna-says-msg"></p>
+      <button type="button" class="cmd-btn" id="luna-says-ack">Got it</button>
+    </div>
+
+    <div class="panel-section">
+      <div class="panel-title">Working on &amp; log</div>
+      <div id="working-panel" class="working-panel"></div>
+      <button type="button" class="cmd-btn" id="action-log-btn" title="Load recent actions">View action log</button>
+      <div id="action-log-box" class="action-log-box" style="display:none;"></div>
+      <div class="control-row" style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap;">
+        <button type="button" class="cmd-btn" id="kill-btn" title="Request current task to stop">KILL</button>
+        <button type="button" class="cmd-btn" id="reset-btn" title="Reset biology/drives and existential state">RESET</button>
+        <button type="button" class="cmd-btn" id="evolve-btn" title="When on, Luna autonomously proposes and absorbs new tools when idle">Evolve</button>
+        <button type="button" class="cmd-btn" id="evolve-now-btn" title="Run one evolution cycle now">Evolve now</button>
+        <button type="button" class="cmd-btn" id="evolution-log-btn" title="View evolution log (JSONL)">View evolution log</button>
+      </div>
+      <div id="evolution-log-box" class="action-log-box" style="display:none;"></div>
+    </div>
+
+    <div class="panel-section">
+      <div class="panel-title">Nudge Luna</div>
+      <p style="font-size:11px;color:rgba(168,216,234,0.6);margin-bottom:6px;">Non-blocking note she'll consider next reply.</p>
+      <div style="display:flex;gap:6px;">
+        <input type="text" id="nudge-input" placeholder="e.g. Remind me to check WhatsApp" style="flex:1;background:rgba(0,20,40,0.6);border:1px solid rgba(0,212,255,0.2);border-radius:6px;color:var(--text);padding:8px 10px;font-size:12px;"/>
+        <button type="button" class="cmd-btn" id="nudge-send">Send</button>
+      </div>
+    </div>
+
+    <div class="panel-section">
+      <div class="panel-title">Tool drafts</div>
+      <button type="button" class="cmd-btn" id="tool-drafts-btn" title="Propose new commands; approve to run !name">Tool drafts</button>
+      <div id="tool-drafts-wrap" style="display:none;">
+        <div class="tool-draft-add">
+          <input type="text" id="tool-draft-name" placeholder="Name (e.g. greet)" class="knowledge-search-input" />
+          <input type="text" id="tool-draft-desc" placeholder="Description" class="knowledge-search-input" />
+          <textarea id="tool-draft-script" placeholder="Python: read json from stdin, print result" rows="4" class="knowledge-search-input"></textarea>
+          <button type="button" class="cmd-btn" id="tool-draft-submit">Add draft</button>
+        </div>
+        <div id="tool-drafts-list" class="action-log-box"></div>
+        <div class="panel-title" style="margin-top:8px;font-size:11px;">Rejected (failed tests)</div>
+        <div id="tool-drafts-rejected-list" class="action-log-box" style="max-height:100px;"></div>
+      </div>
+    </div>
+
+    <div class="panel-section">
+      <div class="panel-title">Knowledge base</div>
+      <button type="button" class="cmd-btn" id="knowledge-btn" title="Entries Luna has written (e.g. from remember)">List knowledge</button>
+      <div id="knowledge-box-wrap" style="display:none;">
+        <input type="text" id="knowledge-search" class="knowledge-search-input" placeholder="Search entries…" />
+        <div id="knowledge-box" class="action-log-box"></div>
+      </div>
     </div>
 
     <div class="panel-section">
@@ -1090,6 +1368,15 @@
       <div id="memory-pills">
         <div class="memory-pill" style="color:rgba(0,212,255,0.3);font-style:italic;">Loading...</div>
       </div>
+    </div>
+
+    <div class="panel-section" id="security-section">
+      <div class="panel-title">Security</div>
+      <div id="security-status" class="security-status-line" style="font-size:11px;color:rgba(168,216,234,0.8);margin-bottom:6px;">Last scan: —</div>
+      <button type="button" class="cmd-btn" id="security-scan-btn" title="Scan Luna's creations and absorbed tools for unsafe patterns">
+        <span class="cmd-icon">🛡</span> Run security scan
+      </button>
+      <div id="security-alerts" class="action-log-box" style="display:none;margin-top:8px;max-height:120px;overflow:auto;"></div>
     </div>
 
     <div class="panel-section" id="recent-social-section">
@@ -1148,6 +1435,18 @@
       </div>
     </div>
   </div>
+
+  <!-- Luna's Mind (D3 graph) -->
+  <aside class="mind-panel" id="mind-panel">
+    <div class="mind-panel-header">
+      <span class="mind-panel-title">Luna's Mind</span>
+      <div>
+        <a class="mind-panel-full" href="/mind/" target="_blank" rel="noopener" title="Open full mind map">Full</a>
+        <button type="button" class="mind-panel-toggle" id="mind-panel-toggle" title="Collapse panel">◀</button>
+      </div>
+    </div>
+    <div id="mind-graph-container"></div>
+  </aside>
 </div>
 
 <!-- DM popup: continue conversation from UI -->
@@ -1179,6 +1478,26 @@
       <video id="camera-popup-video" autoplay playsinline muted></video>
     </div>
     <div class="camera-popup-analysis empty" id="camera-popup-analysis">Analyzing…</div>
+    <div class="camera-popup-chat" id="camera-popup-chat">
+      <div class="camera-popup-chat-title">Chat with Granite (vision) — separate thread</div>
+      <div class="camera-popup-chat-messages" id="camera-popup-chat-messages"></div>
+      <div class="camera-popup-chat-row">
+        <input type="text" class="camera-popup-chat-input" id="camera-popup-chat-input" placeholder="Ask about what you see…" />
+        <button type="button" class="camera-popup-chat-send" id="camera-popup-chat-send">Send</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Feedback popup (Luna asks a blocking question) -->
+<div class="feedback-popup-overlay" id="feedback-popup-overlay">
+  <div class="feedback-popup" id="feedback-popup">
+    <div class="feedback-popup-title">Luna is asking</div>
+    <p class="feedback-popup-message" id="feedback-popup-message"></p>
+    <div class="feedback-popup-options" id="feedback-popup-options"></div>
+    <div class="feedback-popup-actions">
+      <button type="button" class="feedback-popup-cancel" id="feedback-popup-cancel">Cancel</button>
+    </div>
   </div>
 </div>
 
@@ -1194,7 +1513,7 @@ function updateClock() {
 setInterval(updateClock, 1000);
 updateClock();
 
-// ── Status polling ──
+// ── Status polling (Ollama + working on) ──
 async function checkStatus() {
   try {
     const res = await fetch('/api/status');
@@ -1206,13 +1525,119 @@ async function checkStatus() {
     const modelEl = document.getElementById('stat-model');
     const m = (d.chat_model || '').split(':')[0].toUpperCase().slice(0, 10);
     modelEl.textContent = m || '—';
+    updateWorkingStatus(d);
   } catch {
     document.getElementById('stat-ollama').textContent = 'OFFLINE';
     document.getElementById('stat-ollama').className = 'stat-value err';
   }
 }
+function updateWorkingStatus(d) {
+  if (!d) {
+    fetch('/api/status').then(r => r.json()).then(updateWorkingStatus).catch(() => {});
+    return;
+  }
+  const strip = document.getElementById('working-strip');
+  const stripText = document.getElementById('working-strip-text');
+  const panel = document.getElementById('working-panel');
+  const workingOn = d.working_on || null;
+  const lastActions = d.last_actions || [];
+  if (workingOn) {
+    strip.classList.remove('empty');
+    stripText.textContent = workingOn;
+  } else if (lastActions.length) {
+    strip.classList.remove('empty');
+    stripText.textContent = lastActions[0].summary || lastActions[0].cmd || '—';
+  } else {
+    strip.classList.add('empty');
+  }
+  if (panel) {
+    const parts = [];
+    if (workingOn) parts.push('Working on: ' + workingOn);
+    lastActions.slice(0, 3).forEach(a => parts.push((a.cmd || '') + ': ' + (a.summary || '').slice(0, 40)));
+    if (d.planning) parts.push('Planning: ' + d.planning);
+    if (d.last_knowledge) parts.push('Last knowledge: ' + (d.last_knowledge.length > 60 ? d.last_knowledge.slice(0, 60) + '…' : d.last_knowledge));
+    if (d.last_evolution_thought) parts.push('Evolution: ' + d.last_evolution_thought);
+    if (d.last_absorbed_tool && d.last_absorbed_tool.name) parts.push('Last absorbed: ' + d.last_absorbed_tool.name);
+    panel.textContent = parts.length ? parts.join('\n') : '—';
+  }
+  const evolveBtn = document.getElementById('evolve-btn');
+  if (evolveBtn) {
+    evolveBtn.textContent = d.evolution_enabled ? 'Evolve on' : 'Evolve';
+    evolveBtn.classList.toggle('camera-on', !!d.evolution_enabled);
+  }
+  const proactive = d.proactive;
+  const lunaSaysSection = document.getElementById('luna-says-section');
+  const lunaSaysMessage = document.getElementById('luna-says-message');
+  if (lunaSaysSection && lunaSaysMessage) {
+    if (proactive && proactive.message) {
+      lunaSaysMessage.textContent = proactive.message;
+      lunaSaysSection.style.display = 'block';
+    } else {
+      lunaSaysSection.style.display = 'none';
+    }
+  }
+  // Security panel
+  const securityStatusEl = document.getElementById('security-status');
+  const securityAlertsEl = document.getElementById('security-alerts');
+  if (securityStatusEl) {
+    const ts = d.security_last_scan_ts;
+    const timeStr = ts ? (Math.round((Date.now()/1000 - ts)) < 60 ? 'Just now' : (Math.round((Date.now()/1000 - ts)/60) + ' min ago')) : 'Never';
+    securityStatusEl.textContent = 'Last scan: ' + timeStr + (d.security_ok ? ' · OK' : ' · Review needed');
+    securityStatusEl.style.color = d.security_alert ? 'var(--magenta)' : 'rgba(168,216,234,0.8)';
+  }
+  if (securityAlertsEl && d.security_alert) {
+    securityAlertsEl.style.display = 'block';
+    fetch('/api/security/status').then(r => r.json()).then(data => {
+      const alerts = data.alerts || [];
+      securityAlertsEl.innerHTML = alerts.length ? alerts.slice(0, 5).map(a => {
+        const t = new Date((a.ts || 0) * 1000).toLocaleString();
+        return '<div style="font-size:10px;margin:4px 0;">' + t + ' — ' + (a.path || '') + ': ' + (a.summary || '') + '</div>';
+      }).join('') : '<div style="font-size:10px;">No alert details.</div>';
+    }).catch(() => { securityAlertsEl.innerHTML = ''; });
+  } else if (securityAlertsEl) {
+    securityAlertsEl.style.display = 'none';
+  }
+}
+document.getElementById('luna-says-ack').addEventListener('click', async function() {
+  try {
+    await fetch('/api/proactive/ack', { method: 'POST' });
+    document.getElementById('luna-says-section').style.display = 'none';
+    updateWorkingStatus();
+  } catch (_) {}
+});
 setInterval(checkStatus, 30000);
 checkStatus();
+
+// Security: run full scan and refresh panel
+const securityScanBtn = document.getElementById('security-scan-btn');
+if (securityScanBtn) {
+  securityScanBtn.addEventListener('click', async function() {
+    securityScanBtn.disabled = true;
+    securityScanBtn.textContent = 'Scanning…';
+    try {
+      const res = await fetch('/api/security/scan', { method: 'POST' });
+      const data = await res.json();
+      await checkStatus();
+      const alertsEl = document.getElementById('security-alerts');
+      if (alertsEl) {
+        if (data.report && !data.report.ok && data.report.findings && data.report.findings.length) {
+          alertsEl.style.display = 'block';
+          alertsEl.innerHTML = data.report.findings.slice(0, 15).map(f => {
+            const sev = f.severity || '';
+            const line = f.line_no != null ? ':' + f.line_no : '';
+            return '<div style="font-size:10px;margin:4px 0;color:' + (sev === 'high' ? 'var(--magenta)' : 'rgba(168,216,234,0.9)') + '">' +
+              (f.path || '') + line + ' [' + sev + '] ' + (f.message || '') + '</div>';
+          }).join('');
+        } else {
+          alertsEl.style.display = 'none';
+          alertsEl.innerHTML = '';
+        }
+      }
+    } catch (_) {}
+    securityScanBtn.disabled = false;
+    securityScanBtn.innerHTML = '<span class="cmd-icon">🛡</span> Run security scan';
+  });
+}
 
 // ── Chat state ──
 let isSending = false;
@@ -1336,9 +1761,18 @@ async function sendMessage() {
     });
     const data = await res.json();
     removeThinking();
+    if (data.need_feedback && data.request_id) {
+      showFeedbackPopup(data.request_id, data.message || 'Luna is asking…', data.options);
+      loadRecentSocial();
+      isSending = false;
+      sendBtn.disabled = false;
+      inputEl.focus();
+      return;
+    }
     const reply = data.reply || data.error || 'No response.';
     appendMsg('luna', reply);
     loadRecentSocial();
+    updateWorkingStatus();
   } catch (err) {
     removeThinking();
     appendMsg('luna', '⚠ Connection lost. Is Luna running?');
@@ -1374,7 +1808,80 @@ function showHelp() {
 // ── Camera (object + face recognition) ──
 let cameraStream = null;
 let cameraIntervalId = null;
+let cameraCaptureCanvas = null;
+let cameraCaptureVideo = null;
+let cameraCaptureCtx = null;
 const CAMERA_FRAME_MS = 2500;
+
+function getCurrentCameraFrameBase64() {
+  return new Promise(function(resolve) {
+    if (!cameraCaptureCanvas || !cameraCaptureVideo || !cameraCaptureVideo.videoWidth) {
+      resolve(null);
+      return;
+    }
+    cameraCaptureCanvas.width = cameraCaptureVideo.videoWidth;
+    cameraCaptureCanvas.height = cameraCaptureVideo.videoHeight;
+    cameraCaptureCtx.drawImage(cameraCaptureVideo, 0, 0);
+    cameraCaptureCanvas.toBlob(function(blob) {
+      if (!blob) { resolve(null); return; }
+      const r = new FileReader();
+      r.onload = function() {
+        const dataUrl = r.result;
+        resolve(dataUrl && dataUrl.indexOf(',') >= 0 ? dataUrl : null);
+      };
+      r.readAsDataURL(blob);
+    }, 'image/jpeg', 0.85);
+  });
+}
+
+async function loadCameraChatHistory() {
+  const el = document.getElementById('camera-popup-chat-messages');
+  if (!el) return;
+  try {
+    const r = await fetch('/api/camera/chat');
+    const data = await r.json();
+    const history = data.history || [];
+    el.innerHTML = history.map(function(h) {
+      const cls = h.role === 'user' ? 'user' : 'assistant';
+      const text = escapeHtml((h.content || '').trim());
+      return '<div class="msg ' + cls + '">' + (cls === 'user' ? 'You: ' : 'Granite: ') + text + '</div>';
+    }).join('');
+    el.scrollTop = el.scrollHeight;
+  } catch (_) {}
+}
+
+async function sendCameraChat() {
+  const input = document.getElementById('camera-popup-chat-input');
+  const sendBtn = document.getElementById('camera-popup-chat-send');
+  const messagesEl = document.getElementById('camera-popup-chat-messages');
+  const msg = (input && input.value || '').trim();
+  if (!msg || !messagesEl) return;
+  input.value = '';
+  sendBtn.disabled = true;
+  messagesEl.insertAdjacentHTML('beforeend', '<div class="msg user">You: ' + escapeHtml(msg) + '</div>');
+  messagesEl.insertAdjacentHTML('beforeend', '<div class="msg assistant" data-pending="1">Granite: …</div>');
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+  const imageB64 = await getCurrentCameraFrameBase64();
+  try {
+    const body = { message: msg };
+    if (imageB64) body.image = imageB64;
+    const r = await fetch('/api/camera/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const data = await r.json();
+    const pending = messagesEl.querySelector('.msg[data-pending="1"]');
+    if (pending) {
+      pending.removeAttribute('data-pending');
+      pending.textContent = 'Granite: ' + (data.reply || data.error || 'No reply.');
+    }
+  } catch (e) {
+    const pending = messagesEl.querySelector('.msg[data-pending="1"]');
+    if (pending) {
+      pending.removeAttribute('data-pending');
+      pending.textContent = 'Granite: Error — ' + (e.message || 'Request failed');
+    }
+  }
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+  sendBtn.disabled = false;
+}
 
 function updateCameraPopupAnalysis(data) {
   const el = document.getElementById('camera-popup-analysis');
@@ -1408,6 +1915,9 @@ async function toggleCamera() {
   if (cameraStream) {
     cameraStream.getTracks().forEach(t => t.stop());
     cameraStream = null;
+    cameraCaptureCanvas = null;
+    cameraCaptureVideo = null;
+    cameraCaptureCtx = null;
     if (popupVideo) popupVideo.srcObject = null;
     if (cameraIntervalId) clearInterval(cameraIntervalId);
     cameraIntervalId = null;
@@ -1431,10 +1941,13 @@ async function toggleCamera() {
     video.muted = true;
     video.playsInline = true;
     await video.play();
+    cameraCaptureVideo = video;
     const canvas = document.createElement('canvas');
     canvas.width = 640;
     canvas.height = 480;
     const ctx = canvas.getContext('2d');
+    cameraCaptureCanvas = canvas;
+    cameraCaptureCtx = ctx;
     function captureAndSend() {
       if (!cameraStream || !video.videoWidth) return;
       canvas.width = video.videoWidth;
@@ -1452,6 +1965,7 @@ async function toggleCamera() {
     }
     cameraIntervalId = setInterval(captureAndSend, CAMERA_FRAME_MS);
     captureAndSend();
+    loadCameraChatHistory();
     label.textContent = 'Camera on';
     btn.classList.add('camera-on');
     btn.title = 'Camera is on — ask Luna "what do you see" for object and face recognition. Click again to turn off.';
@@ -1464,6 +1978,333 @@ document.getElementById('close-camera-popup').addEventListener('click', closeCam
 document.getElementById('camera-popup-overlay').addEventListener('click', function(e) {
   if (e.target === this) closeCameraPopup();
 });
+document.getElementById('camera-popup-chat-send').addEventListener('click', sendCameraChat);
+document.getElementById('camera-popup-chat-input').addEventListener('keydown', function(e) {
+  if (e.key === 'Enter') sendCameraChat();
+});
+
+// ── Feedback popup (Luna asks) ──
+function showFeedbackPopup(requestId, message, options) {
+  const overlay = document.getElementById('feedback-popup-overlay');
+  const msgEl = document.getElementById('feedback-popup-message');
+  const optsEl = document.getElementById('feedback-popup-options');
+  msgEl.textContent = message;
+  optsEl.innerHTML = '';
+  if (options && options.length) {
+    options.forEach(opt => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'opt-btn';
+      btn.textContent = opt;
+      btn.onclick = () => submitFeedback(requestId, opt);
+      optsEl.appendChild(btn);
+    });
+  } else {
+    const inp = document.createElement('input');
+    inp.type = 'text';
+    inp.placeholder = 'Your answer…';
+    inp.className = 'opt-btn';
+    inp.style.width = '100%';
+    inp.onkeydown = e => { if (e.key === 'Enter') submitFeedback(requestId, inp.value.trim()); };
+    optsEl.appendChild(inp);
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'opt-btn';
+    btn.textContent = 'Send';
+    btn.onclick = () => submitFeedback(requestId, inp.value.trim());
+    optsEl.appendChild(btn);
+  }
+  overlay.classList.add('open');
+  overlay.dataset.requestId = requestId;
+}
+function closeFeedbackPopup() {
+  document.getElementById('feedback-popup-overlay').classList.remove('open');
+}
+async function submitFeedback(requestId, answer) {
+  closeFeedbackPopup();
+  try {
+    const res = await fetch('/api/feedback/respond', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ request_id: requestId, answer: answer })
+    });
+    const data = await res.json();
+    if (data.reply) appendMsg('luna', data.reply);
+    loadRecentSocial();
+    updateWorkingStatus();
+  } catch (e) {
+    appendMsg('luna', '⚠ Could not send answer.');
+  }
+}
+document.getElementById('feedback-popup-cancel').addEventListener('click', closeFeedbackPopup);
+document.getElementById('feedback-popup-overlay').addEventListener('click', function(e) {
+  if (e.target === this) closeFeedbackPopup();
+});
+
+// ── Action log ──
+document.getElementById('action-log-btn').addEventListener('click', async function() {
+  const box = document.getElementById('action-log-box');
+  if (box.style.display === 'block') {
+    box.style.display = 'none';
+    return;
+  }
+  try {
+    const res = await fetch('/api/action-log?n=25');
+    const data = await res.json();
+    box.innerHTML = (data.entries || []).map(e =>
+      '<div class="log-entry">' + (e.ts || '').slice(0, 19) + ' ' + (e.cmd || '') + ': ' + escapeHtml((e.reply || '').slice(0, 60)) + '</div>'
+    ).join('') || '<div class="log-entry">No entries yet.</div>';
+    box.style.display = 'block';
+  } catch {
+    box.innerHTML = '<div class="log-entry">Could not load log.</div>';
+    box.style.display = 'block';
+  }
+});
+
+// ── Nudge ──
+document.getElementById('nudge-send').addEventListener('click', async function() {
+  const inp = document.getElementById('nudge-input');
+  const text = (inp && inp.value || '').trim();
+  if (!text) return;
+  try {
+    const res = await fetch('/api/nudges', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message: text }) });
+    const data = await res.json();
+    if (data.ok) {
+      inp.value = '';
+      showToast('Nudge sent. Luna will consider it next reply.');
+    } else showToast(data.error || 'Failed', true);
+  } catch {
+    showToast('Failed to send nudge', true);
+  }
+});
+document.getElementById('nudge-input').addEventListener('keydown', function(e) {
+  if (e.key === 'Enter') document.getElementById('nudge-send').click();
+});
+
+// ── Knowledge base ──
+async function loadKnowledgeBox(q) {
+  const box = document.getElementById('knowledge-box');
+  const url = (q && q.trim()) ? '/api/knowledge/search?q=' + encodeURIComponent(q.trim()) + '&n=20' : '/api/knowledge';
+  try {
+    const res = await fetch(url);
+    const data = await res.json();
+    const entries = data.entries || [];
+    box.innerHTML = entries.map(e => {
+      const title = escapeHtml(e.title || e.slug);
+      const snippet = (e.snippet || '').trim() ? '<div class="log-entry-snippet">' + escapeHtml(e.snippet) + '</div>' : '';
+      const slug = (e.slug || '').replace(/"/g, '&quot;');
+      const delBtn = '<button type="button" class="knowledge-del-btn" data-slug="' + slug + '" title="Delete this entry">×</button>';
+      return '<div class="log-entry log-entry-row">' + delBtn + '<div class="log-entry-content">' + title + snippet + '</div></div>';
+    }).join('') || '<div class="log-entry">' + (q && q.trim() ? 'No matches. Try another query.' : 'No entries yet. Say "remember that …" to grow it.') + '</div>';
+  } catch {
+    box.innerHTML = '<div class="log-entry">Could not load.</div>';
+  }
+}
+document.getElementById('knowledge-btn').addEventListener('click', async function() {
+  const wrap = document.getElementById('knowledge-box-wrap');
+  const searchEl = document.getElementById('knowledge-search');
+  if (wrap.style.display === 'block') {
+    wrap.style.display = 'none';
+    return;
+  }
+  wrap.style.display = 'block';
+  searchEl.value = '';
+  await loadKnowledgeBox('');
+});
+document.getElementById('knowledge-search').addEventListener('input', function() {
+  const q = this.value.trim();
+  if (this._knowledgeTimer) clearTimeout(this._knowledgeTimer);
+  this._knowledgeTimer = setTimeout(() => loadKnowledgeBox(q), 280);
+});
+document.getElementById('knowledge-search').addEventListener('keydown', function(e) {
+  if (e.key === 'Enter') { if (this._knowledgeTimer) clearTimeout(this._knowledgeTimer); loadKnowledgeBox(this.value); }
+});
+document.getElementById('knowledge-box').addEventListener('click', async function(e) {
+  const btn = e.target.closest('.knowledge-del-btn');
+  if (!btn) return;
+  const slug = btn.getAttribute('data-slug');
+  if (!slug) return;
+  if (!confirm('Delete this knowledge entry?')) return;
+  try {
+    const r = await fetch('/api/knowledge/' + encodeURIComponent(slug), { method: 'DELETE' });
+    if (r.ok) loadKnowledgeBox(document.getElementById('knowledge-search').value);
+  } catch (_) {}
+});
+
+// ── Tool drafts ──
+async function loadToolDrafts() {
+  const listEl = document.getElementById('tool-drafts-list');
+  if (!listEl) return;
+  try {
+    const res = await fetch('/api/tool-drafts');
+    const data = await res.json();
+    const drafts = data.drafts || [];
+    listEl.innerHTML = drafts.map(d => {
+      const name = escapeHtml(d.name || '');
+      const desc = escapeHtml((d.description || '').slice(0, 60));
+      return '<div class="tool-drafts-list-entry"><div><span class="name">' + name + '</span><div class="desc">' + desc + '</div></div>' +
+        '<div><button type="button" class="cmd-btn tool-draft-approve" data-name="' + escapeHtml(d.name) + '">Approve</button> ' +
+        '<button type="button" class="knowledge-del-btn tool-draft-del" data-name="' + escapeHtml(d.name) + '">×</button></div></div>';
+    }).join('') || '<div class="log-entry">No drafts. Add one above (script must read JSON from stdin, print result).</div>';
+  } catch {
+    listEl.innerHTML = '<div class="log-entry">Could not load.</div>';
+  }
+}
+async function loadToolDraftsRejected() {
+  const listEl = document.getElementById('tool-drafts-rejected-list');
+  if (!listEl) return;
+  try {
+    const res = await fetch('/api/tool-drafts/rejected');
+    const data = await res.json();
+    const drafts = data.drafts || [];
+    listEl.innerHTML = drafts.map(d => {
+      const name = escapeHtml(d.name || '');
+      const desc = escapeHtml((d.description || '').slice(0, 50));
+      return '<div class="log-entry">' + name + (desc ? ': ' + desc : '') + '</div>';
+    }).join('') || '<div class="log-entry">None.</div>';
+  } catch {
+    listEl.innerHTML = '<div class="log-entry">Could not load.</div>';
+  }
+}
+document.getElementById('tool-drafts-btn').addEventListener('click', function() {
+  const wrap = document.getElementById('tool-drafts-wrap');
+  wrap.style.display = wrap.style.display === 'block' ? 'none' : 'block';
+  if (wrap.style.display === 'block') { loadToolDrafts(); loadToolDraftsRejected(); }
+});
+document.getElementById('tool-draft-submit').addEventListener('click', async function() {
+  const name = document.getElementById('tool-draft-name').value.trim();
+  const desc = document.getElementById('tool-draft-desc').value.trim();
+  const script = document.getElementById('tool-draft-script').value.trim();
+  if (!name) { alert('Name required (e.g. greet)'); return; }
+  try {
+    const r = await fetch('/api/tool-drafts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, description: desc, script }) });
+    const data = await r.json();
+    if (!r.ok) { alert(data.error || 'Failed'); return; }
+    document.getElementById('tool-draft-name').value = '';
+    document.getElementById('tool-draft-desc').value = '';
+    document.getElementById('tool-draft-script').value = '';
+    loadToolDrafts();
+  } catch (_) { alert('Request failed'); }
+});
+document.getElementById('tool-drafts-list').addEventListener('click', async function(e) {
+  const approveBtn = e.target.closest('.tool-draft-approve');
+  const delBtn = e.target.closest('.tool-draft-del');
+  const name = (approveBtn || delBtn)?.getAttribute('data-name');
+  if (!name) return;
+  if (approveBtn) {
+    if (!confirm('Approve and absorb this tool? It will run in a subprocess. You can then use !' + name)) return;
+    try {
+      const r = await fetch('/api/tool-drafts/' + encodeURIComponent(name) + '/approve', { method: 'POST' });
+      const data = await r.json();
+      alert(r.ok ? data.message : (data.error || 'Failed'));
+      if (r.ok) loadToolDrafts();
+    } catch (_) { alert('Request failed'); }
+    return;
+  }
+  if (delBtn) {
+    if (!confirm('Delete this draft?')) return;
+    try {
+      const r = await fetch('/api/tool-drafts/' + encodeURIComponent(name), { method: 'DELETE' });
+      if (r.ok) loadToolDrafts();
+    } catch (_) {}
+  }
+});
+
+// ── KILL / RESET (growing-agent style) ──
+document.getElementById('kill-btn').addEventListener('click', async function() {
+  try {
+    await fetch('/api/working/cancel', { method: 'POST' });
+    if (typeof updateWorkingStatus === 'function') updateWorkingStatus();
+  } catch (_) {}
+});
+document.getElementById('reset-btn').addEventListener('click', async function() {
+  if (!confirm('Reset Luna\'s biology/drives and existential state to defaults?')) return;
+  try {
+    await fetch('/api/reset', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ biology: true }) });
+    if (typeof updateWorkingStatus === 'function') updateWorkingStatus();
+  } catch (_) {}
+});
+document.getElementById('evolve-btn').addEventListener('click', async function() {
+  try {
+    const r = await fetch('/api/evolution/toggle', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) });
+    const d = await r.json();
+    if (d && d.evolution_enabled !== undefined) {
+      const btn = document.getElementById('evolve-btn');
+      if (btn) { btn.textContent = d.evolution_enabled ? 'Evolve on' : 'Evolve'; btn.classList.toggle('camera-on', !!d.evolution_enabled); }
+    }
+    if (typeof updateWorkingStatus === 'function') updateWorkingStatus();
+  } catch (_) {}
+});
+document.getElementById('evolve-now-btn').addEventListener('click', async function() {
+  const btn = document.getElementById('evolve-now-btn');
+  if (btn) btn.disabled = true;
+  try {
+    const r = await fetch('/api/evolution/run', { method: 'POST' });
+    const d = await r.json();
+    if (typeof updateWorkingStatus === 'function') updateWorkingStatus();
+    if (d && d.thought) showToast('Evolution: ' + d.thought);
+  } catch (_) { showToast('Evolution run failed', true); }
+  if (btn) btn.disabled = false;
+});
+document.getElementById('evolution-log-btn').addEventListener('click', async function() {
+  const box = document.getElementById('evolution-log-box');
+  if (box.style.display === 'block') { box.style.display = 'none'; return; }
+  try {
+    const res = await fetch('/api/evolution-log?n=50');
+    const data = await res.json();
+    const entries = data.entries || [];
+    box.innerHTML = entries.map(e => {
+      const ts = (e.ts || '').slice(0, 19);
+      const type = e.type || 'cycle';
+      const proposed = e.proposed || '?';
+      const absorbed = e.absorbed ? '✓' : '✗';
+      const err = (e.error || '').slice(0, 80);
+      return '<div class="log-entry">' + ts + ' ' + type + ' ' + proposed + ' ' + absorbed + (err ? ' — ' + escapeHtml(err) : '') + '</div>';
+    }).join('') || '<div class="log-entry">No evolution log yet.</div>';
+    box.style.display = 'block';
+  } catch {
+    box.innerHTML = '<div class="log-entry">Could not load.</div>';
+    box.style.display = 'block';
+  }
+});
+
+// ── Luna's Mind (inline D3 graph) ──
+function radius(d) {
+  if (d.type === 'core') return 14;
+  if (d.type === 'drive') return 5 + (d.value || 0) * 5;
+  return 4;
+}
+function renderMindGraph() {
+  const container = document.getElementById('mind-graph-container');
+  if (!container || typeof d3 === 'undefined') return;
+  container.innerHTML = '';
+  const w = container.clientWidth || 260;
+  const h = Math.max(200, container.clientHeight || 300);
+  const svg = d3.select(container).append('svg').attr('viewBox', [0, 0, w, h]).attr('width', '100%').attr('height', '100%');
+  const g = svg.append('g');
+  fetch('/api/mind').then(r => r.json()).then(function(data) {
+    const links = data.links.map(l => ({ ...l }));
+    const nodes = data.nodes.map(d => ({ ...d }));
+    const link = g.append('g').attr('class', 'links').selectAll('line').data(links).join('line').attr('class', 'link');
+    const node = g.append('g').attr('class', 'nodes').selectAll('g').data(nodes).join('g').attr('class', d => 'node ' + (d.type || ''));
+    node.append('circle').attr('r', radius);
+    node.append('text').attr('dy', d => (d.type === 'core' ? 18 : 10)).text(d => (d.label || d.id).slice(0, 20));
+    d3.forceSimulation(nodes).force('link', d3.forceLink(links).id(d => d.id).distance(50)).force('charge', d3.forceManyBody().strength(-150)).force('center', d3.forceCenter(w/2, h/2)).force('collision', d3.forceCollide().radius(d => radius(d) + 6)).on('tick', function() {
+      link.attr('x1', d => d.source.x).attr('y1', d => d.source.y).attr('x2', d => d.target.x).attr('y2', d => d.target.y);
+      node.attr('transform', d => `translate(${d.x},${d.y})`);
+    });
+  }).catch(() => { container.innerHTML = '<div style="padding:12px;font-size:11px;color:#666;">Mind data unavailable</div>'; });
+}
+document.getElementById('mind-panel-toggle').addEventListener('click', function() {
+  const panel = document.getElementById('mind-panel');
+  panel.classList.toggle('collapsed');
+  this.textContent = panel.classList.contains('collapsed') ? '▶' : '◀';
+  if (!panel.classList.contains('collapsed')) setTimeout(renderMindGraph, 100);
+});
+setTimeout(renderMindGraph, 500);
+setInterval(function() {
+  if (!document.getElementById('mind-panel').classList.contains('collapsed')) renderMindGraph();
+}, 60000);
 
 // ── Clear chat ──
 function clearChat() {

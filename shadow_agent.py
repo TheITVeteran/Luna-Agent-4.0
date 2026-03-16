@@ -49,8 +49,8 @@ def strip_shadow_prefix(text: str) -> str | None:
     return None
 
 
-def run_shadow(rest: str, scope: str, parse_command, run_cmd, *, log_fn=None, **kwargs) -> str:
-    """Run shadow agent: parse natural-language command and execute via run_cmd. Extra kwargs (e.g. permission_fn, author_id) are ignored."""
+def run_shadow(rest: str, scope: str, parse_command, run_cmd, *, log_fn=None, user_message=None, **kwargs) -> str | dict:
+    """Run shadow agent: parse natural-language command and execute via run_cmd. user_message is passed for request_feedback. Extra kwargs (e.g. permission_fn, author_id) are ignored."""
     rest = (rest or "").strip()
     if not rest:
         return "Say what to do, e.g. **Shadow, news** or **Shadow, share facebook**. Use **!help** for the full list."
@@ -58,10 +58,10 @@ def run_shadow(rest: str, scope: str, parse_command, run_cmd, *, log_fn=None, **
     if not parsed:
         return _unrecognized_reply()
     cmd, params = parsed
-    reply = run_cmd(cmd, params, scope)
-    if log_fn and reply:
+    reply = run_cmd(cmd, params, scope, user_message=user_message or "")
+    if log_fn and reply and not (isinstance(reply, dict) and reply.get("need_feedback")):
         try:
-            log_fn(cmd, params, reply)
+            log_fn(cmd, params, reply if isinstance(reply, str) else str(reply))
         except Exception:
             pass
     return reply if reply else "Done."
