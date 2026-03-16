@@ -15,3 +15,5 @@
 2026-03-16 23:15 | evolved        | words_list_count.py | Count unique words in a JSON list
 2026-03-16 23:15 | absorbed tool  | to_lowercase_dict_values.py | Convert values in a JSON dictionary to lowercase
 2026-03-16 23:15 | evolved        | to_lowercase_dict_values.py | Convert values in a JSON dictionary to lowercase
+2026-03-16 23:41 | absorbed tool  | to_lowercase_dict_keys.py | convert dictionary keys to lowercase
+2026-03-16 23:41 | evolved        | to_lowercase_dict_keys.py | convert dictionary keys to lowercase
