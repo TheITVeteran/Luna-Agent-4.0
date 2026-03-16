@@ -91,8 +91,6 @@ BROWSER_CHANNEL  = _env("SUNO_BROWSER_CHANNEL", "chrome")
 BROWSER_PATH     = _env("SUNO_BROWSER_PATH")
 MUSIC_DL_DIR       = _env("LUNA_MUSIC_DOWNLOAD_DIR")
 CUSTOM_PODCAST_DIR = _env("CUSTOM_PODCAST_DIR", r"D:\Luna Agent n8n")
-SEARCH_PROFILE_DIR = _env("SEARCH_PROFILE_DIR", os.path.join(_DATA, "search_profile"))
-ANALYZE_PROFILE_DIR = _env("ANALYZE_PROFILE_DIR", os.path.join(_DATA, "analyze_profile"))
 WORLD_NEWS_FEEDS = [
     "https://feeds.bbci.co.uk/news/world/rss.xml",
     "https://rss.nytimes.com/services/xml/rss/nyt/World.xml",
@@ -137,9 +135,6 @@ _shared_songs_lock = threading.Lock()
 
 # Bootstrap running flags
 _suno_boot = _x_boot = _fb_boot = _yt_boot = _ig_boot = _wa_boot = _discord_web_boot = _msg_boot = False
-_search_context = None
-_search_playwright = None
-_search_lock = threading.Lock()
 
 # Persistent contexts (WhatsApp/Messenger stay open)
 _wa_ctx = _wa_pw = _msg_ctx = _msg_pw = None
@@ -187,8 +182,7 @@ HELP_TEXT = (
     "• retry — retry last failed action with different strategies\n"
     "• !pc_vitals / how's my PC — CPU, RAM, disk\n"
     "• !luna_vitals / how's Luna — Luna's process, Ollama, uptime\n"
-    "• !analyze_website <url> — open site, read source (like Inspect), summarize\n"
-    "• !search <query> — open Google in browser; click a result, then **!analyze_current** or “analyze this page” to summarize it\n"
+    "• !search <query> — open Google search in your browser\n"
 )
 
 COMMAND_ONLY = "I'm **Luna**. Chat with me normally, or say **Shadow, [command]** for actions. Use **!help** for the list."
@@ -1127,61 +1121,16 @@ def _fetch_news(limit: int = 8) -> tuple[bool, str]:
 # ── Search ────────────────────────────────────────────────────────────────────
 
 def _search(query: str) -> tuple[bool, str]:
-    """Open Google search in Playwright browser; leave it open so you can click a result, then say 'analyze this page'."""
+    """Open Google search in the user's default browser."""
     query = (query or "").strip()
     if not query:
         return False, "Usage: !search <query>"
-    url = "https://www.google.com/search?q=" + urllib.parse.quote(query, safe="")
-    global _search_context, _search_playwright
-    with _search_lock:
-        try:
-            from playwright.sync_api import sync_playwright
-            os.makedirs(SEARCH_PROFILE_DIR, exist_ok=True)
-            if _search_context is not None:
-                try:
-                    pages = [p for p in _search_context.pages if not p.is_closed()]
-                    if pages:
-                        page = pages[0]
-                        page.goto(url, wait_until="domcontentloaded", timeout=25000)
-                        page.wait_for_timeout(1500)
-                        return True, f"Opened Google: **{query[:80]}**. Click a result, then say **analyze this page** or **!analyze_current** to summarize it."
-                except Exception:
-                    _search_context = None
-                    _search_playwright = None
-            pw = sync_playwright().start()
-            ctx = _launch_social_browser(SEARCH_PROFILE_DIR, pw)
-            page = ctx.pages[0] if ctx.pages else ctx.new_page()
-            page.goto(url, wait_until="domcontentloaded", timeout=25000)
-            page.wait_for_timeout(1500)
-            _search_context = ctx
-            _search_playwright = pw
-            return True, f"Opened Google: **{query[:80]}**. Click a result, then say **analyze this page** or **!analyze_current** to summarize it."
-        except Exception as e:
-            _search_context = None
-            _search_playwright = None
-            return False, str(e)
-
-
-def _analyze_current_page() -> tuple[bool, str]:
-    """Summarize the current page in the search browser (after !search and clicking a result)."""
-    global _search_context
-    with _search_lock:
-        ctx = _search_context
-    if ctx is None:
-        return False, "Do a **!search** first. Once results open, click a link, then say **analyze this page** or **!analyze_current**."
     try:
-        pages = [p for p in ctx.pages if not p.is_closed()]
-        if not pages:
-            return False, "Search browser has no open pages. Do **!search** again, click a result, then **!analyze_current**."
-        page = pages[0]
-        url = page.url
-        if "google.com" in url and "search" in url:
-            return False, "You're still on the Google search page. Click a result link first, then say **analyze this page** or **!analyze_current**."
-        raw = page.content()
+        url = "https://www.google.com/search?q=" + urllib.parse.quote(query, safe="")
+        webbrowser.open(url)
+        return True, f"Opened Google: **{query[:80]}**"
     except Exception as e:
-        return False, f"Could not read current page (browser may have been closed): {e}"
-    summary = _extract_summary_from_html(raw, url)
-    return True, summary
+        return False, str(e)
 
 # ── Social automation (Suno/X/Facebook/YouTube/Instagram/WhatsApp/Messenger) ──
 
@@ -3154,62 +3103,6 @@ def _luna_vitals() -> str:
         parts.append(f"**Uptime:** {uptime_m}m")
     return " **·** ".join(parts)
 
-def _extract_summary_from_html(raw: str, url: str) -> str:
-    """Extract title, meta, body text from HTML and return Ollama summary."""
-    title = ""
-    m = re.search(r"<title[^>]*>([^<]+)</title>", raw, re.I)
-    if m:
-        title = html.unescape(m.group(1).strip())[:200]
-    desc = ""
-    m2 = re.search(r'<meta\s+name=["\']description["\']\s+content=["\']([^"\']+)', raw, re.I)
-    if m2:
-        desc = html.unescape(m2.group(1).strip())[:500]
-    body = re.sub(r"<script[^>]*>.*?</script>", "", raw, flags=re.I | re.S)
-    body = re.sub(r"<style[^>]*>.*?</style>", "", body, flags=re.I | re.S)
-    body = re.sub(r"<[^>]+>", " ", body)
-    body = re.sub(r"\s+", " ", body).strip()[:4000]
-    snippet = (title + " " + desc + " " + body).strip() or "No text content found."
-    try:
-        summary = ollama_chat(
-            f"Summarize what this website is about in 2–4 sentences. Be concise.\n\nURL: {url}\n\nContent excerpt (from page source):\n{snippet}",
-            model=OLLAMA_MODEL,
-        )
-        summary = summary.strip()[:600]
-        if not summary:
-            summary = f"**Title:** {title or '—'}\n**Meta:** {desc or '—'}"[:300]
-        return summary
-    except Exception as e:
-        return f"**Title:** {title or '—'}\n**Meta:** {desc or '—'}\n(Could not summarize: {e})"
-
-
-def _analyze_website(url: str) -> tuple[bool, str]:
-    """Open URL in browser, read page source (like Inspect), and summarize what the site is about."""
-    if not url or not re.search(r"^https?://", url):
-        return False, "Give me a valid URL (e.g. https://example.com)."
-    url = url.strip().rstrip(".,;:)")
-    try:
-        from playwright.sync_api import sync_playwright
-    except ImportError:
-        return False, "Playwright not installed. pip install playwright && python -m playwright install chromium"
-    try:
-        os.makedirs(ANALYZE_PROFILE_DIR, exist_ok=True)
-        with sync_playwright() as p:
-            context = _launch_social_browser(ANALYZE_PROFILE_DIR, p)
-            page = context.pages[0] if context.pages else context.new_page()
-            try:
-                page.goto(url, wait_until="domcontentloaded", timeout=20000)
-                page.wait_for_timeout(2000)
-                raw = page.content()
-            finally:
-                try:
-                    context.close()
-                except Exception:
-                    pass
-    except Exception as e:
-        return False, f"Could not open URL or read source: {e}"
-    summary = _extract_summary_from_html(raw, url)
-    return True, summary
-
 # ── Command runner ────────────────────────────────────────────────────────────
 
 def _run_cmd(cmd: str, params: dict, scope: str | None = None) -> str:
@@ -3229,8 +3122,6 @@ def _run_cmd(cmd: str, params: dict, scope: str | None = None) -> str:
         "dm":             lambda: _run_discord_dm(p.get("target","").strip(), p.get("message","").strip()),
         "pc_vitals":      lambda: (True, _pc_vitals()),
         "luna_vitals":    lambda: (True, _luna_vitals()),
-        "analyze_website": lambda: _analyze_website(p.get("url","").strip()),
-        "analyze_current": lambda: _analyze_current_page(),
     }
     if cmd == "remind":
         time_raw = p.get("time","").strip().replace(" ","")
@@ -3434,20 +3325,6 @@ def _parse_command(text: str) -> tuple[str, dict] | None:
     # Luna's own vitals (process, Ollama, uptime)
     if re.search(r"\b(?:how'?s luna|luna status|are you okay|luna vitals|your status)\b", low):
         return "luna_vitals", {}
-    # Analyze current page (after !search and clicking a result)
-    if re.search(r"\b(?:analyze this page|analyze current page|summarize this page|what'?s this (?:page|site) about)\b", low):
-        return "analyze_current", {}
-    if low.strip() in ("analyze current", "analyze this", "summarize this"):
-        return "analyze_current", {}
-    # Analyze website — extract URL from message
-    if re.search(r"\b(?:analyze this website|what'?s this site about|analyze (?:this )?site|summarize (?:this )?website)\b", low):
-        url_m = re.search(r"https?://[^\s\)\]\"]+", raw)
-        if url_m:
-            return "analyze_website", {"url": url_m.group(0).rstrip(".,!?")}
-    if re.search(r"\b(?:can you )?analyze\b", low):
-        url_m = re.search(r"https?://[^\s\)\]\"]+", raw)
-        if url_m:
-            return "analyze_website", {"url": url_m.group(0).rstrip(".,!?")}
     # Play
     if low.startswith("play ") or low == "play":
         return "play", {"query": raw[5:].strip() if low.startswith("play ") else ""}
@@ -3472,8 +3349,8 @@ def _likely_command(text: str) -> bool:
     low = (text or "").strip().lower()
     if not low: return False
     if _CONV_START.match(low): return False
-    starters = ("play ","podcast ","podcast create ","create podcast ","search ","send ","create ","call ","dm ","tell ","inform ","msg ","share ","post ","remind ","suno ","yt_comment ","comment ","ig_dm ","fb_msg ","wa_translate ","translate voice ","translate whatsapp ","google ","news","!help","how's ","analyze ","analyze this page","analyze current","pc status","luna status","ram ")
-    return any(low.startswith(s) for s in starters) or low in ("play","news","help","skip","stop","wa_translate","translate voice","analyze current") or "analyze" in low or "luna status" in low or "pc status" in low
+    starters = ("play ","podcast ","podcast create ","create podcast ","search ","send ","create ","call ","dm ","tell ","inform ","msg ","share ","post ","remind ","suno ","yt_comment ","comment ","ig_dm ","fb_msg ","wa_translate ","translate voice ","translate whatsapp ","google ","news","!help","how's ","pc status","luna status","ram ")
+    return any(low.startswith(s) for s in starters) or low in ("play","news","help","skip","stop","wa_translate","translate voice") or "luna status" in low or "pc status" in low
 
 def _is_retry(msg: str) -> bool:
     low = (msg or "").strip().lower()
@@ -4065,14 +3942,6 @@ def _handle_bang(msg: str, scope: str) -> str:
         return _pc_vitals()
     if cmd in ("!luna_vitals","!luna_status","!your_status"):
         return _luna_vitals()
-    if cmd in ("!analyze_website","!analyze_site","!summarize_website"):
-        if not args: return "Usage: !analyze_website <url>"
-        url = (re.search(r"https?://[^\s]+", args) or type("",(), {"group": lambda s,x: args})()).group(0)
-        ok, r = _analyze_website(url)
-        return r if ok else f"❌ {r}"
-    if cmd == "!analyze_current":
-        ok, r = _analyze_current_page()
-        return r if ok else f"❌ {r}"
     if cmd in ("!ig_dm","!igdm"):
         if not args: return "Usage: !ig_dm <username> [message]"
         ps = args.split(None, 1)
