@@ -1,0 +1,13 @@
+# Luna 5.0 — keep secrets and generated data out of git
+.env
+.env.local
+*.pyc
+__pycache__/
+.Playwright/
+node_modules/
+.venv/
+venv/
+*.log
+data/*_profile/
+data/*.json
+!data/skills/

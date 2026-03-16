@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>TranscribeMe — Luna</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com"/>
+  <link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@300;400;500;600&family=Exo+2:wght@0,200;0,300;0,400&display=swap" rel="stylesheet"/>
+  <style>
+    :root {
+      --cyan: #00d4ff;
+      --cyan-dim: rgba(0,212,255,0.15);
+      --cyan-glow: rgba(0,212,255,0.4);
+      --bg: #020b14;
+      --panel: rgba(0,20,40,0.85);
+      --border: rgba(0,212,255,0.25);
+      --text: #a8d8ea;
+      --text-bright: #e0f7ff;
+      --font-main: 'Rajdhani', sans-serif;
+      --font-data: 'Exo 2', sans-serif;
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: var(--bg);
+      font-family: var(--font-main);
+      color: var(--text);
+      min-height: 100vh;
+      line-height: 1.5;
+    }
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background-image:
+        linear-gradient(rgba(0,212,255,0.03) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(0,212,255,0.03) 1px, transparent 1px);
+      background-size: 40px 40px;
+      pointer-events: none;
+      z-index: 0;
+    }
+    .wrap { position: relative; z-index: 1; max-width: 720px; margin: 0 auto; padding: 24px 20px 60px; }
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 12px;
+      padding: 16px 0 24px;
+      border-bottom: 1px solid var(--border);
+      margin-bottom: 28px;
+    }
+    .logo { display: flex; align-items: center; gap: 12px; }
+    .logo-orb {
+      width: 40px; height: 40px;
+      border-radius: 50%;
+      background: radial-gradient(circle at 35% 35%, #40e8ff, #0066aa);
+      border: 1.5px solid var(--cyan);
+      box-shadow: 0 0 18px var(--cyan-glow);
+    }
+    .logo h1 { font-size: 1.5rem; color: var(--text-bright); font-weight: 500; }
+    .logo span { font-size: 0.75rem; color: rgba(0,212,255,0.6); font-weight: 300; }
+    .back { color: var(--cyan); text-decoration: none; font-size: 0.95rem; }
+    .back:hover { text-decoration: underline; }
+    .hero {
+      text-align: center;
+      padding: 20px 0 32px;
+    }
+    .hero h2 {
+      font-size: 1.35rem;
+      font-weight: 500;
+      color: var(--text-bright);
+      margin-bottom: 8px;
+    }
+    .hero p { color: rgba(0,212,255,0.75); font-size: 0.95rem; }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 18px 20px;
+      margin-bottom: 16px;
+    }
+    .card h3 {
+      font-size: 1rem;
+      color: var(--cyan);
+      margin-bottom: 10px;
+      font-weight: 500;
+    }
+    .card p { font-size: 0.9rem; color: rgba(168,216,234,0.9); margin-bottom: 12px; }
+    .card input[type="text"],
+    .card textarea {
+      width: 100%;
+      background: rgba(0,20,40,0.8);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 10px 12px;
+      color: var(--text);
+      font-family: var(--font-data);
+      font-size: 0.9rem;
+      margin-bottom: 10px;
+    }
+    .card textarea { min-height: 80px; resize: vertical; }
+    .card input:focus, .card textarea:focus {
+      outline: none;
+      border-color: var(--cyan);
+    }
+    .card .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+    .btn {
+      background: rgba(0,212,255,0.2);
+      border: 1px solid var(--cyan);
+      color: var(--cyan);
+      padding: 8px 16px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-family: inherit;
+      font-size: 0.9rem;
+    }
+    .btn:hover { background: rgba(0,212,255,0.3); }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .btn-upload { position: relative; }
+    .btn-upload input { position: absolute; inset: 0; opacity: 0; cursor: pointer; width: 100%; height: 100%; }
+    .result {
+      margin-top: 12px;
+      padding: 12px;
+      background: rgba(0,20,40,0.9);
+      border-radius: 6px;
+      border-left: 3px solid var(--cyan);
+      font-size: 0.9rem;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .result.err { border-left-color: #ff6b6b; color: #ff9e9e; }
+    .foot {
+      text-align: center;
+      padding: 24px 0 0;
+      font-size: 0.8rem;
+      color: rgba(0,212,255,0.45);
+    }
+    .foot a { color: var(--cyan); text-decoration: none; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <div class="logo">
+        <div class="logo-orb"></div>
+        <div>
+          <h1>TranscribeMe</h1>
+          <span>by Luna — voice to text & more</span>
+        </div>
+      </div>
+      <a class="back" href="/">← Back to Luna</a>
+    </header>
+
+    <section class="hero">
+      <h2>Convert voice notes to text</h2>
+      <p>Transcribe, translate to English, ask questions, and set reminders — no extra app.</p>
+    </section>
+
+    <div class="card">
+      <h3>📝 Transcribe</h3>
+      <p>Upload a voice note to get text in the original language.</p>
+      <div class="row">
+        <label class="btn btn-upload">
+          <input type="file" id="transcribe-file" accept="audio/*,.ogg,.webm,.mp3,.m4a,.opus"/>
+          Choose audio…
+        </label>
+        <span id="transcribe-status" style="font-size:0.85rem;color:rgba(0,212,255,0.7);"></span>
+      </div>
+      <div id="transcribe-result" class="result" style="display:none;"></div>
+    </div>
+
+    <div class="card">
+      <h3>🌐 Translate WhatsApp voice to English</h3>
+      <p>Translate the <strong>last voice message</strong> in a WhatsApp chat to English. Open the chat in WhatsApp Web first, or type a contact name to open that chat.</p>
+      <input type="text" id="translate-contact" placeholder="Optional: contact name (leave blank for current chat)"/>
+      <div class="row">
+        <button class="btn" id="translate-btn">Translate last WhatsApp voice</button>
+        <span id="translate-status" style="font-size:0.85rem;color:rgba(0,212,255,0.7);"></span>
+      </div>
+      <div id="translate-result" class="result" style="display:none;"></div>
+    </div>
+
+    <div class="card">
+      <h3>💬 Ask (GPT-style)</h3>
+      <p>Ask anything and get an instant answer.</p>
+      <input type="text" id="ask-input" placeholder="e.g. Best gift idea for an anniversary?"/>
+      <button class="btn" id="ask-btn">Ask</button>
+      <div id="ask-result" class="result" style="display:none;"></div>
+    </div>
+
+    <div class="card">
+      <h3>⏰ Remind me</h3>
+      <p>Send a message like: &quot;remind me to call mom in 30 minutes&quot; (or &quot;recordame llamar a mamá en 30 minutos&quot;).</p>
+      <input type="text" id="remind-input" placeholder="remind me to … in … minutes"/>
+      <button class="btn" id="remind-btn">Set reminder</button>
+      <div id="remind-result" class="result" style="display:none;"></div>
+    </div>
+
+    <p class="foot">
+      TranscribeMe-style module for <a href="/">Luna</a>. We don’t store your audio.
+    </p>
+  </div>
+
+  <script>
+    const base = '/transcribeme';
+    function showResult(id, text, isError) {
+      const el = document.getElementById(id);
+      if (!el) return;
+      el.textContent = text || '';
+      el.className = 'result' + (isError ? ' err' : '');
+      el.style.display = text ? 'block' : 'none';
+    }
+    function setStatus(id, text) {
+      const el = document.getElementById(id);
+      if (el) el.textContent = text || '';
+    }
+
+    document.getElementById('transcribe-file').addEventListener('change', async function(e) {
+      const file = e.target.files && e.target.files[0];
+      e.target.value = '';
+      if (!file) return;
+      setStatus('transcribe-status', 'Transcribing…');
+      showResult('transcribe-result', '');
+      try {
+        const form = new FormData();
+        form.append('file', file);
+        const res = await fetch(base + '/api/transcribe', { method: 'POST', body: form });
+        const data = await res.json();
+        setStatus('transcribe-status', '');
+        if (data.text != null) showResult('transcribe-result', data.text);
+        else showResult('transcribe-result', data.error || 'Failed', true);
+      } catch (err) {
+        setStatus('transcribe-status', '');
+        showResult('transcribe-result', err.message || 'Error', true);
+      }
+    });
+
+    document.getElementById('translate-btn').addEventListener('click', async function() {
+      const contactEl = document.getElementById('translate-contact');
+      const contact = (contactEl && contactEl.value || '').trim() || undefined;
+      const btn = document.getElementById('translate-btn');
+      setStatus('translate-status', 'Opening WhatsApp…');
+      showResult('translate-result', '');
+      btn.disabled = true;
+      try {
+        const res = await fetch(base + '/api/translate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ contact: contact || '' })
+        });
+        const data = await res.json();
+        setStatus('translate-status', '');
+        if (data.ok && data.text) showResult('translate-result', data.text);
+        else showResult('translate-result', data.error || data.text || 'Failed', true);
+      } catch (err) {
+        setStatus('translate-status', '');
+        showResult('translate-result', err.message || 'Error', true);
+      }
+      btn.disabled = false;
+    });
+
+    document.getElementById('ask-btn').addEventListener('click', async function() {
+      const input = document.getElementById('ask-input');
+      const q = (input && input.value || '').trim();
+      if (!q) return;
+      const btn = document.getElementById('ask-btn');
+      btn.disabled = true;
+      showResult('ask-result', 'Thinking…');
+      try {
+        const res = await fetch(base + '/api/ask', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ question: q })
+        });
+        const data = await res.json();
+        if (data.answer != null) showResult('ask-result', data.answer);
+        else showResult('ask-result', data.error || 'Failed', true);
+      } catch (err) {
+        showResult('ask-result', err.message || 'Error', true);
+      }
+      btn.disabled = false;
+    });
+
+    document.getElementById('remind-btn').addEventListener('click', async function() {
+      const input = document.getElementById('remind-input');
+      const text = (input && input.value || '').trim();
+      if (!text) return;
+      const btn = document.getElementById('remind-btn');
+      btn.disabled = true;
+      showResult('remind-result', 'Setting…');
+      try {
+        const res = await fetch(base + '/api/remind', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text: text })
+        });
+        const data = await res.json();
+        if (data.ok) showResult('remind-result', data.message || 'Reminder set.');
+        else showResult('remind-result', data.error || 'Failed', true);
+      } catch (err) {
+        showResult('remind-result', err.message || 'Error', true);
+      }
+      btn.disabled = false;
+    });
+  </script>
+</body>
+</html>
