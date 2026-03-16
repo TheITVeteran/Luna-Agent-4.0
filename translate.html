@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>TranscribeMe — Luna</title>
+  <title>Translate — Luna</title>
   <link rel="preconnect" href="https://fonts.googleapis.com"/>
   <link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@300;400;500;600&family=Exo+2:wght@0,200;0,300;0,400&display=swap" rel="stylesheet"/>
   <style>
@@ -144,54 +144,53 @@
       <div class="logo">
         <div class="logo-orb"></div>
         <div>
-          <h1>TranscribeMe</h1>
-          <span>by Luna — voice to text & more</span>
+          <h1>Translate</h1>
+          <span>by Luna — messages & voice → English</span>
         </div>
       </div>
       <a class="back" href="/">← Back to Luna</a>
     </header>
 
     <section class="hero">
-      <h2>Convert voice notes to text</h2>
-      <p>Transcribe, translate to English, ask questions, and set reminders — no extra app.</p>
+      <h2>Translate anything into English</h2>
+      <p>Paste a message or drop a voice clip — Luna detects the language and gives you clean English.</p>
     </section>
 
     <div class="card">
-      <h3>📝 Transcribe</h3>
-      <p>Upload a voice note to get text in the original language.</p>
+      <h3>💬 Translate text</h3>
+      <p>Paste any message or paragraph. Luna will detect the language and translate it to English.</p>
+      <textarea id="text-input" placeholder="Paste any message here…"></textarea>
+      <div class="row">
+        <button class="btn" id="text-btn">Translate text</button>
+        <span id="text-status" style="font-size:0.85rem;color:rgba(0,212,255,0.7);"></span>
+      </div>
+      <div id="text-result" class="result" style="display:none;"></div>
+    </div>
+
+    <div class="card">
+      <h3>🎧 Translate audio / voice clip</h3>
+      <p>Record a quick voice note, or upload an existing clip. Luna will translate the speech into English.</p>
       <div class="row">
         <label class="btn btn-upload">
-          <input type="file" id="transcribe-file" accept="audio/*,.ogg,.webm,.mp3,.m4a,.opus"/>
+          <input type="file" id="audio-file" accept="audio/*,.ogg,.webm,.mp3,.m4a,.opus"/>
           Choose audio…
         </label>
-        <span id="transcribe-status" style="font-size:0.85rem;color:rgba(0,212,255,0.7);"></span>
+        <button class="btn" id="record-btn">Record voice</button>
+        <span id="audio-status" style="font-size:0.85rem;color:rgba(0,212,255,0.7);"></span>
       </div>
-      <div id="transcribe-result" class="result" style="display:none;"></div>
-    </div>
-
-    <div class="card">
-      <h3>💬 Ask (GPT-style)</h3>
-      <p>Ask anything and get an instant answer.</p>
-      <input type="text" id="ask-input" placeholder="e.g. Best gift idea for an anniversary?"/>
-      <button class="btn" id="ask-btn">Ask</button>
-      <div id="ask-result" class="result" style="display:none;"></div>
-    </div>
-
-    <div class="card">
-      <h3>⏰ Remind me</h3>
-      <p>Send a message like: &quot;remind me to call mom in 30 minutes&quot; (or &quot;recordame llamar a mamá en 30 minutos&quot;).</p>
-      <input type="text" id="remind-input" placeholder="remind me to … in … minutes"/>
-      <button class="btn" id="remind-btn">Set reminder</button>
-      <div id="remind-result" class="result" style="display:none;"></div>
+      <div id="audio-result" class="result" style="display:none;"></div>
     </div>
 
     <p class="foot">
-      TranscribeMe-style module for <a href="/">Luna</a>. We don’t store your audio.
+      Translate module for <a href="/">Luna</a>. We don’t store your audio or text.
     </p>
   </div>
 
   <script>
-    const base = '/transcribeme';
+    const base = '/translate';
+    let mediaRecorder = null;
+    let recordedChunks = [];
+
     function showResult(id, text, isError) {
       const el = document.getElementById(id);
       if (!el) return;
@@ -204,69 +203,98 @@
       if (el) el.textContent = text || '';
     }
 
-    document.getElementById('transcribe-file').addEventListener('change', async function(e) {
+    document.getElementById('text-btn').addEventListener('click', async function() {
+      const input = document.getElementById('text-input');
+      const text = (input && input.value || '').trim();
+      if (!text) return;
+      const btn = document.getElementById('text-btn');
+      btn.disabled = true;
+      setStatus('text-status', 'Translating…');
+      showResult('text-result', '');
+      try {
+        const res = await fetch(base + '/api/text', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text })
+        });
+        const data = await res.json();
+        setStatus('text-status', '');
+        if (data.translation != null) showResult('text-result', data.translation);
+        else showResult('text-result', data.error || 'Failed', true);
+      } catch (err) {
+        setStatus('text-status', '');
+        showResult('text-result', err.message || 'Error', true);
+      }
+      btn.disabled = false;
+    });
+
+    document.getElementById('audio-file').addEventListener('change', async function(e) {
       const file = e.target.files && e.target.files[0];
       e.target.value = '';
       if (!file) return;
-      setStatus('transcribe-status', 'Transcribing…');
-      showResult('transcribe-result', '');
+      setStatus('audio-status', 'Translating…');
+      showResult('audio-result', '');
       try {
         const form = new FormData();
         form.append('file', file);
-        const res = await fetch(base + '/api/transcribe', { method: 'POST', body: form });
+        const res = await fetch(base + '/api/audio', { method: 'POST', body: form });
         const data = await res.json();
-        setStatus('transcribe-status', '');
-        if (data.text != null) showResult('transcribe-result', data.text);
-        else showResult('transcribe-result', data.error || 'Failed', true);
+        setStatus('audio-status', '');
+        if (data.translation != null) showResult('audio-result', data.translation);
+        else showResult('audio-result', data.error || 'Failed', true);
       } catch (err) {
-        setStatus('transcribe-status', '');
-        showResult('transcribe-result', err.message || 'Error', true);
+        setStatus('audio-status', '');
+        showResult('audio-result', err.message || 'Error', true);
       }
     });
 
-    document.getElementById('ask-btn').addEventListener('click', async function() {
-      const input = document.getElementById('ask-input');
-      const q = (input && input.value || '').trim();
-      if (!q) return;
-      const btn = document.getElementById('ask-btn');
-      btn.disabled = true;
-      showResult('ask-result', 'Thinking…');
-      try {
-        const res = await fetch(base + '/api/ask', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ question: q })
-        });
-        const data = await res.json();
-        if (data.answer != null) showResult('ask-result', data.answer);
-        else showResult('ask-result', data.error || 'Failed', true);
-      } catch (err) {
-        showResult('ask-result', err.message || 'Error', true);
+    document.getElementById('record-btn').addEventListener('click', async function() {
+      const btn = document.getElementById('record-btn');
+      if (mediaRecorder && mediaRecorder.state === 'recording') {
+        mediaRecorder.stop();
+        btn.textContent = 'Record voice';
+        btn.disabled = true;
+        return;
       }
-      btn.disabled = false;
-    });
-
-    document.getElementById('remind-btn').addEventListener('click', async function() {
-      const input = document.getElementById('remind-input');
-      const text = (input && input.value || '').trim();
-      if (!text) return;
-      const btn = document.getElementById('remind-btn');
-      btn.disabled = true;
-      showResult('remind-result', 'Setting…');
       try {
-        const res = await fetch(base + '/api/remind', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ text: text })
-        });
-        const data = await res.json();
-        if (data.ok) showResult('remind-result', data.message || 'Reminder set.');
-        else showResult('remind-result', data.error || 'Failed', true);
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        recordedChunks = [];
+        mediaRecorder = new MediaRecorder(stream);
+        mediaRecorder.ondataavailable = e => {
+          if (e.data && e.data.size > 0) recordedChunks.push(e.data);
+        };
+        mediaRecorder.onstop = async () => {
+          try {
+            const blob = new Blob(recordedChunks, { type: 'audio/webm' });
+            setStatus('audio-status', 'Translating…');
+            showResult('audio-result', '');
+            const res = await fetch(base + '/api/audio', {
+              method: 'POST',
+              body: blob
+            });
+            const data = await res.json();
+            setStatus('audio-status', '');
+            if (data.translation != null) showResult('audio-result', data.translation);
+            else showResult('audio-result', data.error || 'Failed', true);
+          } catch (err) {
+            setStatus('audio-status', '');
+            showResult('audio-result', err.message || 'Error', true);
+          } finally {
+            btn.disabled = false;
+            if (stream && typeof stream.getTracks === 'function') {
+              stream.getTracks().forEach(t => t.stop());
+            }
+          }
+        };
+        mediaRecorder.start();
+        btn.textContent = 'Stop recording';
+        setStatus('audio-status', 'Recording…');
       } catch (err) {
-        showResult('remind-result', err.message || 'Error', true);
+        setStatus('audio-status', '');
+        showResult('audio-result', err.message || 'Microphone error', true);
       }
-      btn.disabled = false;
     });
   </script>
 </body>
 </html>
+

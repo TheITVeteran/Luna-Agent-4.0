@@ -168,7 +168,6 @@ HELP_TEXT = (
     "• !yt_comment <url> — transcribe video + AI comment with real context\n"
     "• !ig_dm <user> [msg] — Instagram DM\n"
     "• !fb_msg <name> [msg] — Messenger message\n"
-    "• !wa_translate [contact] — translate last WhatsApp voice message to English\n"
     "• !call <username or user ID> — Discord: contact user (by ID), join VC, transcribe their voice & answer with TTS\n"
     "• !dm <user or ID> [what to say] — Discord DM (Luna turns your input into a dynamic reply, like YT comments)\n"
     "• !msg <contact> [desc] — WhatsApp message\n"
@@ -182,6 +181,7 @@ HELP_TEXT = (
     "• retry — retry last failed action with different strategies\n"
     "• !pc_vitals / how's my PC — CPU, RAM, disk\n"
     "• !luna_vitals / how's Luna — Luna's process, Ollama, uptime\n"
+    "• Camera (UI) — turn on to let Luna see you; ask **what do you see** for object + face recognition\n"
     "• !search <query> — open Google search in your browser\n"
 )
 
@@ -772,6 +772,43 @@ def _get_podcast_tracks() -> tuple[bool, list[dict] | str]:
         return True, tracks[:100]  # cap at 100 episodes
     except Exception as e:
         return False, str(e)
+
+
+def _format_podcast_menu(tracks: list[dict]) -> str:
+    lines = ["🎙️ **Custom podcast episodes in your folder:**"]
+    for i, t in enumerate(tracks, 1):
+        base = os.path.basename(t.get("local_path") or t.get("title") or f"episode_{i}")
+        lines.append(f"{i}. {base}")
+    lines.append("")
+    lines.append("Say `!podcast <number>` or `!podcast <part of name>` to play one of them in Discord voice.")
+    return "\n".join(lines)
+
+
+def _pick_podcast_tracks(tracks: list[dict], choice: str | None) -> tuple[bool, list[dict] | str]:
+    """Given all podcast tracks and a user choice (index or substring), return the tracks to queue."""
+    if not choice:
+        return True, tracks
+    choice = choice.strip()
+    if not choice:
+        return True, tracks
+    # Numeric index (1-based)
+    if choice.isdigit():
+        idx = int(choice) - 1
+        if 0 <= idx < len(tracks):
+            return True, [tracks[idx]]
+        return False, f"No podcast #{choice}. Pick a number between 1 and {len(tracks)}."
+    # Try substring match on filename / title
+    clow = choice.lower()
+    matches: list[dict] = []
+    for t in tracks:
+        name = os.path.basename(t.get("local_path") or t.get("title") or "").lower()
+        title = (t.get("title") or "").lower()
+        if clow in name or clow in title:
+            matches.append(t)
+    if not matches:
+        return False, f"I couldn't find a podcast matching **{choice}**."
+    # Prefer single match; if many, still queue just the first for clarity
+    return True, [matches[0]]
 
 
 def _create_podcast_from_description(description: str) -> tuple[bool, str]:
@@ -2239,17 +2276,13 @@ def _wa_click_contact_row(page, contact: str) -> bool:
             except Exception:
                 pass
 
-        # Fallback 4: first visible chat row (search often returns one result; open it)
+        # Fallback 4: first visible chat row under search — when search is narrowed,
+        # the correct contact is usually the first result in the Chats list.
         try:
             first_row = page.locator('[role="listitem"]').first
             if first_row.count() > 0 and first_row.is_visible():
-                first_text = (first_row.inner_text() or "").strip()
-                if contact_phone_rest and contact_phone_rest in re.sub(r"\D", "", first_text):
-                    if do_click(first_row):
-                        return True
-                if any(v in first_text for v in variants):
-                    if do_click(first_row):
-                        return True
+                if do_click(first_row):
+                    return True
         except Exception:
             pass
 
@@ -2269,38 +2302,43 @@ def _wa_click_contact_row(page, contact: str) -> bool:
 
 def _wa_find_message_box(page, wait_sec: float = 5):
     """
-    After choosing a contact, find the message input by the 'Type a message' placeholder/label.
+    After choosing a contact, find the message input by the 'Type a message' / 'Type message here' placeholder/label.
     Waits for it to appear then returns the locator or None.
     """
     try:
         # Wait for the message box to appear (chat pane loads after selecting contact)
         for _ in range(int(wait_sec * 2)):
-            # 1. Placeholder "Type a message" (WhatsApp Web uses this)
-            pl = page.get_by_placeholder("Type a message")
-            if pl.count() > 0 and pl.first.is_visible():
-                return pl.first
-            # 2. data-placeholder / aria-placeholder
+            # 1. Placeholder text (WhatsApp Web: 'Type a message' or 'Type message here')
+            for placeholder in ("Type a message", "Type message here"):
+                pl = page.get_by_placeholder(placeholder)
+                if pl.count() > 0 and pl.first.is_visible():
+                    return pl.first
+            # 2. data-placeholder / aria-placeholder / contenteditable near bottom
             for sel in (
                 '[data-placeholder*="Type a message"]',
                 '[data-placeholder="Type a message"]',
                 '[aria-placeholder*="Type a message"]',
+                '[data-placeholder*="Type message here"]',
+                '[aria-placeholder*="Type message here"]',
                 'footer [contenteditable="true"]',
                 'div[contenteditable="true"][data-placeholder*="Type a message"]',
+                'div[contenteditable="true"][data-placeholder*="Type message here"]',
                 'div[role="textbox"][aria-placeholder*="Type a message"]',
+                'div[role="textbox"][aria-placeholder*="Type message here"]',
             ):
                 loc = page.locator(sel).first
                 if loc.count() > 0 and loc.is_visible():
                     return loc
-            # 3. Element that contains the text "Type a message" (e.g. placeholder text)
-            by_text = page.get_by_text("Type a message", exact=False).first
-            if by_text.count() > 0 and by_text.is_visible():
-                # Might be the label; the input could be sibling or parent contenteditable
-                try:
-                    editable = by_text.locator("xpath=(./ancestor::*[@contenteditable='true'])[1]").first
-                    if editable.count() > 0 and editable.is_visible():
-                        return editable
-                except Exception:
-                    pass
+            # 3. Element that contains the text placeholder (label) and climb to contenteditable ancestor
+            for txt in ("Type a message", "Type message here"):
+                by_text = page.get_by_text(txt, exact=False).first
+                if by_text.count() > 0 and by_text.is_visible():
+                    try:
+                        editable = by_text.locator("xpath=(./ancestor::*[@contenteditable='true'])[1]").first
+                        if editable.count() > 0 and editable.is_visible():
+                            return editable
+                    except Exception:
+                        pass
             page.wait_for_timeout(500)
         return None
     except Exception:
@@ -2380,10 +2418,25 @@ def _run_wa_msg(contact: str, description: str | None = None) -> tuple[bool, str
                     page.wait_for_timeout(3500)
                     if not _wa_click_contact_row(page, contact):
                         return False, f"Could not find contact **{contact}** in search. Check the full number or name."
-                    # Wait for chat to open and find the message box by "Type a message"
-                    mi = _wa_find_message_box(page)
+                    # Make sure the conversation window actually opened (center pane),
+                    # not just the promo "Download WhatsApp for Windows" screen.
+                    for _ in range(3):
+                        html = (page.content() or "").lower()
+                        if "download whatsapp for windows" not in html:
+                            break
+                        _wa_click_contact_row(page, contact)
+                        page.wait_for_timeout(700)
+                    # Wait for chat to open and find the message box by placeholder.
+                    # If it doesn't appear, try re-clicking the chat row and checking again (analyze window & retry).
+                    mi = None
+                    for _ in range(3):
+                        mi = _wa_find_message_box(page)
+                        if mi:
+                            break
+                        _wa_click_contact_row(page, contact)
+                        page.wait_for_timeout(800)
                     if not mi:
-                        return True, f"Opened chat with {contact} but couldn't find message box (look for 'Type a message')."
+                        return True, f"Opened chat with {contact} but couldn't find message box (look for 'Type message here')."
                     mi.click(); mi.fill(""); mi.press_sequentially(msg_text, delay=30)
                     page.wait_for_timeout(400)
                     for sel in ['[data-testid="send"]','[aria-label="Send"]']:
@@ -3103,6 +3156,81 @@ def _luna_vitals() -> str:
         parts.append(f"**Uptime:** {uptime_m}m")
     return " **·** ".join(parts)
 
+# ── Camera (object + face recognition) ────────────────────────────────────────
+# Requires: opencv-python (pip install opencv-python). Optional: ultralytics for object detection (pip install ultralytics).
+
+_camera_last_result: dict | None = None
+_camera_lock = threading.Lock()
+
+def _process_camera_frame(image_bytes: bytes) -> dict:
+    """Run face detection and optional object detection on image bytes. Returns structured result."""
+    result = {"objects": [], "face_count": 0, "summary": "", "ts": time.time(), "error": None}
+    try:
+        import cv2
+        import numpy as np
+        nparr = np.frombuffer(image_bytes, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        if img is None:
+            result["error"] = "Could not decode image"
+            result["summary"] = "Could not decode the image."
+            return result
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        # Face detection (OpenCV Haar cascade — built-in)
+        face_cascade = cv2.CascadeClassifier(
+            cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+        )
+        faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
+        result["face_count"] = len(faces)
+        # Object detection (optional: YOLO)
+        try:
+            from ultralytics import YOLO
+            model = YOLO("yolov8n.pt")
+            det = model(img, verbose=False)[0]
+            names = getattr(det, "names", {}) or {}
+            for box in det.boxes:
+                cls_id = int(box.cls.item())
+                conf = float(box.conf.item())
+                name = names.get(cls_id, f"object_{cls_id}")
+                result["objects"].append({"label": name, "confidence": round(conf, 2)})
+        except Exception:
+            pass
+        # Build summary
+        parts = []
+        if result["face_count"]:
+            parts.append(f"{result['face_count']} face(s) detected")
+        if result["objects"]:
+            from collections import Counter
+            counts = Counter(o["label"] for o in result["objects"])
+            parts.append("objects: " + ", ".join(f"{v} {k}" for k, v in counts.most_common(12)))
+        result["summary"] = "; ".join(parts) if parts else "No faces or objects detected."
+    except ImportError as e:
+        result["error"] = str(e)
+        result["summary"] = "Install opencv-python for camera: pip install opencv-python"
+    except Exception as e:
+        result["error"] = str(e)
+        result["summary"] = f"Camera processing error: {e}"
+    return result
+
+def _get_camera_see_result() -> str:
+    """Return a user-facing summary of the last camera analysis for 'what do you see'."""
+    with _camera_lock:
+        r = _camera_last_result
+    if not r:
+        return "I don't have a camera view yet. Turn on **Camera** in the UI so I can see you, then ask again."
+    summary = r.get("summary") or "Nothing detected."
+    face_count = r.get("face_count", 0)
+    objects = r.get("objects") or []
+    parts = [summary]
+    if face_count and "face" not in summary.lower():
+        parts.insert(0, f"I see **{face_count}** face(s).")
+    if objects:
+        from collections import Counter
+        counts = Counter(o["label"] for o in objects)
+        obj_str = ", ".join(f"{v} {k}" for k, v in counts.most_common(10))
+        if obj_str and "objects:" not in summary:
+            parts.append(f"Objects: {obj_str}.")
+    return " ".join(parts)
+
 # ── Command runner ────────────────────────────────────────────────────────────
 
 def _run_cmd(cmd: str, params: dict, scope: str | None = None) -> str:
@@ -3117,11 +3245,11 @@ def _run_cmd(cmd: str, params: dict, scope: str | None = None) -> str:
         "ig_dm":          lambda: _run_ig_dm(p.get("target","").strip(), p.get("message","").strip()),
         "fb_msg":         lambda: _run_messenger_msg(p.get("target","").strip(), p.get("message","").strip()),
         "msg":            lambda: _run_wa_msg(p.get("contact","").strip(), p.get("description",None)),
-        "wa_translate":   lambda: _run_wa_translate(p.get("contact","").strip() or None),
         "call":           lambda: _run_discord_call(p.get("contact","").strip()),
         "dm":             lambda: _run_discord_dm(p.get("target","").strip(), p.get("message","").strip()),
         "pc_vitals":      lambda: (True, _pc_vitals()),
         "luna_vitals":    lambda: (True, _luna_vitals()),
+        "camera_see":     lambda: (True, _get_camera_see_result()),
     }
     if cmd == "remind":
         time_raw = p.get("time","").strip().replace(" ","")
@@ -3184,15 +3312,24 @@ def _run_cmd(cmd: str, params: dict, scope: str | None = None) -> str:
             return f"❌ {e}"
         return "❌ Discord not ready."
     if cmd == "podcast":
+        choice = (p.get("choice") or "").strip()
+        # If no choice: just list available episodes, do NOT auto-play.
+        if not choice:
+            ok, result = _get_podcast_tracks()
+            if not ok:
+                return f"❌ {result}"
+            tracks = result
+            return _format_podcast_menu(tracks)
+        # With a choice: play that specific episode for the linked user.
         try:
             loop = getattr(bot, "loop", None)
             if loop and loop.is_running():
-                future = asyncio.run_coroutine_threadsafe(_play_podcast_in_discord_async(), loop)
-                ok, msg = future.result(timeout=25)
+                future = asyncio.run_coroutine_threadsafe(_play_podcast_in_discord_async(choice), loop)
+                ok, msg = future.result(timeout=30)
                 return f"✅ {msg}" if ok else f"❌ {msg}"
         except Exception as e:
             return f"❌ {e}"
-        return "❌ Discord not ready. Join a voice channel and try **!podcast** again."
+        return "❌ Discord not ready. Join a voice channel and try **!podcast 1** (for example) again."
     if cmd == "podcast_create":
         ok, msg = _create_podcast_from_description((p.get("description") or "").strip())
         if not ok: _record_failure("podcast_create", msg, p)
@@ -3265,15 +3402,6 @@ def _parse_command(text: str) -> tuple[str, dict] | None:
     for pfx in ("search for ","search ","google ","look up ","find "):
         if low.startswith(pfx):
             return "search", {"query": raw[len(pfx):].strip()}
-    # WhatsApp translate last voice message
-    if low.startswith("wa_translate "):
-        return "wa_translate", {"contact": raw[len("wa_translate "):].strip()}
-    if low.startswith("translate voice "):
-        return "wa_translate", {"contact": raw[len("translate voice "):].strip()}
-    if low.startswith("translate whatsapp "):
-        return "wa_translate", {"contact": raw[len("translate whatsapp "):].strip()}
-    if low in ("wa_translate", "translate voice", "translate last voice", "translate whatsapp voice"):
-        return "wa_translate", {"contact": ""}
     # WhatsApp msg — explicit "msg contact [message]" (contact can be full number with spaces, e.g. +357 99 447267)
     if low.startswith("msg "):
         rest = raw[len("msg "):].strip()
@@ -3325,6 +3453,9 @@ def _parse_command(text: str) -> tuple[str, dict] | None:
     # Luna's own vitals (process, Ollama, uptime)
     if re.search(r"\b(?:how'?s luna|luna status|are you okay|luna vitals|your status)\b", low):
         return "luna_vitals", {}
+    # Camera — "what do you see", "what can you see", "do you see me", etc.
+    if re.search(r"\b(?:what do you see|what can you see|what do i look like|describe what you see|do you see me|what'?s in the (?:camera|frame)|what are you seeing)\b", low):
+        return "camera_see", {}
     # Play
     if low.startswith("play ") or low == "play":
         return "play", {"query": raw[5:].strip() if low.startswith("play ") else ""}
@@ -3336,8 +3467,12 @@ def _parse_command(text: str) -> tuple[str, dict] | None:
     if m: return "podcast_create", {"description": m.group(1).strip()}
     if low in ("podcast", "play podcast", "custom podcast", "play custom podcast"):
         return "podcast", {}
-    if low.startswith("podcast ") or low.startswith("play podcast "):
-        return "podcast", {}
+    if low.startswith("podcast "):
+        rest = raw[len("podcast "):].strip()
+        return "podcast", {"choice": rest} if rest else {"choice": ""}
+    if low.startswith("play podcast "):
+        rest = raw[len("play podcast "):].strip()
+        return "podcast", {"choice": rest} if rest else {"choice": ""}
     # Skip / Stop (music)
     if low in ("skip", "next", "next song"): return "skip", {}
     if low in ("stop", "stop music", "stop the music"): return "stop", {}
@@ -3349,8 +3484,8 @@ def _likely_command(text: str) -> bool:
     low = (text or "").strip().lower()
     if not low: return False
     if _CONV_START.match(low): return False
-    starters = ("play ","podcast ","podcast create ","create podcast ","search ","send ","create ","call ","dm ","tell ","inform ","msg ","share ","post ","remind ","suno ","yt_comment ","comment ","ig_dm ","fb_msg ","wa_translate ","translate voice ","translate whatsapp ","google ","news","!help","how's ","pc status","luna status","ram ")
-    return any(low.startswith(s) for s in starters) or low in ("play","news","help","skip","stop","wa_translate","translate voice") or "luna status" in low or "pc status" in low
+    starters = ("play ","podcast ","podcast create ","create podcast ","search ","send ","create ","call ","dm ","tell ","inform ","msg ","share ","post ","remind ","suno ","yt_comment ","comment ","ig_dm ","fb_msg ","google ","news","!help","how's ","pc status","luna status","ram ","what do you see","what can you see")
+    return any(low.startswith(s) for s in starters) or low in ("play","news","help","skip","stop") or "luna status" in low or "pc status" in low or bool(re.search(r"\b(what do you see|what can you see|do you see me|describe what you see)\b", low))
 
 def _is_retry(msg: str) -> bool:
     low = (msg or "").strip().lower()
@@ -3653,6 +3788,13 @@ try:
 except Exception as _transcribeme_err:
     transcribeme_bp = None  # optional module
 
+# Generic translate module (text + audio → English)
+try:
+    from luna_translate import translate_bp
+    web.register_blueprint(translate_bp)
+except Exception as _translate_err:
+    translate_bp = None  # optional module
+
 # Rate limiter
 _rate_hits: dict[str, list] = {}
 
@@ -3679,6 +3821,42 @@ def api_status():
     return jsonify({"luna": "ok", "ollama": "ok" if ollama_ok else "offline",
                     "chat_model": OLLAMA_CHAT, "shadow_model": OLLAMA_MODEL,
                     "linked_scope": LINKED_SCOPE or None})
+
+@web.route("/api/camera/status")
+def api_camera_status():
+    """Return last camera analysis so the UI can show 'what Luna sees'."""
+    with _camera_lock:
+        r = _camera_last_result
+    if not r:
+        return jsonify({"on": False, "last_result": None})
+    return jsonify({"on": True, "last_result": {k: v for k, v in r.items() if k != "error" or v}})
+
+@web.route("/api/camera/frame", methods=["POST"])
+def api_camera_frame():
+    """Accept an image (file or base64), run face + object detection, store and return result."""
+    ip = request.remote_addr or "unknown"
+    if not _rate_ok(ip, limit=30, window=60):
+        return jsonify({"error": "Too many requests"}), 429
+    image_bytes = None
+    if request.files and "image" in request.files:
+        f = request.files["image"]
+        if f.filename:
+            image_bytes = f.read()
+    if not image_bytes and request.get_data():
+        data = request.get_json(silent=True) or {}
+        b64 = data.get("image") or data.get("frame")
+        if b64:
+            import base64
+            if isinstance(b64, str) and "," in b64:
+                b64 = b64.split(",", 1)[1]
+            image_bytes = base64.b64decode(b64)
+    if not image_bytes:
+        return jsonify({"error": "No image (send multipart 'image' or JSON { image: base64 })"}), 400
+    result = _process_camera_frame(image_bytes)
+    with _camera_lock:
+        global _camera_last_result
+        _camera_last_result = result
+    return jsonify({"summary": result.get("summary"), "face_count": result.get("face_count", 0), "objects": result.get("objects", [])})
 
 @web.route("/api/memories")
 def api_memories():
@@ -3975,10 +4153,6 @@ def _handle_bang(msg: str, scope: str) -> str:
         ok, r = _run_wa_msg(contact, desc)
         if not ok: _record_failure("msg", r, {"contact": contact})
         return f"✅ {r}" if ok else f"❌ {r}"
-    if cmd in ("!wa_translate", "!translate_voice", "!translate_wa"):
-        contact = args.strip() or None
-        ok, r = _run_wa_translate(contact)
-        return r if ok else f"❌ {r}"
     if cmd in ("!play", "!music"):
         reply = _run_cmd("play", {"query": args}, scope)
         return reply if reply else "Usage: !play <song or URL>"
@@ -3987,7 +4161,9 @@ def _handle_bang(msg: str, scope: str) -> str:
             topic = args[7:].strip()
             ok, r = _create_podcast_from_description(topic)
             return f"✅ {r}" if ok else f"❌ {r}"
-        reply = _run_cmd("podcast", {}, scope)
+        choice = args.strip()
+        params = {"choice": choice} if choice else {}
+        reply = _run_cmd("podcast", params, scope)
         return reply if reply else "❌ Custom podcast failed. Check CUSTOM_PODCAST_DIR and join a voice channel."
     if cmd == "!skip":
         reply = _run_cmd("skip", {}, scope)
@@ -4186,14 +4362,18 @@ async def _play_in_discord_for_linked_user_async(query: str) -> tuple[bool, str]
     return True, f"{'▶️ Playing' if started else '➕ Queued'}: **{title}**"
 
 
-async def _play_podcast_in_discord_async() -> tuple[bool, str]:
-    """Queue and play all audio from CUSTOM_PODCAST_DIR in the linked user's voice channel."""
+async def _play_podcast_in_discord_async(choice: str | None = None) -> tuple[bool, str]:
+    """Queue and play one (or all) podcast episodes in the linked user's voice channel."""
     if not _linked_int:
         return False, "Set LINKED_DISCORD_USER_ID in .env and join a Discord voice channel to use the custom podcast."
     ok, result = await asyncio.to_thread(_get_podcast_tracks)
     if not ok:
         return False, str(result)
-    tracks = result
+    all_tracks = result
+    ok, picked = await asyncio.to_thread(_pick_podcast_tracks, all_tracks, choice)
+    if not ok:
+        return False, picked  # picked is an error string here
+    tracks = picked
     guild = None
     target_channel = None
     for g in bot.guilds:
@@ -4476,9 +4656,24 @@ async def cmd_podcast(ctx, *, args: str = ""):
         ok, msg = await asyncio.to_thread(_create_podcast_from_description, topic)
         await ctx.reply(f"{'✅' if ok else '❌'} {msg}")
         return
-    ok, result = await asyncio.to_thread(_get_podcast_tracks)
-    if not ok: await ctx.reply(f"❌ {result}"); return
-    tracks = result
+    # No args → just show the available episodes as a menu.
+    if not args:
+        ok, result = await asyncio.to_thread(_get_podcast_tracks)
+        if not ok:
+            await ctx.reply(f"❌ {result}")
+            return
+        await ctx.reply(_format_podcast_menu(result))
+        return
+    # With args → treat as choice (index or name substring) and play that one.
+    ok, all_tracks = await asyncio.to_thread(_get_podcast_tracks)
+    if not ok:
+        await ctx.reply(f"❌ {all_tracks}")
+        return
+    ok, picked = await asyncio.to_thread(_pick_podcast_tracks, all_tracks, args)
+    if not ok:
+        await ctx.reply(f"❌ {picked}")
+        return
+    tracks = picked
     if not ctx.author.voice or not ctx.author.voice.channel:
         await ctx.reply("Join a voice channel first."); return
     target = ctx.author.voice.channel

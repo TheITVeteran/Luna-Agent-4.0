@@ -17,7 +17,6 @@ def _get_bot_deps():
     import bot as _bot
     return {
         "whisper_transcribe": getattr(_bot, "_whisper_transcribe", None),
-        "run_wa_translate": getattr(_bot, "_run_wa_translate", None),
         "ollama_chat": getattr(_bot, "ollama_chat", None),
         "add_reminder": getattr(_bot, "add_reminder", None),
         "_parse_time": getattr(_bot, "_parse_time", None),
@@ -104,24 +103,6 @@ def api_transcribe():
             pass
 
 
-@transcribeme_bp.route("/api/translate", methods=["POST"])
-def api_translate():
-    """Translate last WhatsApp voice message to English (WhatsApp only)."""
-    deps = _get_bot_deps()
-    run_wa = deps.get("run_wa_translate")
-    if not run_wa:
-        return jsonify({"error": "WhatsApp translation not available"}), 503
-    try:
-        data = request.get_json(silent=True) or {}
-        contact = (data.get("contact") or request.form.get("contact") or "").strip() or None
-        ok, result = run_wa(contact)
-        if ok:
-            return jsonify({"ok": True, "text": result})
-        return jsonify({"ok": False, "error": result}), 400
-    except Exception as e:
-        return jsonify({"error": str(e)[:200]}), 500
-
-
 @transcribeme_bp.route("/api/ask", methods=["POST"])
 def api_ask():
     """Ask a question (GPT-style) → get answer."""
@@ -179,7 +160,6 @@ def api_status():
     return jsonify({
         "transcribeme": "ok",
         "transcribe": deps.get("whisper_transcribe") is not None,
-        "translate": deps.get("run_wa_translate") is not None,
         "ask": deps.get("ollama_chat") is not None,
         "remind": deps.get("add_reminder") is not None and deps.get("LINKED_ID") is not None,
     })

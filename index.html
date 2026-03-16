@@ -264,6 +264,14 @@
 
   .cmd-btn:hover::before { transform: scaleY(1); }
 
+  .cmd-btn.camera-on {
+    border-color: var(--cyan);
+    color: var(--cyan);
+    background: var(--cyan-dim);
+    box-shadow: 0 0 10px rgba(0,212,255,0.2);
+  }
+  .cmd-btn.camera-on::before { transform: scaleY(1); }
+
   .cmd-icon {
     font-size: 13px;
     opacity: 0.7;
@@ -405,6 +413,76 @@
   .dm-popup-actions .btn-send-dm:hover { background: rgba(0,212,255,0.3); }
   .dm-popup-actions .btn-send-dm:disabled { opacity: 0.5; cursor: not-allowed; }
   .dm-popup-actions a { font-size: 11px; color: rgba(0,212,255,0.8); }
+
+  /* Camera popup — what Luna sees */
+  .camera-popup-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.65);
+    z-index: 1000;
+    align-items: center;
+    justify-content: center;
+    backdrop-filter: blur(6px);
+  }
+  .camera-popup-overlay.open { display: flex; }
+  .camera-popup {
+    width: 90%;
+    max-width: 520px;
+    background: linear-gradient(145deg, rgba(2,15,28,0.98), rgba(1,8,16,0.98));
+    border: 1px solid rgba(0,212,255,0.3);
+    border-radius: 12px;
+    box-shadow: 0 12px 40px rgba(0,0,0,0.5), 0 0 24px rgba(0,212,255,0.08);
+    padding: 16px 18px;
+  }
+  .camera-popup-title {
+    font-family: var(--font-data);
+    font-size: 12px;
+    letter-spacing: 0.08em;
+    color: var(--cyan);
+    margin-bottom: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .camera-popup-title .close-camera-popup {
+    background: none;
+    border: none;
+    color: rgba(255,255,255,0.6);
+    cursor: pointer;
+    font-size: 18px;
+    padding: 0 4px;
+    line-height: 1;
+  }
+  .camera-popup-title .close-camera-popup:hover { color: #fff; }
+  .camera-popup-video-wrap {
+    position: relative;
+    width: 100%;
+    aspect-ratio: 4/3;
+    max-height: 320px;
+    background: #000;
+    border-radius: 8px;
+    overflow: hidden;
+    margin-bottom: 10px;
+  }
+  .camera-popup-video-wrap video {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+  }
+  .camera-popup-analysis {
+    font-family: var(--font-data);
+    font-size: 11px;
+    color: rgba(168,216,234,0.9);
+    line-height: 1.5;
+    padding: 10px 12px;
+    background: rgba(0,20,40,0.5);
+    border: 1px solid rgba(0,212,255,0.15);
+    border-radius: 8px;
+    min-height: 44px;
+  }
+  .camera-popup-analysis.empty { color: rgba(168,216,234,0.4); font-style: italic; }
 
   /* ── CHAT AREA ── */
   .chat-area {
@@ -965,9 +1043,9 @@
       <button class="cmd-btn" onclick="insertCommand('!dm ', 'username then message, or about/description &lt;subject&gt;')" title="Discord DM — use “about …” or “description: …” and Luna rephrases">
         <span class="cmd-icon">💬</span> Discord DM
       </button>
-      <button class="cmd-btn" onclick="insertCommand('!wa_translate ')" title="Translate last WhatsApp voice message to English — optional contact in box">
-        <span class="cmd-icon">🔊</span> Translate voice
-      </button>
+      <a class="cmd-btn" href="/translate/" style="text-decoration:none;color:inherit;display:inline-flex;align-items:center;gap:6px;" title="Open Luna's translate module for text or voice clips">
+        <span class="cmd-icon">🔊</span> Translate
+      </a>
       <input type="file" id="translate-voice-file" accept="audio/*,.ogg,.webm,.mp3,.m4a,.opus" style="display:none"/>
       <button class="cmd-btn" onclick="document.getElementById('translate-voice-file').click()" title="Upload an audio file to translate to English">
         <span class="cmd-icon">📤</span> Upload voice
@@ -990,11 +1068,14 @@
       <button class="cmd-btn" onclick="sendQuick('!stop')" title="Stop playback and clear queue in Discord">
         <span class="cmd-icon">⏹</span> Stop
       </button>
-      <button class="cmd-btn" onclick="sendQuick('!pc_vitals')" title="CPU, RAM, disk">
+      <button class="cmd-btn" onclick="sendQuick('pc vitals')" title="CPU, RAM, disk">
         <span class="cmd-icon">🖥</span> PC vitals
       </button>
-      <button class="cmd-btn" onclick="sendQuick('!luna_vitals')" title="Luna process status">
+      <button class="cmd-btn" onclick="sendQuick('luna vitals')" title="Luna process status">
         <span class="cmd-icon">✨</span> Luna vitals
+      </button>
+      <button type="button" class="cmd-btn" id="camera-btn" onclick="toggleCamera()" title="Turn on so Luna can see you; ask 'what do you see' for object and face recognition">
+        <span class="cmd-icon">📷</span> <span id="camera-btn-label">Camera</span>
       </button>
       <button class="cmd-btn" onclick="showHelp()" title="Full command list">
         <span class="cmd-icon">⚡</span> Commands
@@ -1084,6 +1165,20 @@
       <button type="button" class="btn-send-dm" id="dm-popup-send">Send</button>
       <a href="#" id="dm-popup-open-ig" target="_blank" rel="noopener">Open Instagram to see replies</a>
     </div>
+  </div>
+</div>
+
+<!-- Camera popup: live view + what Luna sees -->
+<div class="camera-popup-overlay" id="camera-popup-overlay">
+  <div class="camera-popup" id="camera-popup">
+    <div class="camera-popup-title">
+      <span>📷 What Luna sees</span>
+      <button type="button" class="close-camera-popup" id="close-camera-popup" aria-label="Close">×</button>
+    </div>
+    <div class="camera-popup-video-wrap">
+      <video id="camera-popup-video" autoplay playsinline muted></video>
+    </div>
+    <div class="camera-popup-analysis empty" id="camera-popup-analysis">Analyzing…</div>
   </div>
 </div>
 
@@ -1275,6 +1370,100 @@ function showHelp() {
   inputEl.value = '!help';
   sendMessage();
 }
+
+// ── Camera (object + face recognition) ──
+let cameraStream = null;
+let cameraIntervalId = null;
+const CAMERA_FRAME_MS = 2500;
+
+function updateCameraPopupAnalysis(data) {
+  const el = document.getElementById('camera-popup-analysis');
+  if (!el) return;
+  if (!data || data.error) {
+    el.textContent = data && data.error ? data.error : 'Analyzing…';
+    el.classList.add('empty');
+    return;
+  }
+  const parts = [];
+  if (data.face_count != null && data.face_count > 0) parts.push(data.face_count + ' face(s)');
+  if (data.objects && data.objects.length) {
+    const counts = {};
+    data.objects.forEach(o => { counts[o.label] = (counts[o.label] || 0) + 1; });
+    parts.push('Objects: ' + Object.entries(counts).map(([k, v]) => v + ' ' + k).join(', '));
+  }
+  el.textContent = parts.length ? parts.join(' · ') : (data.summary || 'No faces or objects detected.');
+  el.classList.remove('empty');
+}
+
+function closeCameraPopup() {
+  document.getElementById('camera-popup-overlay').classList.remove('open');
+}
+
+async function toggleCamera() {
+  const btn = document.getElementById('camera-btn');
+  const label = document.getElementById('camera-btn-label');
+  const popupOverlay = document.getElementById('camera-popup-overlay');
+  const popupVideo = document.getElementById('camera-popup-video');
+  const analysisEl = document.getElementById('camera-popup-analysis');
+  if (cameraStream) {
+    cameraStream.getTracks().forEach(t => t.stop());
+    cameraStream = null;
+    if (popupVideo) popupVideo.srcObject = null;
+    if (cameraIntervalId) clearInterval(cameraIntervalId);
+    cameraIntervalId = null;
+    closeCameraPopup();
+    if (analysisEl) { analysisEl.textContent = 'Analyzing…'; analysisEl.classList.add('empty'); }
+    label.textContent = 'Camera';
+    btn.classList.remove('camera-on');
+    btn.title = 'Turn on so Luna can see you; ask "what do you see" for object and face recognition';
+    return;
+  }
+  try {
+    cameraStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } } });
+    popupVideo.srcObject = cameraStream;
+    popupVideo.muted = true;
+    popupVideo.playsInline = true;
+    await popupVideo.play();
+    if (analysisEl) { analysisEl.textContent = 'Analyzing…'; analysisEl.classList.add('empty'); }
+    popupOverlay.classList.add('open');
+    const video = document.createElement('video');
+    video.srcObject = cameraStream;
+    video.muted = true;
+    video.playsInline = true;
+    await video.play();
+    const canvas = document.createElement('canvas');
+    canvas.width = 640;
+    canvas.height = 480;
+    const ctx = canvas.getContext('2d');
+    function captureAndSend() {
+      if (!cameraStream || !video.videoWidth) return;
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      ctx.drawImage(video, 0, 0);
+      canvas.toBlob(blob => {
+        if (!blob) return;
+        const form = new FormData();
+        form.append('image', blob, 'frame.jpg');
+        fetch('/api/camera/frame', { method: 'POST', body: form })
+          .then(r => r.json())
+          .then(data => updateCameraPopupAnalysis(data))
+          .catch(() => {});
+      }, 'image/jpeg', 0.85);
+    }
+    cameraIntervalId = setInterval(captureAndSend, CAMERA_FRAME_MS);
+    captureAndSend();
+    label.textContent = 'Camera on';
+    btn.classList.add('camera-on');
+    btn.title = 'Camera is on — ask Luna "what do you see" for object and face recognition. Click again to turn off.';
+  } catch (err) {
+    showToast('Camera access denied or unavailable', true);
+  }
+}
+
+document.getElementById('close-camera-popup').addEventListener('click', closeCameraPopup);
+document.getElementById('camera-popup-overlay').addEventListener('click', function(e) {
+  if (e.target === this) closeCameraPopup();
+});
 
 // ── Clear chat ──
 function clearChat() {
