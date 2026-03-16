@@ -35,6 +35,7 @@ Luna runs as a **Discord bot** and a **web UI** on your machine. Chat with her, 
 - **!dm** &lt;user&gt; [what to say] — Discord DM; Luna rephrases in her own words.
 - **!play** &lt;song/url&gt;, **!podcast** — Music in voice; custom podcast from a folder (e.g. Luna Agent n8n).
 - **!pc_vitals**, **!luna_vitals** — PC and Luna process status.
+- **!ml** [info | train | predict | list] — Machine learning: check libs, train a small model (scikit-learn), run predictions. Optional: `pip install -r requirements-ml.txt`.
 - **!analyze_website** &lt;url&gt; — Summarize a site.
 - **Reminders** — “Remind me at 7pm to …” → Discord DM + optional voice note (TTS).
 - **Retry** — Say “retry” after a failed command; Luna tries again with different strategies.

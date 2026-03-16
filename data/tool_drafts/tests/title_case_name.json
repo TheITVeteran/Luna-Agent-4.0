@@ -1,0 +1,6 @@
+{
+  "returncode": 1,
+  "stdout": "",
+  "stderr": "File \"C:\\Users\\User\\AppData\\Local\\Temp\\tmpq3gbzh_c.py\", line 3\r\n    result = [f\"{k.capitalize()}\": v for k, v in params.items() if k != \"title\"]\r\n                                 ^\r\nSyntaxError: invalid syntax",
+  "ts": 1773703826.474243
+}

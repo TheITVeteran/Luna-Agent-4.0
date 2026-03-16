@@ -1,0 +1,5 @@
+{
+  "name": "title_case_name",
+  "description": "Convert all lowercase strings to title case",
+  "script": "import json, sys\nparams = json.load(sys.stdin)\nresult = [f\"{k.capitalize()}\": v for k, v in params.items() if k != \"title\"]\nprint(result)"
+}

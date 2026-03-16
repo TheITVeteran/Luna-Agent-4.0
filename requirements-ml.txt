@@ -1,0 +1,10 @@
+# Optional: machine learning and deep learning support for Luna
+# Install with: pip install -r requirements-ml.txt
+# Enables the !ml tool (train/predict with scikit-learn) and lets Luna use ML in scripts.
+
+scikit-learn>=1.0.0
+joblib>=1.0.0
+numpy>=1.20.0
+
+# Optional: deep learning (for writing PyTorch scripts; not required for !ml tool)
+# torch>=2.0.0

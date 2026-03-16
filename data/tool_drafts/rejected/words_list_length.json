@@ -1,0 +1,5 @@
+{
+  "name": "words_list_length",
+  "description": "Returns the number of elements in a list within the JSON input",
+  "script": "import json, sys\nparams = json.load(sys.stdin)\nresult = len(params['words_list'])\nprint(result)"
+}

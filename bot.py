@@ -325,6 +325,7 @@ HELP_TEXT = (
     "• retry — retry last failed action with different strategies\n"
     "• !pc_vitals / how's my PC — CPU, RAM, disk\n"
     "• !luna_vitals / how's Luna — Luna's process, Ollama, uptime\n"
+    "• !ml [action] — machine learning: info, train a small model, or predict (e.g. !ml with action=info)\n"
     "• Camera (UI) — turn on to let Luna see you; ask **what do you see** for object and face recognition\n"
     "• Nudge (UI) — send a non-blocking note; Luna considers it in her next reply\n"
     "• **ask me** — Luna asks you a question in a popup (demo)\n"
@@ -352,7 +353,8 @@ LUNA_CAPABILITIES = (
     "asking the user a question in a popup when you need a choice; "
     "action log and Luna's Mind (a live graph of your drives, knowledge, actions); "
     "translation (text and voice to English) via the Translate module; "
-    "voice input and TTS; creating and running Python scripts on request. "
+    "voice input and TTS; creating and running Python scripts on request; "
+    "machine learning and deep learning: train small models (e.g. scikit-learn), run inference, or write scripts using PyTorch/TensorFlow when the user asks (e.g. !ml for the built-in ML tool). "
     "Keep the list concise and friendly; say **!help** for the full command list."
 )
 
@@ -4100,6 +4102,14 @@ def _parse_command(text: str) -> tuple[str, dict] | None:
     if re.search(r"\b(?:ask me|ask me something|luna ask me)\b", low): return "ask_me", {}
     # Help
     if re.search(r"\b(?:help|commands|what can you do)\b", low): return "help", {}
+    # ML / machine learning — pass through to absorbed tool ml
+    if re.search(r"\b(?:ml|machine learning|deep learning)\b", low):
+        action = "info"
+        if re.search(r"\b(?:list|show)\s+models?\b", low): action = "list"
+        elif re.search(r"\b(?:train|fit)\b", low): action = "train"
+        elif re.search(r"\b(?:predict|inference)\b", low): action = "predict"
+        if "ml" in _absorbed_tool_names:
+            return "ml", {"action": action, "query": action}
     return None
 
 def _likely_command(text: str) -> bool:
