@@ -91,6 +91,8 @@ BROWSER_CHANNEL  = _env("SUNO_BROWSER_CHANNEL", "chrome")
 BROWSER_PATH     = _env("SUNO_BROWSER_PATH")
 MUSIC_DL_DIR       = _env("LUNA_MUSIC_DOWNLOAD_DIR")
 CUSTOM_PODCAST_DIR = _env("CUSTOM_PODCAST_DIR", r"D:\Luna Agent n8n")
+SEARCH_PROFILE_DIR = _env("SEARCH_PROFILE_DIR", os.path.join(_DATA, "search_profile"))
+ANALYZE_PROFILE_DIR = _env("ANALYZE_PROFILE_DIR", os.path.join(_DATA, "analyze_profile"))
 WORLD_NEWS_FEEDS = [
     "https://feeds.bbci.co.uk/news/world/rss.xml",
     "https://rss.nytimes.com/services/xml/rss/nyt/World.xml",
@@ -135,6 +137,9 @@ _shared_songs_lock = threading.Lock()
 
 # Bootstrap running flags
 _suno_boot = _x_boot = _fb_boot = _yt_boot = _ig_boot = _wa_boot = _discord_web_boot = _msg_boot = False
+_search_context = None
+_search_playwright = None
+_search_lock = threading.Lock()
 
 # Persistent contexts (WhatsApp/Messenger stay open)
 _wa_ctx = _wa_pw = _msg_ctx = _msg_pw = None
@@ -173,7 +178,8 @@ HELP_TEXT = (
     "• !dm <user or ID> [what to say] — Discord DM (Luna turns your input into a dynamic reply, like YT comments)\n"
     "• !msg <contact> [desc] — WhatsApp message\n"
     "• !play <song/url> — play music in voice\n"
-    "• !podcast — play custom podcast from CUSTOM_PODCAST_DIR (e.g. Luna Agent n8n)\n"
+    "• !podcast — play custom podcast from CUSTOM_PODCAST_DIR\n"
+    "• !podcast create <topic> — Luna generates a short podcast about that topic and saves it to the folder\n"
     "• !remember / !always_remember — store memories\n"
     "• !profile — view or set your profile\n"
     "• !join / !leave / !pause / !skip / !stop / !queue — music\n"
@@ -181,7 +187,8 @@ HELP_TEXT = (
     "• retry — retry last failed action with different strategies\n"
     "• !pc_vitals / how's my PC — CPU, RAM, disk\n"
     "• !luna_vitals / how's Luna — Luna's process, Ollama, uptime\n"
-    "• !analyze_website <url> / analyze this website — summarize what a site is about\n"
+    "• !analyze_website <url> — open site, read source (like Inspect), summarize\n"
+    "• !search <query> — open Google in browser; click a result, then **!analyze_current** or “analyze this page” to summarize it\n"
 )
 
 COMMAND_ONLY = "I'm **Luna**. Chat with me normally, or say **Shadow, [command]** for actions. Use **!help** for the list."
@@ -773,6 +780,78 @@ def _get_podcast_tracks() -> tuple[bool, list[dict] | str]:
         return False, str(e)
 
 
+def _create_podcast_from_description(description: str) -> tuple[bool, str]:
+    """Generate a short podcast from a topic: Ollama writes the script, TTS turns it into audio, save to CUSTOM_PODCAST_DIR."""
+    description = (description or "").strip()
+    if not description:
+        return False, "What should the podcast be about? Example: **!podcast create morning routines** or **create a podcast about productivity**."
+    root = (CUSTOM_PODCAST_DIR or "").strip()
+    if not root or not os.path.isdir(root):
+        return False, f"Set **CUSTOM_PODCAST_DIR** in .env to a writable folder (e.g. D:\\Luna Agent n8n) so I can save the podcast."
+    system = (
+        "You are Luna. Write a short podcast script (about 2–3 minutes when read aloud). "
+        "Structure: a brief intro (1–2 sentences), 2–3 short segments with clear content, and a brief outro. "
+        "Output ONLY the script, no stage directions or labels. Keep total under 350 words. Be natural and conversational."
+    )
+    script = ollama_chat(f"Podcast topic: {description[:300]}\n\nWrite the podcast script:", system=system)
+    if not script or "Ollama" in script or script.startswith("Error:"):
+        return False, "Could not generate the script. Try again or shorten the topic."
+    script = _clean_for_tts(script)[:3000]
+    if not script.strip():
+        return False, "Generated script was empty."
+    chunks = _split_tts(script, max_chars=120)
+    if not chunks:
+        return False, "No speakable chunks from script."
+    temp_dir = tempfile.mkdtemp()
+    list_path = os.path.join(temp_dir, "list.txt")
+    out_path = os.path.join(temp_dir, "podcast.mp3")
+    try:
+        paths = []
+        for i, chunk in enumerate(chunks[:60]):  # cap segments
+            audio = _tts_bytes(chunk)
+            if not audio:
+                continue
+            seg_path = os.path.join(temp_dir, f"seg_{i:03d}.mp3")
+            with open(seg_path, "wb") as f:
+                f.write(audio)
+            paths.append(seg_path)
+        if not paths:
+            return False, "TTS failed for all chunks. Check gTTS and internet."
+        with open(list_path, "w", encoding="utf-8") as f:
+            for p in paths:
+                p_abs = os.path.abspath(p).replace("\\", "/")
+                f.write(f"file '{p_abs}'\n")
+        ret = subprocess.run(
+            ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", list_path, "-c", "copy", out_path],
+            capture_output=True,
+            timeout=120,
+            cwd=temp_dir,
+        )
+        if ret.returncode != 0 or not os.path.isfile(out_path):
+            return False, "Could not merge audio (ffmpeg). Install FFmpeg and try again."
+        slug = re.sub(r"[^\w\s-]", "", description.lower())[:30].strip().replace(" ", "_") or "podcast"
+        slug = re.sub(r"_+", "_", slug).strip("_")
+        ts = datetime.now().strftime("%Y%m%d_%H%M")
+        name = f"podcast_{slug}_{ts}.mp3"
+        dest = os.path.join(root, name)
+        try:
+            import shutil
+            shutil.copy2(out_path, dest)
+        except Exception as e:
+            return False, f"Could not save to podcast folder: {e}"
+        return True, f"Created **{name}** in your podcast folder. Say **!podcast** to play it, or open the folder."
+    finally:
+        try:
+            for f in os.listdir(temp_dir):
+                try:
+                    os.unlink(os.path.join(temp_dir, f))
+                except Exception:
+                    pass
+            os.rmdir(temp_dir)
+        except Exception:
+            pass
+
+
 def _resolve_track(query: str) -> tuple[bool, dict | str]:
     """Resolve YouTube URL/search, Suno URL, or local file to a playable track dict."""
     q = (query or "").strip()
@@ -1048,12 +1127,61 @@ def _fetch_news(limit: int = 8) -> tuple[bool, str]:
 # ── Search ────────────────────────────────────────────────────────────────────
 
 def _search(query: str) -> tuple[bool, str]:
+    """Open Google search in Playwright browser; leave it open so you can click a result, then say 'analyze this page'."""
+    query = (query or "").strip()
+    if not query:
+        return False, "Usage: !search <query>"
+    url = "https://www.google.com/search?q=" + urllib.parse.quote(query, safe="")
+    global _search_context, _search_playwright
+    with _search_lock:
+        try:
+            from playwright.sync_api import sync_playwright
+            os.makedirs(SEARCH_PROFILE_DIR, exist_ok=True)
+            if _search_context is not None:
+                try:
+                    pages = [p for p in _search_context.pages if not p.is_closed()]
+                    if pages:
+                        page = pages[0]
+                        page.goto(url, wait_until="domcontentloaded", timeout=25000)
+                        page.wait_for_timeout(1500)
+                        return True, f"Opened Google: **{query[:80]}**. Click a result, then say **analyze this page** or **!analyze_current** to summarize it."
+                except Exception:
+                    _search_context = None
+                    _search_playwright = None
+            pw = sync_playwright().start()
+            ctx = _launch_social_browser(SEARCH_PROFILE_DIR, pw)
+            page = ctx.pages[0] if ctx.pages else ctx.new_page()
+            page.goto(url, wait_until="domcontentloaded", timeout=25000)
+            page.wait_for_timeout(1500)
+            _search_context = ctx
+            _search_playwright = pw
+            return True, f"Opened Google: **{query[:80]}**. Click a result, then say **analyze this page** or **!analyze_current** to summarize it."
+        except Exception as e:
+            _search_context = None
+            _search_playwright = None
+            return False, str(e)
+
+
+def _analyze_current_page() -> tuple[bool, str]:
+    """Summarize the current page in the search browser (after !search and clicking a result)."""
+    global _search_context
+    with _search_lock:
+        ctx = _search_context
+    if ctx is None:
+        return False, "Do a **!search** first. Once results open, click a link, then say **analyze this page** or **!analyze_current**."
     try:
-        url = "https://www.google.com/search?q=" + urllib.parse.quote(query, safe="")
-        webbrowser.open(url)
-        return True, f"Opened Google: **{query[:80]}**"
+        pages = [p for p in ctx.pages if not p.is_closed()]
+        if not pages:
+            return False, "Search browser has no open pages. Do **!search** again, click a result, then **!analyze_current**."
+        page = pages[0]
+        url = page.url
+        if "google.com" in url and "search" in url:
+            return False, "You're still on the Google search page. Click a result link first, then say **analyze this page** or **!analyze_current**."
+        raw = page.content()
     except Exception as e:
-        return False, str(e)
+        return False, f"Could not read current page (browser may have been closed): {e}"
+    summary = _extract_summary_from_html(raw, url)
+    return True, summary
 
 # ── Social automation (Suno/X/Facebook/YouTube/Instagram/WhatsApp/Messenger) ──
 
@@ -3026,16 +3154,8 @@ def _luna_vitals() -> str:
         parts.append(f"**Uptime:** {uptime_m}m")
     return " **·** ".join(parts)
 
-def _analyze_website(url: str) -> tuple[bool, str]:
-    """Fetch a URL and summarize what the site is about (on request only)."""
-    if not url or not re.search(r"^https?://", url):
-        return False, "Give me a valid URL (e.g. https://example.com)."
-    try:
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
-        with urllib.request.urlopen(req, timeout=15) as r:
-            raw = r.read().decode("utf-8", errors="replace")
-    except Exception as e:
-        return False, f"Could not fetch URL: {e}"
+def _extract_summary_from_html(raw: str, url: str) -> str:
+    """Extract title, meta, body text from HTML and return Ollama summary."""
     title = ""
     m = re.search(r"<title[^>]*>([^<]+)</title>", raw, re.I)
     if m:
@@ -3047,19 +3167,48 @@ def _analyze_website(url: str) -> tuple[bool, str]:
     body = re.sub(r"<script[^>]*>.*?</script>", "", raw, flags=re.I | re.S)
     body = re.sub(r"<style[^>]*>.*?</style>", "", body, flags=re.I | re.S)
     body = re.sub(r"<[^>]+>", " ", body)
-    body = re.sub(r"\s+", " ", body).strip()[:3000]
+    body = re.sub(r"\s+", " ", body).strip()[:4000]
     snippet = (title + " " + desc + " " + body).strip() or "No text content found."
     try:
         summary = ollama_chat(
-            f"Summarize what this website is about in 2–4 sentences. Be concise.\n\nURL: {url}\n\nContent excerpt:\n{snippet}",
+            f"Summarize what this website is about in 2–4 sentences. Be concise.\n\nURL: {url}\n\nContent excerpt (from page source):\n{snippet}",
             model=OLLAMA_MODEL,
         )
-        summary = summary.strip()[:500]
+        summary = summary.strip()[:600]
         if not summary:
             summary = f"**Title:** {title or '—'}\n**Meta:** {desc or '—'}"[:300]
-        return True, summary
+        return summary
     except Exception as e:
-        return True, f"**Title:** {title or '—'}\n**Meta:** {desc or '—'}\n(Could not summarize: {e})"
+        return f"**Title:** {title or '—'}\n**Meta:** {desc or '—'}\n(Could not summarize: {e})"
+
+
+def _analyze_website(url: str) -> tuple[bool, str]:
+    """Open URL in browser, read page source (like Inspect), and summarize what the site is about."""
+    if not url or not re.search(r"^https?://", url):
+        return False, "Give me a valid URL (e.g. https://example.com)."
+    url = url.strip().rstrip(".,;:)")
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return False, "Playwright not installed. pip install playwright && python -m playwright install chromium"
+    try:
+        os.makedirs(ANALYZE_PROFILE_DIR, exist_ok=True)
+        with sync_playwright() as p:
+            context = _launch_social_browser(ANALYZE_PROFILE_DIR, p)
+            page = context.pages[0] if context.pages else context.new_page()
+            try:
+                page.goto(url, wait_until="domcontentloaded", timeout=20000)
+                page.wait_for_timeout(2000)
+                raw = page.content()
+            finally:
+                try:
+                    context.close()
+                except Exception:
+                    pass
+    except Exception as e:
+        return False, f"Could not open URL or read source: {e}"
+    summary = _extract_summary_from_html(raw, url)
+    return True, summary
 
 # ── Command runner ────────────────────────────────────────────────────────────
 
@@ -3081,6 +3230,7 @@ def _run_cmd(cmd: str, params: dict, scope: str | None = None) -> str:
         "pc_vitals":      lambda: (True, _pc_vitals()),
         "luna_vitals":    lambda: (True, _luna_vitals()),
         "analyze_website": lambda: _analyze_website(p.get("url","").strip()),
+        "analyze_current": lambda: _analyze_current_page(),
     }
     if cmd == "remind":
         time_raw = p.get("time","").strip().replace(" ","")
@@ -3152,6 +3302,10 @@ def _run_cmd(cmd: str, params: dict, scope: str | None = None) -> str:
         except Exception as e:
             return f"❌ {e}"
         return "❌ Discord not ready. Join a voice channel and try **!podcast** again."
+    if cmd == "podcast_create":
+        ok, msg = _create_podcast_from_description((p.get("description") or "").strip())
+        if not ok: _record_failure("podcast_create", msg, p)
+        return f"✅ {msg}" if ok else f"❌ {msg}"
     if cmd in ("join","leave","pause","resume","queue"):
         return f"Use !{cmd} in Discord."
     return ""
@@ -3280,6 +3434,11 @@ def _parse_command(text: str) -> tuple[str, dict] | None:
     # Luna's own vitals (process, Ollama, uptime)
     if re.search(r"\b(?:how'?s luna|luna status|are you okay|luna vitals|your status)\b", low):
         return "luna_vitals", {}
+    # Analyze current page (after !search and clicking a result)
+    if re.search(r"\b(?:analyze this page|analyze current page|summarize this page|what'?s this (?:page|site) about)\b", low):
+        return "analyze_current", {}
+    if low.strip() in ("analyze current", "analyze this", "summarize this"):
+        return "analyze_current", {}
     # Analyze website — extract URL from message
     if re.search(r"\b(?:analyze this website|what'?s this site about|analyze (?:this )?site|summarize (?:this )?website)\b", low):
         url_m = re.search(r"https?://[^\s\)\]\"]+", raw)
@@ -3292,7 +3451,12 @@ def _parse_command(text: str) -> tuple[str, dict] | None:
     # Play
     if low.startswith("play ") or low == "play":
         return "play", {"query": raw[5:].strip() if low.startswith("play ") else ""}
-    # Custom podcast
+    # Custom podcast — play or create
+    if low.startswith("podcast create ") or low.startswith("create podcast "):
+        rest = raw[len("podcast create "):].strip() if low.startswith("podcast create ") else raw[len("create podcast "):].strip()
+        if rest: return "podcast_create", {"description": rest}
+    m = re.match(r"^create\s+a\s+podcast\s+about\s+(.+)$", low)
+    if m: return "podcast_create", {"description": m.group(1).strip()}
     if low in ("podcast", "play podcast", "custom podcast", "play custom podcast"):
         return "podcast", {}
     if low.startswith("podcast ") or low.startswith("play podcast "):
@@ -3308,8 +3472,8 @@ def _likely_command(text: str) -> bool:
     low = (text or "").strip().lower()
     if not low: return False
     if _CONV_START.match(low): return False
-    starters = ("play ","podcast ","search ","send ","create ","call ","dm ","tell ","inform ","msg ","share ","post ","remind ","suno ","yt_comment ","comment ","ig_dm ","fb_msg ","wa_translate ","translate voice ","translate whatsapp ","google ","news","!help","how's ","analyze ","pc status","luna status","ram ")
-    return any(low.startswith(s) for s in starters) or low in ("play","news","help","skip","stop","wa_translate","translate voice") or "analyze" in low or "luna status" in low or "pc status" in low
+    starters = ("play ","podcast ","podcast create ","create podcast ","search ","send ","create ","call ","dm ","tell ","inform ","msg ","share ","post ","remind ","suno ","yt_comment ","comment ","ig_dm ","fb_msg ","wa_translate ","translate voice ","translate whatsapp ","google ","news","!help","how's ","analyze ","analyze this page","analyze current","pc status","luna status","ram ")
+    return any(low.startswith(s) for s in starters) or low in ("play","news","help","skip","stop","wa_translate","translate voice","analyze current") or "analyze" in low or "luna status" in low or "pc status" in low
 
 def _is_retry(msg: str) -> bool:
     low = (msg or "").strip().lower()
@@ -3906,6 +4070,9 @@ def _handle_bang(msg: str, scope: str) -> str:
         url = (re.search(r"https?://[^\s]+", args) or type("",(), {"group": lambda s,x: args})()).group(0)
         ok, r = _analyze_website(url)
         return r if ok else f"❌ {r}"
+    if cmd == "!analyze_current":
+        ok, r = _analyze_current_page()
+        return r if ok else f"❌ {r}"
     if cmd in ("!ig_dm","!igdm"):
         if not args: return "Usage: !ig_dm <username> [message]"
         ps = args.split(None, 1)
@@ -3947,6 +4114,10 @@ def _handle_bang(msg: str, scope: str) -> str:
         reply = _run_cmd("play", {"query": args}, scope)
         return reply if reply else "Usage: !play <song or URL>"
     if cmd == "!podcast":
+        if args.strip().lower().startswith("create "):
+            topic = args[7:].strip()
+            ok, r = _create_podcast_from_description(topic)
+            return f"✅ {r}" if ok else f"❌ {r}"
         reply = _run_cmd("podcast", {}, scope)
         return reply if reply else "❌ Custom podcast failed. Check CUSTOM_PODCAST_DIR and join a voice channel."
     if cmd == "!skip":
@@ -4427,9 +4598,15 @@ async def cmd_play(ctx, *, query: str = ""):
     await ctx.reply(f"{'▶️ Playing' if started else '➕ Queued'}: **{track['title']}**")
 
 @bot.command(name="podcast")
-async def cmd_podcast(ctx):
-    """Play custom podcast from CUSTOM_PODCAST_DIR in the invoker's voice channel (or linked user's when from UI)."""
+async def cmd_podcast(ctx, *, args: str = ""):
+    """Play custom podcast, or create one: !podcast create <topic>."""
     if not ctx.guild: await ctx.reply("Voice only in servers."); return
+    args = (args or "").strip()
+    if args.lower().startswith("create "):
+        topic = args[7:].strip()
+        ok, msg = await asyncio.to_thread(_create_podcast_from_description, topic)
+        await ctx.reply(f"{'✅' if ok else '❌'} {msg}")
+        return
     ok, result = await asyncio.to_thread(_get_podcast_tracks)
     if not ok: await ctx.reply(f"❌ {result}"); return
     tracks = result

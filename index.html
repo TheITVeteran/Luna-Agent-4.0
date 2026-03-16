@@ -6,6 +6,7 @@
 <title>Luna</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"/>
 <link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@300;400;500;600&family=Exo+2:ital,wght@0,100;0,200;0,300;1,100&display=swap" rel="stylesheet"/>
+<script type="module" src="https://unpkg.com/@splinetool/viewer@1/build/spline-viewer.js"></script>
 <style>
   :root {
     --cyan: #00d4ff;
@@ -412,6 +413,45 @@
     flex-direction: column;
     overflow: hidden;
     position: relative;
+  }
+
+  /* Luna full-page Spline 3D + Spotlight background */
+  .luna-bg-layer {
+    position: fixed;
+    inset: 0;
+    z-index: 0;
+    overflow: hidden;
+    pointer-events: none;
+  }
+  .luna-bg-layer spline-viewer {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: auto;
+  }
+  .luna-spotlight {
+    position: absolute;
+    top: -20%;
+    left: -10%;
+    width: 60vmax;
+    height: 60vmax;
+    background: radial-gradient(circle, rgba(0, 212, 255, 0.14) 0%, rgba(0, 212, 255, 0.03) 35%, transparent 65%);
+    filter: blur(60px);
+    pointer-events: none;
+    z-index: 1;
+  }
+  /* Cover Spline logo/watermark (bottom-right) */
+  .luna-bg-layer::after {
+    content: '';
+    position: absolute;
+    bottom: 0;
+    right: 0;
+    width: 140px;
+    height: 48px;
+    background: linear-gradient(135deg, transparent 30%, rgba(2, 11, 20, 0.92) 45%);
+    pointer-events: none;
+    z-index: 2;
   }
 
   /* Scan line effect */
@@ -855,6 +895,12 @@
 </head>
 <body>
 
+<!-- Full-page Spline 3D + Spotlight background -->
+<div class="luna-bg-layer" aria-hidden="true">
+  <div class="luna-spotlight"></div>
+  <spline-viewer url="https://prod.spline.design/kZDDjO5HuC9GJUM2/scene.splinecode" loading="eager" events-target="global"></spline-viewer>
+</div>
+
 <!-- Header -->
 <header>
   <div class="corner tl"></div>
@@ -932,8 +978,11 @@
       <button class="cmd-btn" onclick="insertCommand('!play ')" title="Play music in voice — add song/URL in box">
         <span class="cmd-icon">▶</span> Play
       </button>
-      <button class="cmd-btn" onclick="sendQuick('!podcast')" title="Play custom podcast from Luna Agent n8n folder (join Discord voice first)">
+      <button class="cmd-btn" onclick="sendQuick('!podcast')" title="Play custom podcast from folder (join Discord voice first)">
         <span class="cmd-icon">🎙</span> Custom podcast
+      </button>
+      <button class="cmd-btn" onclick="insertCommand('!podcast create ', 'topic, e.g. morning routines or productivity')" title="Luna generates a short podcast about your topic and saves it to the podcast folder">
+        <span class="cmd-icon">✨</span> Create podcast
       </button>
       <button class="cmd-btn" onclick="sendQuick('!skip')" title="Skip current track in Discord">
         <span class="cmd-icon">⏭</span> Skip

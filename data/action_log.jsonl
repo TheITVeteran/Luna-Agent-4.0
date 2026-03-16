@@ -111,3 +111,11 @@
 {"ts": "2026-03-16T01:36:16.012935+00:00", "cmd": "call", "params": {"contact": "550782786013757442"}, "reply": "❌ Opened Discord but couldn't find the **call icon** (top bar with video, pin) for **travis5279**. Click the phone icon yourself, then try again."}
 {"ts": "2026-03-16T01:49:00.891129+00:00", "cmd": "dm", "params": {"target": "550782786013757442", "message": "tell travis that Adam is a fantastic creation and that im a little jelous of his talent to create visuals. put some emotes too."}, "reply": "✅ Discord DM sent to **Travis**."}
 {"ts": "2026-03-16T01:55:26.425113+00:00", "cmd": "dm", "params": {"target": "550782786013757442", "message": "tell travis something funny,"}, "reply": "✅ Discord DM sent to **Travis**."}
+{"ts": "2026-03-16T02:19:23.931568+00:00", "cmd": "podcast", "params": {}, "reply": "❌ No audio files (.mp3, .m4a, .wav) in D:\\Luna Agent n8n"}
+{"ts": "2026-03-16T02:25:02.545488+00:00", "cmd": "share_x", "params": {}, "reply": "✅ Shared to X: \"Carnival Na Rua\""}
+{"ts": "2026-03-16T02:25:35.832288+00:00", "cmd": "share_facebook", "params": {}, "reply": "✅ Shared to Facebook: \"Iron Will Iron Grind\""}
+{"ts": "2026-03-16T02:28:29.891673+00:00", "cmd": "yt_comment", "params": {"video_url": "https://www.youtube.com/watch?v=f-biAY-CNds"}, "reply": "✅ Comment posted on: \"نصيحة لا تشوف المطقع\""}
+{"ts": "2026-03-16T02:29:23.796521+00:00", "cmd": "podcast", "params": {}, "reply": "❌ No audio files (.mp3, .m4a, .wav) in D:\\Luna Agent n8n"}
+{"ts": "2026-03-16T02:30:21.006573+00:00", "cmd": "podcast_create", "params": {"description": "a podcast about https://github.com/seed0001/growing-agent"}, "reply": "✅ Created **podcast_a_podcast_about_httpsgithubcom_20260316_0430.mp3** in your podcast folder. Say **!podcast** to play it, or open the folder."}
+{"ts": "2026-03-16T02:30:36.134200+00:00", "cmd": "podcast", "params": {}, "reply": "❌ Join a Discord voice channel first, then try **Custom podcast** again."}
+{"ts": "2026-03-16T02:31:12.988179+00:00", "cmd": "podcast", "params": {}, "reply": "✅ 🎙️ Custom podcast: **1** episode(s) — ▶️ Playing: **podcast_a_podcast_about_httpsgithubcom_20260316_0430**"}
