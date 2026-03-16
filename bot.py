@@ -999,6 +999,8 @@ def _evolution_step() -> None:
             "Use only standard library or very common modules. Keep the script short and safe."
         )
         _last_evolution_thought = "Thinking…"
+        if _evolution_get_enabled():
+            _narrator_say("Luna is considering a new capability.", use_tts=True)
         reply = ollama_chat(prompt, system="Output only NAME, DESC, and a CODE block. No preamble.", model=OLLAMA_MODEL or OLLAMA_CHAT)
         if not reply or len(reply) < 50:
             _last_evolution_thought = ""
@@ -1021,11 +1023,13 @@ def _evolution_step() -> None:
             _last_evolution_result = {}
             return
         _last_evolution_thought = f"Proposing: {name}"
+        if _evolution_get_enabled():
+            _narrator_say(f"Luna is proposing a new tool: {name}.", use_tts=True)
         if not add_tool_draft(name, desc or name, code):
             _last_evolution_thought = ""
             _last_evolution_result = {}
             return
-        ok, msg = approve_tool_draft(name)
+        ok, msg = approve_tool_draft(name, from_evolution=True)
         _last_evolution_step_at = time.time()
         log_entry = {"ts": ts, "type": "cycle", "proposed": name, "test_passed": ok, "absorbed": ok, "thought": _last_evolution_thought}
         if ok:
@@ -1038,6 +1042,8 @@ def _evolution_step() -> None:
             _last_evolution_thought = f"Test failed: {name}"
             _last_evolution_result = {"proposed": name, "absorbed": False, "test_passed": False, "ts": ts, "error": msg[:200]}
             log_entry["error"] = (msg or "")[:300]
+            if _evolution_get_enabled():
+                _narrator_say(f"The test failed for {name}.", use_tts=True)
         _evolution_log_append(log_entry)
     except Exception as e:
         _last_evolution_thought = ""
@@ -4630,8 +4636,8 @@ def list_rejected_drafts() -> list[dict]:
     except Exception: pass
     return out
 
-def approve_tool_draft(name: str) -> tuple[bool, str]:
-    """Test script in subprocess; if pass, copy to absorbed_tools and register. On fail, save test result and move draft to rejected/."""
+def approve_tool_draft(name: str, from_evolution: bool = False) -> tuple[bool, str]:
+    """Test script in subprocess; if pass, copy to absorbed_tools and register. On fail, save test result and move draft to rejected/. If from_evolution, narrator absorb message is spoken via TTS."""
     global _last_absorbed_tool
     draft = get_tool_draft(name)
     if not draft:
@@ -4691,7 +4697,7 @@ def approve_tool_draft(name: str) -> tuple[bool, str]:
             try: os.remove(os.path.join(_TOOL_DRAFTS_DIR, name + ".json"))
             except Exception: pass
             _security_scan_and_alert(out_path)
-            _narrator_say(f"A new capability is integrated. {name} is now part of Luna.")
+            _narrator_say(f"A new capability is integrated. {name} is now part of Luna.", use_tts=from_evolution)
             return True, f"Tool **{name}** absorbed. You can run !{name} now."
         except Exception as e:
             return False, str(e)
@@ -4880,11 +4886,13 @@ def _existential_express(snippet: str) -> str:
 
 # ── Narrator (growing-agent: third-person documentary line to observation deck) ──
 
-def _narrator_say(text: str) -> None:
-    """Push a third-person narrator line to the Luna says panel (observation deck)."""
+def _narrator_say(text: str, use_tts: bool = False) -> None:
+    """Push a third-person narrator line to the Luna says panel (observation deck). If use_tts is True, also speak it via TTS."""
     if not (text or "").strip():
         return
     _proactive_set((text or "").strip()[:400])
+    if use_tts:
+        _play_reply_tts((text or "").strip()[:400])
 
 # ── Proactive message (Luna speaks unprompted) ─────────────────────────────────
 

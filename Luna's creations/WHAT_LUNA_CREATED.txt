@@ -11,3 +11,7 @@
 2026-03-16 22:41 | evolved        | to_title_case.py | Converts input text to title case
 2026-03-16 23:01 | absorbed tool  | words_count.py | Counts the number of unique words in a JSON array
 2026-03-16 23:01 | evolved        | words_count.py | Counts the number of unique words in a JSON array
+2026-03-16 23:15 | absorbed tool  | words_list_count.py | Count unique words in a JSON list
+2026-03-16 23:15 | evolved        | words_list_count.py | Count unique words in a JSON list
+2026-03-16 23:15 | absorbed tool  | to_lowercase_dict_values.py | Convert values in a JSON dictionary to lowercase
+2026-03-16 23:15 | evolved        | to_lowercase_dict_values.py | Convert values in a JSON dictionary to lowercase

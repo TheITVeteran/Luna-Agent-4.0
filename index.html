@@ -6,6 +6,7 @@
 <title>Luna</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"/>
 <link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@300;400;500;600&family=Exo+2:ital,wght@0,100;0,200;0,300;1,100&display=swap" rel="stylesheet"/>
+<script type="module" src="https://unpkg.com/@splinetool/viewer@1/build/spline-viewer.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
 <style>
   :root {
@@ -1150,6 +1151,7 @@
   const fallback = document.getElementById('spline-viewer-fallback');
   const layer = document.getElementById('luna-bg-layer');
   if (!canvas || !layer) return;
+  // If hands don't follow: open DevTools console and look for "Spline objects" — add your hand object names here
   const possibleHandNames = ['Hand Left', 'Hand Right', 'Left Hand', 'Right Hand', 'hand_left', 'hand_right', 'HandLeft', 'HandRight', 'LeftHand', 'RightHand', 'Hand_L', 'Hand_R'];
   try {
     const { Application } = await import('https://unpkg.com/@splinetool/runtime@1/build/runtime.js');
@@ -1190,7 +1192,6 @@
   }
 })();
 </script>
-<script type="module" src="https://unpkg.com/@splinetool/viewer@1/build/spline-viewer.js"></script>
 
 <!-- Header -->
 <header>

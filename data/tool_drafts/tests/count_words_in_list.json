@@ -1,0 +1,6 @@
+{
+  "returncode": 1,
+  "stdout": "",
+  "stderr": "Traceback (most recent call last):\r\n  File \"C:\\Users\\User\\AppData\\Local\\Temp\\tmp6kr0p29q.py\", line 4, in <module>\r\n    words_list = params['list']\r\n                 ~~~~~~^^^^^^^^\r\nKeyError: 'list'",
+  "ts": 1773702947.979042
+}

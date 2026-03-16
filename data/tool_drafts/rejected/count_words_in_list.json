@@ -1,0 +1,5 @@
+{
+  "name": "count_words_in_list",
+  "description": "counts words in a list of strings",
+  "script": "import json, sys\nparams = json.load(sys.stdin)\n\nwords_list = params['list']\nresult = len(words_list)\nprint(result)"
+}
