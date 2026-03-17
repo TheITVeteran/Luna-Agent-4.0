@@ -1,0 +1,5 @@
+{
+  "name": "ascii_encode",
+  "description": "Encode stdin JSON to ASCII format",
+  "script": "import json, sys\nparams = json.load(sys.stdin)\nresult = params.encode('ascii', 'backslashreplace')\nprint(result)"
+}

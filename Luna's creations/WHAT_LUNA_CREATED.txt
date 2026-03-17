@@ -17,3 +17,7 @@
 2026-03-16 23:15 | evolved        | to_lowercase_dict_values.py | Convert values in a JSON dictionary to lowercase
 2026-03-16 23:41 | absorbed tool  | to_lowercase_dict_keys.py | convert dictionary keys to lowercase
 2026-03-16 23:41 | evolved        | to_lowercase_dict_keys.py | convert dictionary keys to lowercase
+2026-03-16 23:51 | absorbed tool  | dict_key_case.py | Convert dictionary keys to lowercase while keeping values unchanged
+2026-03-16 23:51 | evolved        | dict_key_case.py | Convert dictionary keys to lowercase while keeping values unchanged
+2026-03-17 00:01 | absorbed tool  | to_lowercase_dict_items.py | convert dict items' values to lowercase
+2026-03-17 00:01 | evolved        | to_lowercase_dict_items.py | convert dict items' values to lowercase

@@ -1,0 +1,5 @@
+{
+  "name": "capitalize_first_letter_of_first_item",
+  "description": "Capitalize the first letter of the first item in a list",
+  "script": "import json, sys\nparams = json.load(sys.stdin)\nresult = [item.capitalize() for item in params[0]]\nprint(result)"
+}

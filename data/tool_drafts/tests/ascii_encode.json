@@ -1,0 +1,6 @@
+{
+  "returncode": 1,
+  "stdout": "",
+  "stderr": "Traceback (most recent call last):\r\n  File \"C:\\Users\\User\\AppData\\Local\\Temp\\tmp9sjjxcj5.py\", line 3, in <module>\r\n    result = params.encode('ascii', 'backslashreplace')\r\n             ^^^^^^^^^^^^^\r\nAttributeError: 'dict' object has no attribute 'encode'",
+  "ts": 1773706266.2971282
+}

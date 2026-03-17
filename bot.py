@@ -3,7 +3,7 @@ Luna 4.5 — compact rewrite of bot.py
 Discord bot + Web UI + Ollama chat + Shadow commands + TTS/STT + automation
 Run: python bot.py
 """
-import asyncio, base64, html, io, json, os, random, re, subprocess, sys
+import asyncio, base64, html, io, json, os, random, re, shutil, subprocess, sys
 import tempfile, threading, time, urllib.parse, urllib.request, urllib.error
 import uuid, webbrowser, xml.etree.ElementTree as ET
 from collections import deque
@@ -384,6 +384,10 @@ def _build_luna_chat_system(scope: str | None) -> str:
     intuition = get_intuition_cached(snippet)
     if intuition:
         system = system + "\n\n" + intuition
+    # Absorbed tools: Luna should use and suggest these when they fit the user's need (secure, useful — already vetted).
+    absorbed = sorted(_absorbed_tool_names) if _absorbed_tool_names else []
+    if absorbed:
+        system = system + "\n\nYour absorbed tools (use them when they fit; suggest !<name> when relevant): " + ", ".join(absorbed[:30])
     # Existential express (growing-agent: when dread/fear high, voice it occasionally)
     if bio and _existential_should_express(bio):
         expressed = _existential_express(snippet)
@@ -3940,6 +3944,46 @@ def _run_cmd_impl(cmd: str, p: dict, scope: str | None, user_message: str) -> st
         return f"✅ {result}"
     return ""
 
+def _recycle_luna_creations_leftovers() -> None:
+    """Move non-absorbed creations to Recycled/ so only secure, useful absorbed tools remain in use. Keeps manifest and absorbed copies."""
+    try:
+        if not os.path.isdir(LUNA_CREATIONS_DIR):
+            return
+        recycled_dir = os.path.join(LUNA_CREATIONS_DIR, "Recycled")
+        os.makedirs(recycled_dir, exist_ok=True)
+        absorbed = set(_absorbed_tool_names) if _absorbed_tool_names else set()
+        manifest_name = _LUNA_CREATIONS_MANIFEST
+        moved = 0
+        # Root: keep manifest and any <name>.py where name is absorbed; move the rest to Recycled/
+        for name in os.listdir(LUNA_CREATIONS_DIR):
+            if name == manifest_name or name == "Recycled":
+                continue
+            path = os.path.join(LUNA_CREATIONS_DIR, name)
+            if os.path.isfile(path) and name.endswith(".py"):
+                stem = name[:-3]
+                if stem not in absorbed:
+                    dest = os.path.join(recycled_dir, name)
+                    if os.path.isfile(dest):
+                        os.remove(dest)
+                    shutil.move(path, dest)
+                    moved += 1
+            elif os.path.isdir(path) and name == "agents":
+                # agents/: move all .py files to Recycled/agents/ (create-code scripts; none are absorbed by script name)
+                agents_recycled = os.path.join(recycled_dir, "agents")
+                os.makedirs(agents_recycled, exist_ok=True)
+                for sub in os.listdir(path):
+                    if sub.endswith(".py"):
+                        src = os.path.join(path, sub)
+                        if os.path.isfile(src):
+                            dst = os.path.join(agents_recycled, sub)
+                            if os.path.isfile(dst):
+                                os.remove(dst)
+                            shutil.move(src, dst)
+                            moved += 1
+    except Exception:
+        pass
+
+
 def _luna_creations_log(entry_type: str, filename: str, description: str = "") -> None:
     """Append one line to WHAT_LUNA_CREATED.txt so you can see what new programs/skills/agents she created."""
     try:
@@ -4707,6 +4751,7 @@ def approve_tool_draft(name: str, from_evolution: bool = False) -> tuple[bool, s
             try: os.remove(os.path.join(_TOOL_DRAFTS_DIR, name + ".json"))
             except Exception: pass
             _security_scan_and_alert(out_path)
+            _recycle_luna_creations_leftovers()
             _narrator_say(f"A new capability is integrated. {name} is now part of Luna.", use_tts=from_evolution)
             return True, f"Tool **{name}** absorbed. You can run !{name} now."
         except Exception as e:
@@ -4740,6 +4785,7 @@ def _run_absorbed_tool(name: str, params: dict) -> tuple[bool, str]:
 
 # Call at import so absorbed tools are known
 _load_absorbed_tool_names()
+_recycle_luna_creations_leftovers()
 
 # ── Nudge queue (non-blocking messages to Luna) ───────────────────────────────
 
