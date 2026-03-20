@@ -26,27 +26,79 @@ def _get_bot_deps():
 
 
 def _parse_remind_in_minutes(text: str) -> tuple[str, str] | None:
-    """Parse 'remind me to X in N minutes' or 'recordame X en N minutos'. Returns (message, time_str) or None."""
+    """Parse 'remind me to X in N minutes/hours' or 'X in N hours/minutes'. Returns (message, time_str) or None."""
     text = (text or "").strip()
+    message = None
+    delta_min = None
     # "remind me to call mom in 30 minutes" / "recordame llamar a mamá en 30 minutos"
     m = re.search(
         r"(?:remind\s+me\s+to\s+|recordame\s+|recordar\s+)(.+?)\s+in\s+(\d+)\s*(?:minutes?|mins?|min)\b",
         text,
         re.I | re.DOTALL,
     )
+    if m:
+        message = m.group(1).strip()
+        try:
+            delta_min = int(m.group(2))
+        except ValueError:
+            pass
     if not m:
         m = re.search(
             r"(?:remind\s+me\s+to\s+|recordame\s+|recordar\s+)(.+?)\s+en\s+(\d+)\s*(?:minutos?|min)\b",
             text,
             re.I | re.DOTALL,
         )
+        if m:
+            message = m.group(1).strip()
+            try:
+                delta_min = int(m.group(2))
+            except ValueError:
+                pass
+    # "in N hours" (English or Spanish)
     if not m:
+        m = re.search(
+            r"(?:remind\s+me\s+to\s+|recordame\s+|recordar\s+)(.+?)\s+in\s+(\d+)\s*(?:hours?|hrs?|h)\b",
+            text,
+            re.I | re.DOTALL,
+        )
+        if m:
+            message = m.group(1).strip()
+            try:
+                delta_min = int(m.group(2)) * 60
+            except ValueError:
+                pass
+    if not m:
+        m = re.search(
+            r"(?:remind\s+me\s+to\s+|recordame\s+|recordar\s+)(.+?)\s+en\s+(\d+)\s*(?:horas?|hrs?|h)\b",
+            text,
+            re.I | re.DOTALL,
+        )
+        if m:
+            message = m.group(1).strip()
+            try:
+                delta_min = int(m.group(2)) * 60
+            except ValueError:
+                pass
+    # Looser: "[task] in N minutes" or "[task] in N hours" (no "remind me to" prefix)
+    if not m:
+        m = re.search(r"^(.+?)\s+in\s+(\d+)\s*(?:minutes?|mins?|min)\s*$", text, re.I | re.DOTALL)
+        if m:
+            message = m.group(1).strip()
+            try:
+                delta_min = int(m.group(2))
+            except ValueError:
+                pass
+    if not m:
+        m = re.search(r"^(.+?)\s+in\s+(\d+)\s*(?:hours?|hrs?|h)\s*$", text, re.I | re.DOTALL)
+        if m:
+            message = m.group(1).strip()
+            try:
+                delta_min = int(m.group(2)) * 60
+            except ValueError:
+                pass
+    if message is None or delta_min is None:
         return None
-    message = m.group(1).strip()[:500]
-    try:
-        delta_min = int(m.group(2))
-    except ValueError:
-        return None
+    message = message[:500]
     if delta_min <= 0 or delta_min > 60 * 24 * 7:  # max 1 week
         return None
     when = datetime.now() + timedelta(minutes=delta_min)
@@ -145,7 +197,7 @@ def api_remind():
                 if time_str:
                     add_reminder(time_str, m.group(2).strip()[:500], linked_id)
                     return jsonify({"ok": True, "message": f"Reminder set for {time_str}"})
-            return jsonify({"error": "Use: 'remind me to [task] in [N] minutes' or 'remind me at 7pm to [task]'"}), 400
+            return jsonify({"error": "Use: '[task] in [N] minutes/hours' or 'remind me at 7pm to [task]'"}), 400
         message, time_str = parsed
         add_reminder(time_str, message, linked_id)
         return jsonify({"ok": True, "message": f"Reminder set for {time_str} ({message[:50]}…)"})

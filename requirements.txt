@@ -1,0 +1,41 @@
+# Luna 5.0 — core dependencies
+# Install: pip install -r requirements.txt
+
+# Discord bot
+discord.py>=2.0
+python-dotenv>=1.0
+
+# Web UI
+flask>=2.0
+
+# TTS
+gTTS>=2.3
+
+# System monitoring
+psutil>=5.9
+
+# Browser automation (run: playwright install chromium)
+playwright>=1.30
+
+# Speech-to-text
+openai-whisper>=20230918
+
+# Music download
+yt-dlp>=2023.0
+
+# Camera / vision (optional — only needed if using camera features)
+opencv-python>=4.7
+ultralytics>=8.0
+
+# Screenshot capture
+mss>=9.0
+
+# Clipboard monitoring
+pyperclip>=1.8
+
+# Optional: voice wake word (uncomment to enable "Hey Luna")
+# openwakeword>=0.6
+
+# Optional: ML tools (see also requirements-ml.txt)
+# scikit-learn>=1.0
+# numpy>=1.20

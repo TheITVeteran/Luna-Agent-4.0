@@ -1,0 +1,5 @@
+{
+  "name": "dict_key_case_except_first_values_dict",
+  "description": "Converts key case of dictionary values except for those that are themselves dictionaries",
+  "script": "import json, sys\nparams = json.load(sys.stdin)\n\ndef convert(value):\n    if isinstance(value, dict):\n        return value\n    elif isinstance(value, str):\n        return value.casefold()\n    else:\n        return type(value)(value casefold())\n\nresult = {key: convert(value) for key, value in params.items()}\nprint(json.dumps(result))"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "dict_key_lowercase_except_last",
+  "description": "Convert dictionary keys to lowercase except for the last one",
+  "script": "import json, sys\nparams = json.load(sys.stdin)\nresult = {k.lower(): v for k, v in params.items()[:-1]}\nprint(result)"
+}

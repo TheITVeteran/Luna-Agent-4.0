@@ -1,0 +1,5 @@
+{
+  "name": "convert_to_roman_numerals",
+  "description": "Convert numbers to roman numerals",
+  "script": "import json, sys\n\ndef intToRoman(num):\n    val = [\n        1000, 900, 500, 400,\n        100, 90, 50, 40,\n        10, 9, 5, 4,\n        1\n        ]\n    syb = [\n        \"M\", \"CM\", \"D\", \"CD\",\n        \"C\", \"XC\", \"L\", \"XL\",\n        \"X\", \"IX\", \"V\", \"IV\",\n        \"I\"\n        ]\n    roman_num = ''\n    i = 0\n    while num > 0:\n        for _ in range(num // val[i]):\n            roman_num += syb[i]\n            num -= val[i]\n        i += 1\n    return roman_num\n\nparams = json.load(sys.stdin)\nprint(intToRoman(params))"
+}

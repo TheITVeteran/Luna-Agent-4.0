@@ -1,0 +1,6 @@
+{
+  "returncode": 1,
+  "stdout": "",
+  "stderr": "Traceback (most recent call last):\r\n  File \"C:\\Users\\User\\AppData\\Local\\Temp\\tmpz8uroveh.py\", line 2, in <module>\r\n    params = json.load(sys.stdin)\r\n             ^^^^\r\nNameError: name 'json' is not defined. Did you forget to import 'json'?",
+  "ts": 1773707930.3704903
+}

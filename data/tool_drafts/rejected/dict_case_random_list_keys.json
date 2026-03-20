@@ -1,0 +1,5 @@
+{
+  "name": "dict_case_random_list_keys",
+  "description": "Randomly selects keys from a dictionary for case conversion",
+  "script": "import json, sys, random\nparams = json.load(sys.stdin)\nresult = {random.choice(list(params.keys())):\n           params[random.choice(list(params.values()))].case_random()}\nprint(result)"
+}

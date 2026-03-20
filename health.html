@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Luna — Health Dashboard</title>
+<link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@300;400;500;600&family=Exo+2:wght@200;300&display=swap" rel="stylesheet"/>
+<style>
+:root { --cyan:#00d4ff; --bg:#020b14; --panel:rgba(0,20,40,0.85); --border:rgba(0,212,255,0.25); --text:#a8d8ea; --ok:#0f6; --err:#f44; }
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:var(--bg);color:var(--text);font-family:'Rajdhani',sans-serif;padding:24px;min-height:100vh}
+h1{color:var(--cyan);font-size:28px;margin-bottom:20px;font-weight:500}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:16px;margin-bottom:24px}
+.card{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:18px 20px}
+.card h2{color:var(--cyan);font-size:16px;font-weight:400;margin-bottom:10px;text-transform:uppercase;letter-spacing:1px}
+.metric{display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid rgba(0,212,255,0.08)}
+.metric:last-child{border-bottom:none}
+.metric .label{color:#6aa;font-size:14px}
+.metric .value{font-family:'Exo 2',monospace;font-size:14px}
+.ok{color:var(--ok)}.err{color:var(--err)}.warn{color:#fa0}
+.bar-bg{background:rgba(0,212,255,0.1);border-radius:4px;height:8px;flex:1;margin-left:12px;overflow:hidden}
+.bar-fill{height:100%;border-radius:4px;transition:width .5s}
+.bar-fill.ok{background:var(--ok)}.bar-fill.warn{background:#fa0}.bar-fill.err{background:var(--err)}
+.history{max-height:300px;overflow-y:auto;font-family:'Exo 2',monospace;font-size:12px;line-height:1.8}
+.history .entry{padding:4px 0;border-bottom:1px solid rgba(0,212,255,0.06)}
+a.back{color:var(--cyan);text-decoration:none;font-size:14px;display:inline-block;margin-bottom:16px}
+a.back:hover{text-decoration:underline}
+#chart-container{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:18px 20px;margin-bottom:24px}
+canvas{width:100%!important;height:200px!important}
+</style>
+</head>
+<body>
+<a class="back" href="/">← Back to Luna</a>
+<h1>Health Dashboard</h1>
+<div class="grid">
+  <div class="card">
+    <h2>System</h2>
+    <div id="sys-metrics"></div>
+  </div>
+  <div class="card">
+    <h2>Ollama</h2>
+    <div id="ollama-metrics"></div>
+  </div>
+  <div class="card">
+    <h2>Luna Process</h2>
+    <div id="luna-metrics"></div>
+  </div>
+  <div class="card">
+    <h2>Stats</h2>
+    <div id="stats-metrics"></div>
+  </div>
+</div>
+<div class="card" style="margin-bottom:24px">
+  <h2>Recent Actions</h2>
+  <div id="action-history" class="history"></div>
+</div>
+<div class="card">
+  <h2>Health History (last 30 polls)</h2>
+  <div id="health-history" class="history"></div>
+</div>
+
+<script>
+const healthLog = [];
+
+function metricRow(label, value, cls) {
+  return '<div class="metric"><span class="label">' + label + '</span><span class="value ' + (cls||'') + '">' + value + '</span></div>';
+}
+function barRow(label, pct) {
+  const cls = pct > 85 ? 'err' : pct > 60 ? 'warn' : 'ok';
+  return '<div class="metric"><span class="label">' + label + '</span><div class="bar-bg"><div class="bar-fill ' + cls + '" style="width:' + pct + '%"></div></div><span class="value" style="min-width:40px;text-align:right">' + pct + '%</span></div>';
+}
+
+async function poll() {
+  try {
+    const r = await fetch('/api/health');
+    const d = await r.json();
+    const now = new Date().toLocaleTimeString();
+
+    // System
+    const sys = d.system || {};
+    document.getElementById('sys-metrics').innerHTML =
+      barRow('CPU', sys.cpu_pct || 0) +
+      barRow('RAM', sys.ram_pct || 0) +
+      metricRow('RAM Used', (sys.ram_used_gb || 0).toFixed(1) + ' / ' + (sys.ram_total_gb || 0).toFixed(1) + ' GB') +
+      (sys.disks || []).map(dk => barRow(dk.mount, dk.pct)).join('');
+
+    // Ollama
+    document.getElementById('ollama-metrics').innerHTML =
+      metricRow('Status', d.ollama_ok ? 'ONLINE' : 'OFFLINE', d.ollama_ok ? 'ok' : 'err') +
+      metricRow('Chat Model', d.chat_model || '—') +
+      metricRow('Shadow Model', d.shadow_model || '—') +
+      metricRow('Avg Latency', d.ollama_latency_ms != null ? d.ollama_latency_ms + 'ms' : '—');
+
+    // Luna
+    document.getElementById('luna-metrics').innerHTML =
+      metricRow('Uptime', d.uptime || '—') +
+      metricRow('Memory', (d.luna_mem_mb || 0).toFixed(1) + ' MB') +
+      metricRow('Conversations', d.conversation_count || 0) +
+      metricRow('Knowledge Entries', d.knowledge_count || 0) +
+      metricRow('Absorbed Tools', d.absorbed_tools || 0);
+
+    // Stats
+    document.getElementById('stats-metrics').innerHTML =
+      metricRow('Actions Today', d.actions_today || 0) +
+      metricRow('Action Success Rate', d.action_success_rate != null ? d.action_success_rate + '%' : '—') +
+      metricRow('Clipboard Items', d.clipboard_count || 0) +
+      metricRow('Last Error', d.last_error || 'None', d.last_error ? 'err' : 'ok');
+
+    healthLog.unshift({ time: now, cpu: sys.cpu_pct, ram: sys.ram_pct, ollama: d.ollama_ok });
+    if (healthLog.length > 30) healthLog.pop();
+    document.getElementById('health-history').innerHTML = healthLog.map(h =>
+      '<div class="entry">' + h.time + ' — CPU ' + (h.cpu||0) + '% · RAM ' + (h.ram||0) + '% · Ollama ' +
+      (h.ollama ? '<span class="ok">OK</span>' : '<span class="err">DOWN</span>') + '</div>'
+    ).join('');
+
+    // Actions
+    if (d.recent_actions && d.recent_actions.length) {
+      document.getElementById('action-history').innerHTML = d.recent_actions.map(a =>
+        '<div class="entry">' + (a.ts||'').slice(0,19) + ' ' + (a.cmd||'') + ': ' + (a.reply||'').slice(0,80) + '</div>'
+      ).join('');
+    }
+  } catch(e) {
+    document.getElementById('ollama-metrics').innerHTML = metricRow('Status', 'UNREACHABLE', 'err');
+  }
+}
+
+poll();
+setInterval(poll, 10000);
+</script>
+</body>
+</html>

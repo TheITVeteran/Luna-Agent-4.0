@@ -4,8 +4,15 @@
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 <title>Luna</title>
+<link rel="manifest" href="/manifest.json"/>
+<meta name="theme-color" content="#00d4ff"/>
+<meta name="apple-mobile-web-app-capable" content="yes"/>
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
 <link rel="preconnect" href="https://fonts.googleapis.com"/>
 <link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@300;400;500;600&family=Exo+2:ital,wght@0,100;0,200;0,300;1,100&display=swap" rel="stylesheet"/>
+<link href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css" rel="stylesheet"/>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js" defer></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/autoloader/prism-autoloader.min.js" defer></script>
 <script type="module" src="https://unpkg.com/@splinetool/viewer@1/build/spline-viewer.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
 <style>
@@ -556,6 +563,18 @@
     font-size: 12px;
   }
   .feedback-popup-cancel:hover { color: #fff; }
+  /* Calendar popup */
+  .calendar-popup-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.65); display: none; align-items: center; justify-content: center; z-index: 10010; }
+  .calendar-popup-overlay.open { display: flex; }
+  .calendar-popup { width: min(700px, 94vw); max-height: 85vh; overflow: auto; background: rgba(0,12,24,0.96); border: 1px solid var(--border); border-radius: 12px; padding: 14px; box-shadow: 0 0 24px rgba(0,212,255,0.22); }
+  .calendar-popup-title { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; color: var(--text-bright); font-size: 18px; }
+  .calendar-popup-grid { display: grid; grid-template-columns: 1fr 130px 1fr; gap: 8px; margin-bottom: 8px; }
+  .calendar-popup-grid input { width: 100%; background: rgba(0,20,40,0.6); border: 1px solid var(--border); color: var(--text); border-radius: 6px; padding: 8px; }
+  .calendar-popup-list { max-height: 320px; overflow: auto; border: 1px solid var(--border); border-radius: 8px; padding: 8px; margin-top: 8px; }
+  .calendar-item { display: flex; justify-content: space-between; gap: 8px; padding: 6px 4px; border-bottom: 1px dashed rgba(0,212,255,0.15); }
+  .calendar-item:last-child { border-bottom: 0; }
+  .calendar-item .meta { font-size: 11px; color: rgba(168,216,234,0.75); }
+  .calendar-del { background: rgba(255,45,120,0.15); color: var(--magenta); border: 1px solid rgba(255,45,120,0.45); border-radius: 6px; padding: 2px 8px; cursor: pointer; }
 
   /* Working on strip */
   .working-strip {
@@ -1129,11 +1148,251 @@
   .side-panel::-webkit-scrollbar { width: 2px; }
   .side-panel::-webkit-scrollbar-thumb { background: rgba(0,212,255,0.2); }
 
-  /* Responsive adjustments */
-  @media (max-width: 700px) {
-    .side-panel { display: none; }
-    .header-stats { display: none; }
+  /* ── COLLAPSIBLE GROUPS ── */
+  .panel-group-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    cursor: pointer;
+    padding: 6px 0 4px;
+    border-bottom: 1px solid rgba(0,212,255,0.1);
+    user-select: none;
   }
+  .panel-group-header:hover .panel-title { color: var(--cyan); }
+  .panel-group-arrow {
+    font-size: 9px;
+    color: rgba(0,212,255,0.35);
+    transition: transform 0.2s;
+  }
+  .panel-group.collapsed .panel-group-arrow { transform: rotate(-90deg); }
+  .panel-group-body { display: flex; flex-direction: column; gap: 4px; padding-top: 4px; }
+  .panel-group.collapsed .panel-group-body { display: none; }
+
+  /* ── SIDE PANEL COLLAPSE TOGGLE ── */
+  .side-toggle {
+    position: absolute;
+    right: -14px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 14px;
+    height: 36px;
+    background: rgba(0,20,40,0.9);
+    border: 1px solid var(--border);
+    border-left: none;
+    border-radius: 0 4px 4px 0;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: rgba(0,212,255,0.5);
+    font-size: 9px;
+    z-index: 20;
+  }
+  .side-toggle:hover { color: var(--cyan); background: rgba(0,30,60,0.9); }
+  .side-panel.collapsed-panel { width: 0; min-width: 0; padding: 0; overflow: hidden; border-right: none; }
+  .side-panel { position: relative; transition: width 0.2s, padding 0.2s; }
+
+  /* ── MSG TIMESTAMP + COPY + FEEDBACK ── */
+  .msg-meta {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 4px;
+    opacity: 0;
+    transition: opacity 0.15s;
+  }
+  .msg:hover .msg-meta { opacity: 1; }
+  .msg-ts {
+    font-family: var(--font-data);
+    font-size: 9px;
+    color: rgba(0,212,255,0.25);
+    letter-spacing: 0.1em;
+  }
+  .msg-copy, .msg-thumb {
+    background: none;
+    border: none;
+    cursor: pointer;
+    font-size: 11px;
+    color: rgba(0,212,255,0.3);
+    padding: 0 2px;
+    transition: color 0.15s;
+  }
+  .msg-copy:hover { color: var(--cyan); }
+  .msg-thumb:hover { color: var(--gold); }
+  .msg-thumb.voted { color: var(--gold); }
+  .msg-response-time {
+    font-family: var(--font-data);
+    font-size: 9px;
+    color: rgba(0,212,255,0.2);
+    letter-spacing: 0.05em;
+  }
+
+  /* ── CODE HIGHLIGHTING ── */
+  .msg-bubble pre code {
+    background: none;
+    padding: 0;
+    color: inherit;
+  }
+
+  /* ── STREAMING ANIMATION ── */
+  @keyframes charFade { from { opacity: 0.3; } to { opacity: 1; } }
+  .streaming-cursor::after {
+    content: '|';
+    animation: blink 0.8s step-end infinite;
+    color: var(--cyan);
+    margin-left: 1px;
+  }
+  @keyframes blink { 50% { opacity: 0; } }
+
+  /* ── LOADING BUTTON STATE ── */
+  .cmd-btn.loading {
+    pointer-events: none;
+    opacity: 0.6;
+  }
+  .cmd-btn.loading::after {
+    content: '';
+    width: 10px; height: 10px;
+    border: 1.5px solid rgba(0,212,255,0.3);
+    border-top-color: var(--cyan);
+    border-radius: 50%;
+    animation: spin 0.6s linear infinite;
+    margin-left: auto;
+  }
+
+  /* ── DROP ZONE ── */
+  .drop-overlay {
+    display: none;
+    position: absolute;
+    inset: 0;
+    background: rgba(0,212,255,0.08);
+    border: 2px dashed rgba(0,212,255,0.4);
+    z-index: 50;
+    align-items: center;
+    justify-content: center;
+    font-family: var(--font-data);
+    font-size: 14px;
+    color: var(--cyan);
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    pointer-events: none;
+  }
+  .drop-overlay.visible { display: flex; }
+
+  /* ── SETTINGS POPUP ── */
+  .settings-popup-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.6);
+    z-index: 1000;
+    align-items: center;
+    justify-content: center;
+    backdrop-filter: blur(4px);
+  }
+  .settings-popup-overlay.open { display: flex; }
+  .settings-popup {
+    width: 90%;
+    max-width: 460px;
+    background: linear-gradient(145deg, rgba(2,15,28,0.98), rgba(1,8,16,0.98));
+    border: 1px solid rgba(0,212,255,0.25);
+    border-radius: 12px;
+    box-shadow: 0 12px 40px rgba(0,0,0,0.5);
+    padding: 20px 24px;
+    max-height: 80vh;
+    overflow-y: auto;
+  }
+  .settings-popup h3 {
+    font-family: var(--font-data);
+    font-size: 14px;
+    color: var(--cyan);
+    letter-spacing: 0.1em;
+    margin-bottom: 16px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .settings-popup h3 button {
+    background: none; border: none; color: rgba(255,255,255,0.6); cursor: pointer; font-size: 18px;
+  }
+  .settings-popup h3 button:hover { color: #fff; }
+  .settings-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 0;
+    border-bottom: 1px solid rgba(0,212,255,0.08);
+    font-size: 13px;
+  }
+  .settings-row label { color: var(--text); flex: 1; }
+  .settings-row select, .settings-row input[type="text"] {
+    background: rgba(0,20,40,0.6);
+    border: 1px solid rgba(0,212,255,0.2);
+    border-radius: 4px;
+    color: var(--text);
+    padding: 4px 8px;
+    font-size: 12px;
+    font-family: var(--font-main);
+    max-width: 180px;
+  }
+  .toggle-switch {
+    position: relative;
+    width: 36px;
+    height: 20px;
+    background: rgba(0,212,255,0.15);
+    border-radius: 10px;
+    cursor: pointer;
+    transition: background 0.2s;
+    flex-shrink: 0;
+  }
+  .toggle-switch.on { background: rgba(0,212,255,0.5); }
+  .toggle-switch::after {
+    content: '';
+    position: absolute;
+    top: 2px; left: 2px;
+    width: 16px; height: 16px;
+    border-radius: 50%;
+    background: var(--cyan);
+    transition: transform 0.2s;
+  }
+  .toggle-switch.on::after { transform: translateX(16px); }
+
+  /* ── RESPONSIVE ── */
+  @media (max-width: 900px) {
+    .mind-panel { display: none; }
+  }
+  @media (max-width: 700px) {
+    .side-panel { position: fixed; left: 0; top: 0; bottom: 0; z-index: 100; width: 240px; transform: translateX(-100%); transition: transform 0.25s; background: rgba(2,11,20,0.97); }
+    .side-panel.mobile-open { transform: translateX(0); }
+    .side-panel.collapsed-panel { transform: translateX(-100%); }
+    .side-toggle { display: none; }
+    .mobile-hamburger { display: flex !important; }
+    .header-stats { display: none; }
+    #chat { padding: 16px 14px; }
+    .input-area { padding: 12px 14px 16px; }
+    .msg { max-width: 92%; }
+  }
+  .mobile-hamburger {
+    display: none;
+    background: none;
+    border: 1px solid var(--border);
+    color: var(--cyan);
+    width: 34px;
+    height: 34px;
+    font-size: 16px;
+    cursor: pointer;
+    align-items: center;
+    justify-content: center;
+    border-radius: 4px;
+  }
+  .mobile-hamburger:hover { background: var(--cyan-dim); }
+  .mobile-backdrop {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.5);
+    z-index: 99;
+  }
+  .mobile-backdrop.visible { display: block; }
 </style>
 </head>
 <body>
@@ -1197,11 +1456,12 @@
 <header>
   <div class="corner tl"></div>
   <div class="corner tr"></div>
+  <button class="mobile-hamburger" id="mobile-hamburger" title="Menu">☰</button>
   <div class="logo-block">
     <div class="luna-orb"></div>
     <div class="logo-text">
       <span class="logo-name">Luna</span>
-      <span class="logo-sub">Personal AI Companion · v4.5</span>
+      <span class="logo-sub">Personal AI Companion · v5.0</span>
     </div>
   </div>
   <div class="header-stats">
@@ -1218,7 +1478,8 @@
       <span class="stat-value" id="stat-mode">LUNA</span>
     </div>
   </div>
-  <div class="header-right">
+  <div class="header-right" style="display:flex;align-items:center;gap:10px;">
+    <button class="icon-btn" id="settings-btn" title="Settings" style="width:32px;height:32px;font-size:14px;">⚙</button>
     <div class="time-display" id="clock">—</div>
   </div>
 </header>
@@ -1231,12 +1492,16 @@
 <div class="main">
 
   <!-- Side Panel -->
-  <aside class="side-panel">
+  <div class="mobile-backdrop" id="mobile-backdrop"></div>
+  <aside class="side-panel" id="side-panel">
+    <div class="side-toggle" id="side-toggle" title="Collapse panel">◂</div>
     <div class="panel-section">
-      <div class="panel-title">Social & Assistant</div>
-      <button class="cmd-btn" onclick="sendQuick('Shadow, news')" title="World headlines">
-        <span class="cmd-icon">📡</span> News
-      </button>
+      <div class="panel-group" id="pg-social">
+        <div class="panel-group-header" onclick="toggleGroup('pg-social')">
+          <div class="panel-title">Social</div>
+          <span class="panel-group-arrow">▼</span>
+        </div>
+        <div class="panel-group-body">
       <button class="cmd-btn" onclick="sendQuick('Shadow, share song')" title="Share to X (Twitter)">
         <span class="cmd-icon">🎵</span> Share Song (X)
       </button>
@@ -1252,7 +1517,7 @@
       <button class="cmd-btn" onclick="insertCommand('!ig_dm ', 'username then optional message')" title="Instagram DM — type username then message, then Send">
         <span class="cmd-icon">📷</span> Instagram DM
       </button>
-      <button class="cmd-btn" onclick="insertCommand('!fb_msg ')" title="Messenger message — add name in box">
+      <button class="cmd-btn" onclick="insertCommand('!fb_msg ', 'Name : message (e.g. John Smith : hey!')" title="Messenger — type name, colon, then message">
         <span class="cmd-icon">💬</span> Messenger
       </button>
       <button class="cmd-btn" onclick="insertCommand('!msg ')" title="WhatsApp message — add contact in box">
@@ -1261,6 +1526,15 @@
       <button class="cmd-btn" onclick="insertCommand('!dm ', 'username then message, or about/description &lt;subject&gt;')" title="Discord DM — use “about …” or “description: …” and Luna rephrases">
         <span class="cmd-icon">💬</span> Discord DM
       </button>
+        </div>
+      </div>
+
+      <div class="panel-group" id="pg-media">
+        <div class="panel-group-header" onclick="toggleGroup('pg-media')">
+          <div class="panel-title">Media</div>
+          <span class="panel-group-arrow">▼</span>
+        </div>
+        <div class="panel-group-body">
       <a class="cmd-btn" href="/translate/" style="text-decoration:none;color:inherit;display:inline-flex;align-items:center;gap:6px;" title="Open Luna's translate module for text or voice clips">
         <span class="cmd-icon">🔊</span> Translate
       </a>
@@ -1268,9 +1542,9 @@
       <button class="cmd-btn" onclick="document.getElementById('translate-voice-file').click()" title="Upload an audio file to translate to English">
         <span class="cmd-icon">📤</span> Upload voice
       </button>
-      <button class="cmd-btn" onclick="insertCommand('!search ')" title="Google search — add query in box">
-        <span class="cmd-icon">🔍</span> Search
-      </button>
+      <a class="cmd-btn" href="/transcribeme/" style="text-decoration:none;color:inherit;display:inline-flex;align-items:center;gap:6px;" title="Voice to text, translate, ask, reminders">
+        <span class="cmd-icon">🔊</span> TranscribeMe
+      </a>
       <button class="cmd-btn" onclick="insertCommand('!play ')" title="Play music in voice — add song/URL in box">
         <span class="cmd-icon">▶</span> Play
       </button>
@@ -1286,6 +1560,24 @@
       <button class="cmd-btn" onclick="sendQuick('!stop')" title="Stop playback and clear queue in Discord">
         <span class="cmd-icon">⏹</span> Stop
       </button>
+        </div>
+      </div>
+
+      <div class="panel-group" id="pg-system">
+        <div class="panel-group-header" onclick="toggleGroup('pg-system')">
+          <div class="panel-title">System</div>
+          <span class="panel-group-arrow">▼</span>
+        </div>
+        <div class="panel-group-body">
+      <button class="cmd-btn" onclick="sendQuick('Shadow, news')" title="World headlines">
+        <span class="cmd-icon">📡</span> News
+      </button>
+      <button class="cmd-btn" onclick="insertCommand('!search ')" title="Google search — add query in box">
+        <span class="cmd-icon">🔍</span> Search
+      </button>
+      <button class="cmd-btn" id="calendar-btn" title="Open calendar popup (add/view events)">
+        <span class="cmd-icon">📅</span> Calendar
+      </button>
       <button class="cmd-btn" onclick="sendQuick('pc vitals')" title="CPU, RAM, disk">
         <span class="cmd-icon">🖥</span> PC vitals
       </button>
@@ -1295,18 +1587,35 @@
       <button type="button" class="cmd-btn" id="camera-btn" onclick="toggleCamera()" title="Turn on so Luna can see you; ask 'what do you see' for object and face recognition">
         <span class="cmd-icon">📷</span> <span id="camera-btn-label">Camera</span>
       </button>
+      <button class="cmd-btn" onclick="sendQuick('!briefing')" title="Morning briefing: weather, calendar, todos, news">
+        <span class="cmd-icon">🌅</span> Briefing
+      </button>
+      <button class="cmd-btn" onclick="sendQuick('!screenshot')" title="Capture and describe what's on your screen">
+        <span class="cmd-icon">🖥</span> Screenshot
+      </button>
+        </div>
+      </div>
+
+      <div class="panel-group" id="pg-tools">
+        <div class="panel-group-header" onclick="toggleGroup('pg-tools')">
+          <div class="panel-title">Tools</div>
+          <span class="panel-group-arrow">▼</span>
+        </div>
+        <div class="panel-group-body">
       <button class="cmd-btn" onclick="showHelp()" title="Full command list">
         <span class="cmd-icon">⚡</span> Commands
       </button>
-      <a class="cmd-btn" href="/transcribeme/" style="text-decoration:none;color:inherit;display:inline-flex;align-items:center;gap:6px;" title="Voice to text, translate, ask, reminders">
-        <span class="cmd-icon">🔊</span> TranscribeMe
-      </a>
       <a class="cmd-btn" href="/mind/" style="text-decoration:none;color:inherit;display:inline-flex;align-items:center;gap:6px;" title="Full Luna mind map (D3 graph)">
         <span class="cmd-icon">🧠</span> Luna's Mind
       </a>
       <a class="cmd-btn" href="/evolution/" style="text-decoration:none;color:inherit;display:inline-flex;align-items:center;gap:6px;" title="Action log as evolution graph">
         <span class="cmd-icon">📈</span> Evolution
       </a>
+      <a class="cmd-btn" href="/health/" style="text-decoration:none;color:inherit;display:inline-flex;align-items:center;gap:6px;" title="System health dashboard">
+        <span class="cmd-icon">💊</span> Health
+      </a>
+        </div>
+      </div>
     </div>
 
     <div class="panel-section" id="luna-says-section" style="display:none;">
@@ -1406,6 +1715,11 @@
 
   <!-- Chat -->
   <div class="chat-area">
+    <div id="chat-search-bar" style="display:none;padding:6px 12px;background:rgba(0,20,40,0.9);border-bottom:1px solid rgba(0,212,255,0.15);align-items:center;gap:8px;">
+      <input type="text" id="chat-search-input" placeholder="Search chat history…" style="flex:1;background:rgba(0,20,40,0.6);border:1px solid rgba(0,212,255,0.2);border-radius:6px;color:var(--text);padding:6px 10px;font-size:12px;font-family:var(--font-main);"/>
+      <button type="button" class="cmd-btn" id="chat-search-close" style="font-size:14px;padding:4px 8px;">×</button>
+    </div>
+    <div class="drop-overlay" id="drop-overlay">Drop file to send</div>
     <div id="chat">
       <div class="welcome" id="welcome">
         <div class="welcome-ring"><div class="welcome-ring-dot"></div></div>
@@ -1502,9 +1816,99 @@
   </div>
 </div>
 
+<!-- Calendar popup -->
+<div class="calendar-popup-overlay" id="calendar-popup-overlay">
+  <div class="calendar-popup" id="calendar-popup">
+    <div class="calendar-popup-title">
+      <span>📅 Calendar</span>
+      <button type="button" class="close-dm-popup" id="close-calendar-popup" aria-label="Close">×</button>
+    </div>
+    <div class="calendar-popup-grid">
+      <input type="date" id="calendar-date" />
+      <input type="time" id="calendar-time" />
+      <input type="text" id="calendar-title" placeholder="Event title" />
+    </div>
+    <div style="display:flex;gap:8px;align-items:center;">
+      <input type="text" id="calendar-note" placeholder="Optional note" style="flex:1;background:rgba(0,20,40,0.6);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:8px;" />
+      <button type="button" class="cmd-btn" id="calendar-add-btn">Add event</button>
+      <button type="button" class="cmd-btn" id="calendar-refresh-btn">Refresh</button>
+    </div>
+    <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px;">
+      <button type="button" class="cmd-btn" id="calendar-mode-upcoming">Upcoming</button>
+      <button type="button" class="cmd-btn" id="calendar-mode-today">Today</button>
+      <button type="button" class="cmd-btn" id="calendar-mode-week">Week</button>
+    </div>
+    <div id="calendar-result" class="msg-status" style="margin-top:8px;"></div>
+    <div class="calendar-popup-list" id="calendar-list"></div>
+  </div>
+</div>
+
+<!-- Settings popup -->
+<div class="settings-popup-overlay" id="settings-overlay">
+  <div class="settings-popup">
+    <h3>Settings <button onclick="document.getElementById('settings-overlay').classList.remove('open')">×</button></h3>
+    <div class="settings-row">
+      <label>Chat model</label>
+      <select id="setting-model"><option>Loading…</option></select>
+    </div>
+    <div class="settings-row">
+      <label>Auto-TTS replies</label>
+      <div class="toggle-switch" id="setting-tts" onclick="toggleSetting(this)"></div>
+    </div>
+    <div class="settings-row">
+      <label>Browser notifications</label>
+      <div class="toggle-switch on" id="setting-notif" onclick="toggleSetting(this)"></div>
+    </div>
+    <div class="settings-row">
+      <label>Persist chat on refresh</label>
+      <div class="toggle-switch on" id="setting-persist" onclick="toggleSetting(this)"></div>
+    </div>
+    <div class="settings-row">
+      <label>Streaming animation</label>
+      <div class="toggle-switch on" id="setting-stream-anim" onclick="toggleSetting(this)"></div>
+    </div>
+  </div>
+</div>
+
 <div id="toast"></div>
 
 <script>
+// ── Settings (localStorage backed) ──
+const lunaSettings = {
+  tts: localStorage.getItem('luna-tts') === '1',
+  notif: localStorage.getItem('luna-notif') !== '0',
+  persist: localStorage.getItem('luna-persist') !== '0',
+  streamAnim: localStorage.getItem('luna-stream-anim') !== '0',
+};
+function syncSettingsUI() {
+  const map = { 'setting-tts': lunaSettings.tts, 'setting-notif': lunaSettings.notif, 'setting-persist': lunaSettings.persist, 'setting-stream-anim': lunaSettings.streamAnim };
+  Object.entries(map).forEach(([id, on]) => { const el = document.getElementById(id); if (el) el.classList.toggle('on', on); });
+}
+function toggleSetting(el) {
+  el.classList.toggle('on');
+  const on = el.classList.contains('on');
+  const id = el.id;
+  if (id === 'setting-tts') { lunaSettings.tts = on; localStorage.setItem('luna-tts', on ? '1' : '0'); }
+  if (id === 'setting-notif') { lunaSettings.notif = on; localStorage.setItem('luna-notif', on ? '1' : '0'); }
+  if (id === 'setting-persist') { lunaSettings.persist = on; localStorage.setItem('luna-persist', on ? '1' : '0'); if (!on) localStorage.removeItem('luna-chat-history'); }
+  if (id === 'setting-stream-anim') { lunaSettings.streamAnim = on; localStorage.setItem('luna-stream-anim', on ? '1' : '0'); }
+}
+syncSettingsUI();
+document.getElementById('settings-btn').addEventListener('click', () => {
+  document.getElementById('settings-overlay').classList.add('open');
+  loadModelList();
+});
+document.getElementById('settings-overlay').addEventListener('click', e => { if (e.target.id === 'settings-overlay') e.target.classList.remove('open'); });
+async function loadModelList() {
+  try {
+    const r = await fetch('/api/status');
+    const d = await r.json();
+    const sel = document.getElementById('setting-model');
+    const current = d.chat_model || '';
+    sel.innerHTML = '<option value="' + escapeHtml(current) + '">' + escapeHtml(current) + '</option>';
+  } catch (_) {}
+}
+
 // ── Clock ──
 function updateClock() {
   const now = new Date();
@@ -1609,6 +2013,102 @@ document.getElementById('luna-says-ack').addEventListener('click', async functio
 setInterval(checkStatus, 30000);
 checkStatus();
 
+// Calendar popup
+const calendarBtn = document.getElementById('calendar-btn');
+const calendarOverlay = document.getElementById('calendar-popup-overlay');
+const closeCalendarBtn = document.getElementById('close-calendar-popup');
+const calendarListEl = document.getElementById('calendar-list');
+const calendarResultEl = document.getElementById('calendar-result');
+const calendarAddBtn = document.getElementById('calendar-add-btn');
+const calendarRefreshBtn = document.getElementById('calendar-refresh-btn');
+const calendarModeUpcomingBtn = document.getElementById('calendar-mode-upcoming');
+const calendarModeTodayBtn = document.getElementById('calendar-mode-today');
+const calendarModeWeekBtn = document.getElementById('calendar-mode-week');
+let calendarMode = 'upcoming';
+
+function calendarSetResult(text, isErr) {
+  if (!calendarResultEl) return;
+  calendarResultEl.textContent = text || '';
+  calendarResultEl.style.color = isErr ? 'var(--magenta)' : 'var(--text)';
+}
+
+async function calendarLoad(mode = 'upcoming') {
+  calendarMode = mode || 'upcoming';
+  if (!calendarListEl) return;
+  calendarListEl.innerHTML = '<div class="meta">Loading…</div>';
+  try {
+    const r = await fetch('/api/calendar?mode=' + encodeURIComponent(mode));
+    const data = await r.json();
+    const events = data.events || [];
+    if (!events.length) {
+      calendarListEl.innerHTML = '<div class="meta">No events yet.</div>';
+      return;
+    }
+    calendarListEl.innerHTML = events.map((e, i) => {
+      const note = e.note ? ('<div class="meta">' + escapeHtml(e.note) + '</div>') : '';
+      return '<div class="calendar-item">' +
+        '<div><div><strong>' + escapeHtml(e.at || '') + '</strong> · ' + escapeHtml(e.title || '') + '</div>' + note + '</div>' +
+        '<button class="calendar-del" data-del-index="' + (i + 1) + '">Delete</button>' +
+      '</div>';
+    }).join('');
+  } catch (_) {
+    calendarListEl.innerHTML = '<div class="meta">Failed to load calendar.</div>';
+  }
+}
+
+async function calendarAddEvent() {
+  const date = (document.getElementById('calendar-date') || {}).value || '';
+  const time = (document.getElementById('calendar-time') || {}).value || '';
+  const title = ((document.getElementById('calendar-title') || {}).value || '').trim();
+  const note = ((document.getElementById('calendar-note') || {}).value || '').trim();
+  if (!date || !time || !title) { calendarSetResult('Date, time, and title are required.', true); return; }
+  try {
+    const r = await fetch('/api/calendar', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ date, time, title, note }) });
+    const data = await r.json();
+    if (!r.ok) { calendarSetResult(data.error || 'Failed to add event.', true); return; }
+    calendarSetResult(data.message || 'Event added.', false);
+    document.getElementById('calendar-title').value = '';
+    document.getElementById('calendar-note').value = '';
+    await calendarLoad();
+  } catch (_) {
+    calendarSetResult('Failed to add event.', true);
+  }
+}
+
+if (calendarBtn && calendarOverlay) {
+  calendarBtn.addEventListener('click', async () => {
+    calendarOverlay.classList.add('open');
+    const now = new Date();
+    const d = now.toISOString().slice(0, 10);
+    const t = String(now.getHours()).padStart(2, '0') + ':' + String(now.getMinutes()).padStart(2, '0');
+    if (document.getElementById('calendar-date') && !document.getElementById('calendar-date').value) document.getElementById('calendar-date').value = d;
+    if (document.getElementById('calendar-time') && !document.getElementById('calendar-time').value) document.getElementById('calendar-time').value = t;
+    await calendarLoad(calendarMode);
+  });
+}
+if (closeCalendarBtn && calendarOverlay) closeCalendarBtn.addEventListener('click', () => calendarOverlay.classList.remove('open'));
+if (calendarOverlay) calendarOverlay.addEventListener('click', (e) => { if (e.target === calendarOverlay) calendarOverlay.classList.remove('open'); });
+if (calendarAddBtn) calendarAddBtn.addEventListener('click', calendarAddEvent);
+if (calendarRefreshBtn) calendarRefreshBtn.addEventListener('click', () => calendarLoad(calendarMode));
+if (calendarModeUpcomingBtn) calendarModeUpcomingBtn.addEventListener('click', () => calendarLoad('upcoming'));
+if (calendarModeTodayBtn) calendarModeTodayBtn.addEventListener('click', () => calendarLoad('today'));
+if (calendarModeWeekBtn) calendarModeWeekBtn.addEventListener('click', () => calendarLoad('week'));
+if (calendarListEl) {
+  calendarListEl.addEventListener('click', async (e) => {
+    const btn = e.target.closest('[data-del-index]');
+    if (!btn) return;
+    const idx = btn.getAttribute('data-del-index');
+    try {
+      const r = await fetch('/api/calendar/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ index: idx }) });
+      const data = await r.json();
+      calendarSetResult(r.ok ? (data.message || 'Deleted.') : (data.error || 'Delete failed.'), !r.ok);
+      await calendarLoad(calendarMode);
+    } catch (_) {
+      calendarSetResult('Delete failed.', true);
+    }
+  });
+}
+
 // Security: run full scan and refresh panel
 const securityScanBtn = document.getElementById('security-scan-btn');
 if (securityScanBtn) {
@@ -1665,13 +2165,14 @@ inputEl.addEventListener('keydown', e => {
 });
 
 // ── Append message to chat ──
-function appendMsg(role, text) {
-  // Remove welcome splash on first message
+function appendMsg(role, text, opts) {
   const welcome = document.getElementById('welcome');
   if (welcome) welcome.remove();
 
   const div = document.createElement('div');
   div.className = `msg ${role}`;
+  div.dataset.role = role;
+  div.dataset.text = text;
 
   const label = document.createElement('div');
   label.className = 'msg-label';
@@ -1683,9 +2184,70 @@ function appendMsg(role, text) {
   bubble.innerHTML = formatMessage(text);
   div.appendChild(bubble);
 
+  const meta = document.createElement('div');
+  meta.className = 'msg-meta';
+  const ts = document.createElement('span');
+  ts.className = 'msg-ts';
+  const now = new Date();
+  ts.textContent = now.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+  meta.appendChild(ts);
+
+  if (opts && opts.responseTime) {
+    const rt = document.createElement('span');
+    rt.className = 'msg-response-time';
+    rt.textContent = opts.responseTime < 1000 ? opts.responseTime + 'ms' : (opts.responseTime / 1000).toFixed(1) + 's';
+    meta.appendChild(rt);
+  }
+
+  if (role === 'luna') {
+    const copyBtn = document.createElement('button');
+    copyBtn.className = 'msg-copy';
+    copyBtn.textContent = '⧉';
+    copyBtn.title = 'Copy';
+    copyBtn.onclick = () => { navigator.clipboard.writeText(text).then(() => showToast('Copied')); };
+    meta.appendChild(copyBtn);
+    const thumbUp = document.createElement('button');
+    thumbUp.className = 'msg-thumb';
+    thumbUp.textContent = '▲';
+    thumbUp.title = 'Good response';
+    thumbUp.onclick = () => { thumbUp.classList.add('voted'); thumbDown.classList.remove('voted'); sendFeedbackVote(text, 'up'); };
+    const thumbDown = document.createElement('button');
+    thumbDown.className = 'msg-thumb';
+    thumbDown.textContent = '▼';
+    thumbDown.title = 'Bad response';
+    thumbDown.onclick = () => { thumbDown.classList.add('voted'); thumbUp.classList.remove('voted'); sendFeedbackVote(text, 'down'); };
+    meta.appendChild(thumbUp);
+    meta.appendChild(thumbDown);
+  }
+
+  div.appendChild(meta);
   chatEl.appendChild(div);
   chatEl.scrollTop = chatEl.scrollHeight;
+
+  highlightCode(bubble);
+  if (lunaSettings.persist) saveChatHistory();
+  if (role === 'luna' && document.hidden) lunaNotify('Luna', text.slice(0, 200));
+
   return div;
+}
+
+function sendFeedbackVote(text, vote) {
+  fetch('/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message: '[feedback:' + vote + '] ' + text.slice(0, 100) }) }).catch(() => {});
+}
+
+function highlightCode(container) {
+  if (typeof Prism !== 'undefined') {
+    container.querySelectorAll('pre').forEach(pre => {
+      if (!pre.querySelector('code')) {
+        const code = document.createElement('code');
+        code.className = 'language-plaintext';
+        code.innerHTML = pre.innerHTML;
+        pre.innerHTML = '';
+        pre.appendChild(code);
+      }
+      Prism.highlightAllUnder(pre);
+    });
+  }
 }
 
 function appendStatus(text) {
@@ -1700,14 +2262,12 @@ function appendStatus(text) {
 }
 
 function formatMessage(text) {
-  // Code blocks
-  text = text.replace(/```(\w*)\n?([\s\S]*?)```/g, (_, lang, code) =>
-    `<pre>${escapeHtml(code.trim())}</pre>`);
-  // Inline code
+  text = text.replace(/```(\w*)\n?([\s\S]*?)```/g, (_, lang, code) => {
+    const cls = lang ? 'language-' + lang : 'language-plaintext';
+    return `<pre><code class="${cls}">${escapeHtml(code.trim())}</code></pre>`;
+  });
   text = text.replace(/`([^`]+)`/g, '<code>$1</code>');
-  // Bold
   text = text.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
-  // Line breaks
   text = text.replace(/\n/g, '<br>');
   return text;
 }
@@ -1743,16 +2303,18 @@ async function sendMessage() {
 
   isSending = true;
   sendBtn.disabled = true;
+  sendBtn.classList.add('loading');
   inputEl.value = '';
   inputEl.placeholder = defaultPlaceholder;
   inputEl.style.height = 'auto';
 
-  // Detect Shadow mode
   const isShadow = /^shadow[,\s]/i.test(msg);
   document.getElementById('stat-mode').textContent = isShadow ? 'SHADOW' : 'LUNA';
 
   appendMsg('user', msg);
   showThinking();
+
+  const t0 = performance.now();
 
   try {
     const res = await fetch('/api/chat', {
@@ -1762,16 +2324,18 @@ async function sendMessage() {
     });
     const data = await res.json();
     removeThinking();
+    const elapsed = Math.round(performance.now() - t0);
     if (data.need_feedback && data.request_id) {
       showFeedbackPopup(data.request_id, data.message || 'Luna is asking…', data.options);
       loadRecentSocial();
       isSending = false;
       sendBtn.disabled = false;
+      sendBtn.classList.remove('loading');
       inputEl.focus();
       return;
     }
     const reply = data.reply || data.error || 'No response.';
-    appendMsg('luna', reply);
+    appendMsg('luna', reply, { responseTime: elapsed });
     loadRecentSocial();
     updateWorkingStatus();
   } catch (err) {
@@ -1781,6 +2345,7 @@ async function sendMessage() {
 
   isSending = false;
   sendBtn.disabled = false;
+  sendBtn.classList.remove('loading');
   inputEl.focus();
   setTimeout(() => document.getElementById('stat-mode').textContent = 'LUNA', 3000);
 }
@@ -2310,6 +2875,7 @@ setInterval(function() {
 // ── Clear chat ──
 function clearChat() {
   chatEl.innerHTML = '';
+  localStorage.removeItem('luna-chat-history');
   showToast('Chat cleared');
 }
 
@@ -2641,6 +3207,242 @@ document.getElementById('dm-popup-input').addEventListener('keydown', function(e
     e.preventDefault();
     document.getElementById('dm-popup-send').click();
   }
+});
+
+// ── Browser notifications ──
+(function initNotifications() {
+  if ('Notification' in window && Notification.permission === 'default') {
+    Notification.requestPermission();
+  }
+})();
+
+function lunaNotify(title, body) {
+  if ('Notification' in window && Notification.permission === 'granted' && document.hidden) {
+    try { new Notification(title, { body: body.slice(0, 200), icon: '/icon-192.png', tag: 'luna-' + Date.now() }); } catch(_) {}
+  }
+}
+
+// Override proactive message to also push a browser notification
+(function() {
+  const origUpdateStatus = window.updateWorkingStatus;
+  if (!origUpdateStatus) return;
+  const _lastProactive = { text: '' };
+  const _origFetch = window.fetch;
+  setInterval(async function() {
+    try {
+      const r = await _origFetch('/api/status');
+      const d = await r.json();
+      const p = d.proactive;
+      if (p && p.text && p.text !== _lastProactive.text) {
+        _lastProactive.text = p.text;
+        lunaNotify('Luna says', p.text);
+      }
+    } catch(_) {}
+  }, 15000);
+})();
+
+// ── Chat history search ──
+(function() {
+  const searchBar = document.getElementById('chat-search-bar');
+  const searchInput = document.getElementById('chat-search-input');
+  const searchClose = document.getElementById('chat-search-close');
+
+  document.addEventListener('keydown', function(e) {
+    if ((e.ctrlKey || e.metaKey) && e.key === 'f' && !e.shiftKey) {
+      const active = document.activeElement;
+      if (active && (active.tagName === 'TEXTAREA' || active.tagName === 'INPUT')) return;
+      e.preventDefault();
+      searchBar.style.display = 'flex';
+      searchInput.focus();
+    }
+    if (e.key === 'Escape' && searchBar.style.display === 'flex') {
+      searchBar.style.display = 'none';
+      searchInput.value = '';
+      clearSearchHighlights();
+    }
+  });
+
+  searchClose.addEventListener('click', function() {
+    searchBar.style.display = 'none';
+    searchInput.value = '';
+    clearSearchHighlights();
+  });
+
+  let searchTimer;
+  searchInput.addEventListener('input', function() {
+    if (searchTimer) clearTimeout(searchTimer);
+    searchTimer = setTimeout(function() { runChatSearch(searchInput.value.trim()); }, 300);
+  });
+
+  function clearSearchHighlights() {
+    document.querySelectorAll('#chat .search-highlight').forEach(function(el) {
+      el.outerHTML = el.textContent;
+    });
+  }
+
+  function runChatSearch(q) {
+    clearSearchHighlights();
+    if (!q || q.length < 2) return;
+    const msgs = document.querySelectorAll('#chat .msg-bubble');
+    const re = new RegExp('(' + q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ')', 'gi');
+    let found = null;
+    msgs.forEach(function(el) {
+      if (el.textContent.toLowerCase().includes(q.toLowerCase())) {
+        el.innerHTML = el.innerHTML.replace(re, '<span class="search-highlight" style="background:rgba(255,215,0,0.35);border-radius:2px;padding:0 1px;">$1</span>');
+        if (!found) found = el;
+      }
+    });
+    if (found) found.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }
+})();
+
+// ── PWA service worker ──
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('/sw.js').catch(function() {});
+}
+
+// ── Collapsible panel groups ──
+function toggleGroup(id) {
+  const g = document.getElementById(id);
+  if (g) g.classList.toggle('collapsed');
+  localStorage.setItem('luna-group-' + id, g.classList.contains('collapsed') ? '1' : '0');
+}
+['pg-social','pg-media','pg-system','pg-tools'].forEach(id => {
+  if (localStorage.getItem('luna-group-' + id) === '1') {
+    const g = document.getElementById(id);
+    if (g) g.classList.add('collapsed');
+  }
+});
+
+// ── Side panel collapse ──
+const sidePanel = document.getElementById('side-panel');
+const sideToggle = document.getElementById('side-toggle');
+if (sideToggle && sidePanel) {
+  if (localStorage.getItem('luna-side-collapsed') === '1') sidePanel.classList.add('collapsed-panel');
+  sideToggle.addEventListener('click', () => {
+    sidePanel.classList.toggle('collapsed-panel');
+    sideToggle.textContent = sidePanel.classList.contains('collapsed-panel') ? '▸' : '◂';
+    localStorage.setItem('luna-side-collapsed', sidePanel.classList.contains('collapsed-panel') ? '1' : '0');
+  });
+}
+
+// ── Mobile drawer ──
+const mobileHamburger = document.getElementById('mobile-hamburger');
+const mobileBackdrop = document.getElementById('mobile-backdrop');
+if (mobileHamburger && sidePanel && mobileBackdrop) {
+  mobileHamburger.addEventListener('click', () => {
+    sidePanel.classList.toggle('mobile-open');
+    mobileBackdrop.classList.toggle('visible', sidePanel.classList.contains('mobile-open'));
+  });
+  mobileBackdrop.addEventListener('click', () => {
+    sidePanel.classList.remove('mobile-open');
+    mobileBackdrop.classList.remove('visible');
+  });
+}
+
+// ── Chat persistence (localStorage) ──
+function saveChatHistory() {
+  if (!lunaSettings.persist) return;
+  const msgs = [];
+  chatEl.querySelectorAll('.msg').forEach(m => {
+    const role = m.dataset.role;
+    const text = m.dataset.text;
+    if (role && text) msgs.push({ role, text });
+  });
+  if (msgs.length) localStorage.setItem('luna-chat-history', JSON.stringify(msgs.slice(-100)));
+}
+
+function restoreChatHistory() {
+  if (!lunaSettings.persist) return;
+  try {
+    const saved = JSON.parse(localStorage.getItem('luna-chat-history') || '[]');
+    if (saved.length) {
+      const welcome = document.getElementById('welcome');
+      if (welcome) welcome.remove();
+      saved.forEach(m => {
+        const div = document.createElement('div');
+        div.className = `msg ${m.role}`;
+        div.dataset.role = m.role;
+        div.dataset.text = m.text;
+        const label = document.createElement('div');
+        label.className = 'msg-label';
+        label.textContent = m.role === 'luna' ? 'Luna' : 'You';
+        div.appendChild(label);
+        const bubble = document.createElement('div');
+        bubble.className = 'msg-bubble';
+        bubble.innerHTML = formatMessage(m.text);
+        div.appendChild(bubble);
+        chatEl.appendChild(div);
+        highlightCode(bubble);
+      });
+      chatEl.scrollTop = chatEl.scrollHeight;
+    }
+  } catch (_) {}
+}
+restoreChatHistory();
+
+// ── Drag-and-drop file upload ──
+(function() {
+  const chatArea = document.querySelector('.chat-area');
+  const dropOverlay = document.getElementById('drop-overlay');
+  if (!chatArea || !dropOverlay) return;
+  let dragCounter = 0;
+  chatArea.addEventListener('dragenter', e => { e.preventDefault(); dragCounter++; dropOverlay.classList.add('visible'); });
+  chatArea.addEventListener('dragleave', e => { e.preventDefault(); dragCounter--; if (dragCounter <= 0) { dragCounter = 0; dropOverlay.classList.remove('visible'); } });
+  chatArea.addEventListener('dragover', e => e.preventDefault());
+  chatArea.addEventListener('drop', async e => {
+    e.preventDefault();
+    dragCounter = 0;
+    dropOverlay.classList.remove('visible');
+    const files = e.dataTransfer.files;
+    if (!files.length) return;
+    const file = files[0];
+    if (file.type.startsWith('audio/')) {
+      appendStatus('Transcribing dropped audio…');
+      try {
+        const r = await fetch('/api/transcribe', { method: 'POST', headers: { 'Content-Type': file.type }, body: file });
+        const d = await r.json();
+        const statuses = chatEl.querySelectorAll('.msg-status');
+        if (statuses.length) statuses[statuses.length - 1].remove();
+        if (d.text) { inputEl.value = d.text; inputEl.focus(); }
+        else showToast(d.error || 'Could not transcribe', true);
+      } catch (_) {
+        const statuses = chatEl.querySelectorAll('.msg-status');
+        if (statuses.length) statuses[statuses.length - 1].remove();
+        showToast('Transcription failed', true);
+      }
+    } else if (file.type.startsWith('image/')) {
+      const reader = new FileReader();
+      reader.onload = () => {
+        appendMsg('user', '[Dropped image: ' + file.name + ']');
+        showToast('Image received — ask Luna about it');
+      };
+      reader.readAsDataURL(file);
+    } else {
+      const text = await file.text().catch(() => null);
+      if (text) {
+        inputEl.value = text.slice(0, 2000);
+        inputEl.style.height = 'auto';
+        inputEl.style.height = Math.min(inputEl.scrollHeight, 120) + 'px';
+        inputEl.focus();
+        showToast('File content pasted into input');
+      }
+    }
+  });
+})();
+
+// ── Loading state on side panel buttons ──
+document.querySelectorAll('.panel-group-body .cmd-btn').forEach(btn => {
+  if (btn.tagName === 'A') return;
+  const origClick = btn.getAttribute('onclick');
+  if (!origClick) return;
+  btn.removeAttribute('onclick');
+  btn.addEventListener('click', function() {
+    if (btn.classList.contains('loading')) return;
+    btn.classList.add('loading');
+    try { new Function(origClick).call(btn); } catch(_) {}
+    setTimeout(() => btn.classList.remove('loading'), 2000);
+  });
 });
 
 // Initial focus

@@ -1,0 +1,6 @@
+{
+  "returncode": 1,
+  "stdout": "",
+  "stderr": "Traceback (most recent call last):\r\n  File \"C:\\Users\\User\\AppData\\Local\\Temp\\tmpr27vw9d2.py\", line 2, in <module>\r\n    params = json.loads(sys.stdin)\r\n  File \"C:\\Program Files\\WindowsApps\\PythonSoftwareFoundation.Python.3.13_3.13.3312.0_x64__qbz5n2kfra8p0\\Lib\\json\\__init__.py\", line 345, in loads\r\n    raise TypeError(f'the JSON object must be str, bytes or bytearray, '\r\n                    f'not {s.__class__.__name__}')\r\nTypeError: the JSON object must be str, bytes or bytearray, not TextIOWrapper",
+  "ts": 1773713941.4405663
+}

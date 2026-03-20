@@ -1,0 +1,6 @@
+{
+  "returncode": 1,
+  "stdout": "",
+  "stderr": "File \"C:\\Users\\User\\AppData\\Local\\Temp\\tmphgg4m24_.py\", line 10\r\n    return type(value)(value casefold())\r\n                       ^^^^^^^^^^^^^^^^\r\nSyntaxError: invalid syntax. Perhaps you forgot a comma?",
+  "ts": 1773735009.4238544
+}

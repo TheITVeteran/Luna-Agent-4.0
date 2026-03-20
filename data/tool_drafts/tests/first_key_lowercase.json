@@ -1,0 +1,6 @@
+{
+  "returncode": 1,
+  "stdout": "",
+  "stderr": "Traceback (most recent call last):\r\n  File \"C:\\Users\\User\\AppData\\Local\\Temp\\tmpz7qtmt8f.py\", line 3, in <module>\r\n    result = {k.lower(): v for k, v in params.items()[1:]}\r\n                                       ~~~~~~~~~~~~~~^^^^\r\nTypeError: 'dict_items' object is not subscriptable",
+  "ts": 1773743455.5022023
+}

@@ -1,0 +1,5 @@
+{
+  "name": "keys_case",
+  "description": "Convert all dictionary keys to lowercase except first key",
+  "script": "import json, sys\nparams = json.load(sys.stdin)\nresult = {k.lower(): v for k, v in params.items()[1:]}\nprint(result)"
+}

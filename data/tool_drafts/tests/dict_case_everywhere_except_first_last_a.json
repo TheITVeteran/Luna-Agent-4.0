@@ -1,0 +1,6 @@
+{
+  "returncode": 1,
+  "stdout": "",
+  "stderr": "File \"C:\\Users\\User\\AppData\\Local\\Temp\\tmpbb_3l7ih.py\", line 6\r\n    new_values = [v.lower() if i != (len(keys)-1)) % 2 == 0 else v for i,v in enumerate(values)]\r\n                                                 ^\r\nSyntaxError: closing parenthesis ')' does not match opening parenthesis '['",
+  "ts": 1773877639.8271878
+}

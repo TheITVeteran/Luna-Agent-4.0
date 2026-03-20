@@ -7,7 +7,7 @@ import asyncio, base64, html, io, json, os, random, re, shutil, subprocess, sys
 import tempfile, threading, time, urllib.parse, urllib.request, urllib.error
 import uuid, webbrowser, xml.etree.ElementTree as ET
 from collections import deque
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from email.utils import parsedate_to_datetime
 
 import discord
@@ -25,6 +25,7 @@ from luna_brain import brain_step
 from luna_profile import (get_profile_prompt, get_profile, set_profile_field,
     clear_profile, PROFILE_FIELDS, merge_profiles)
 from luna_conversation import get_recent_conversation, append_exchange, merge_conversations
+import luna_social
 try:
     from luna_security import run_full_scan, scan_file as security_scan_file
 except ImportError:
@@ -56,8 +57,9 @@ DISCORD_TOKEN = (sys.argv[1].strip() if len(sys.argv) > 1
 
 OLLAMA_BASE  = _env("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
 OLLAMA_MODEL = _env("OLLAMA_MODEL", "qwen2.5-coder:7b-instruct")
-OLLAMA_CHAT  = _env("OLLAMA_CHAT_MODEL", "llama3.2:latest") or "llama3.2:latest"
+OLLAMA_CHAT  = _env("OLLAMA_CHAT_MODEL", "qwen2.5-coder:7b-instruct") or "qwen2.5-coder:7b-instruct"
 OLLAMA_SMALL = _env("OLLAMA_MODEL_SMALL") or OLLAMA_MODEL
+OLLAMA_FALLBACK = _env("OLLAMA_FALLBACK_MODEL", "qwen2.5:1.5b").strip()
 # Vision model for camera — when you use the camera, Luna uses this to describe what it sees (e.g. granite3.2-vision).
 OLLAMA_VISION_MODEL = _env("OLLAMA_VISION_MODEL", "granite3.2-vision").strip()
 
@@ -104,7 +106,11 @@ WORLD_NEWS_FEEDS = [
     "https://www.aljazeera.com/xml/rss/all.xml",
 ]
 
-LUNA_SYSTEM = """You are Luna, a warm and witty AI companion. You are direct, clever, and occasionally playful — like a trusted friend who happens to know everything. Keep replies concise. You have a persistent memory of the user and remember their profile, preferences and goals."""
+LUNA_SYSTEM = """You are Luna, a warm and witty AI companion. You are direct, clever, and occasionally playful — like a trusted friend who happens to know everything. Keep replies concise. You have a persistent memory of the user and remember their profile, preferences and goals.
+
+CRITICAL: Stay strictly in character as Luna. Never hallucinate, invent personas, or output inappropriate content. Only describe what you actually observe from the context provided. If unsure, say "I'm not sure" — never make things up. Never start replies with off-topic phrases.
+
+PC AWARENESS: You have real-time awareness of the user's PC — system info, active window, running processes, recent files, and repo structure are provided below in "Your PC (full awareness)". When the user asks what you see on their PC, what's running, what they're doing, etc., use THIS data — do NOT ask them to open the camera. The camera is only for visual/face/object recognition when the user specifically wants you to SEE them or their surroundings through the webcam."""
 
 GTTS_LANG = "en"
 
@@ -114,6 +120,9 @@ _TOOLS_PATH      = os.path.join(_DATA, "TOOLS.md")
 _OBJECTIVES_PATH = os.path.join(_DATA, "OBJECTIVES.md")
 _SKILLS_DIR      = os.path.join(_DATA, "skills")
 _GOALS_FILE      = os.path.join(_DATA, "goals.json")
+_TODOS_FILE      = os.path.join(_DATA, "todos.json")
+_CALENDAR_FILE   = os.path.join(_DATA, "calendar.json")
+_AUDIOBOOK_SCRIPTS_DIR = os.path.join(_DATA, "audiobook_scripts")
 _USER_STYLE_FILE = os.path.join(_DATA, "user_style.json")
 _ACTION_LOG      = os.path.join(_DATA, "action_log.jsonl")
 _RECENT_SOCIAL_PATH = os.path.join(_DATA, "recent_social.json")
@@ -135,11 +144,16 @@ _PROACTIVE_PATH  = os.path.join(_DATA, "last_proactive.json")
 _REFLECTION_PATH = os.path.join(_DATA, "last_reflection_date.json")
 _EVOLUTION_ENABLED_PATH = os.path.join(_DATA, "evolution_enabled.json")
 _SECURITY_ALERTS_PATH   = os.path.join(_DATA, "security_alerts.json")
+_PC_CONTEXT_PATH       = os.path.join(_DATA, "pc_context.json")
+_ML_LEARNED_PATH       = os.path.join(_DATA, "ml_learned.json")
+_LUNA_PC_CONTEXT_PATHS = [p.strip() for p in _env("LUNA_PC_CONTEXT_PATHS", _BASE).split("|") if p.strip()] or [_BASE]
 
 # ── Locks ────────────────────────────────────────────────────────────────────
 _reminders_lock  = threading.Lock()
 _identity_lock   = threading.Lock()
 _goals_lock      = threading.Lock()
+_todos_lock      = threading.Lock()
+_calendar_lock   = threading.Lock()
 _style_lock      = threading.Lock()
 _action_log_lock = threading.Lock()
 _recent_social_lock = threading.Lock()
@@ -312,8 +326,7 @@ HELP_TEXT = (
     "• !yt_comment <url> — transcribe video + AI comment with real context\n"
     "• !ig_dm <user> [msg] — Instagram DM\n"
     "• !fb_msg <name> [msg] — Messenger message\n"
-    "• !call <username or user ID> — Discord: contact user (by ID), join VC, transcribe their voice & answer with TTS\n"
-    "• !dm <user or ID> [what to say] — Discord DM (Luna turns your input into a dynamic reply, like YT comments)\n"
+    "• !dm <username or user ID> [message] — Discord: send a DM (Luna rephrases your message)\n"
     "• !msg <contact> [desc] — WhatsApp message\n"
     "• !play <song/url> — play music in voice\n"
     "• !podcast — play custom podcast from CUSTOM_PODCAST_DIR\n"
@@ -321,11 +334,20 @@ HELP_TEXT = (
     "• !remember / !always_remember — store memories\n"
     "• !profile — view or set your profile\n"
     "• !join / !leave / !pause / !skip / !stop / !queue — music\n"
+    "• !joinme [message] — join your VC and say it with TTS (or \"Hey, Luna here!\")\n"
+    "• !briefing — morning briefing (weather, calendar, todos, news)\n"
+    "• !screenshot — describe what's on your screen right now\n"
     "• remind me at 7pm to … — Discord DM + voice reminder\n"
     "• retry — retry last failed action with different strategies\n"
     "• !pc_vitals / how's my PC — CPU, RAM, disk\n"
     "• !luna_vitals / how's Luna — Luna's process, Ollama, uptime\n"
-    "• !ml [action] — machine learning: info, train a small model, or predict (e.g. !ml with action=info)\n"
+    "• !todo add|list|done — manage your local todo list\n"
+    "• !summarize <url or text> — concise summary + key points\n"
+    "• !digest — today's quick recap (actions, todos, knowledge)\n"
+    "• !calendar add|list|today|week|delete — local schedule + popup UI\n"
+    "• !research <topic> — source-driven brief for audiobook/eBook writing\n"
+    "• !research_story <topic> — create a story-style script text file for audiobook narration\n"
+    "• !audiobook create <topic> — create a story script + MP3 narration file\n"
     "• Camera (UI) — turn on to let Luna see you; ask **what do you see** for object and face recognition\n"
     "• Nudge (UI) — send a non-blocking note; Luna considers it in her next reply\n"
     "• **ask me** — Luna asks you a question in a popup (demo)\n"
@@ -346,6 +368,7 @@ LUNA_CAPABILITIES = (
     "WhatsApp messages (you type and send in the browser); reminders (Discord DM + voice at a set time); "
     "playing music and custom podcasts in Discord (and creating podcast episodes from a topic); "
     "PC vitals (CPU, RAM, disk) and Luna vitals (your process, Ollama, uptime); "
+    "full PC awareness (you can see the active window, running processes, recent files, and system state at all times — no camera needed); "
     "camera with object and face recognition (user can ask 'what do you see'); "
     "a searchable knowledge base that grows when the user says 'remember that …' and from daily reflections; "
     "nudges (non-blocking notes the user leaves for you to consider); "
@@ -354,7 +377,12 @@ LUNA_CAPABILITIES = (
     "action log and Luna's Mind (a live graph of your drives, knowledge, actions); "
     "translation (text and voice to English) via the Translate module; "
     "voice input and TTS; creating and running Python scripts on request; "
-    "machine learning and deep learning: train small models (e.g. scikit-learn), run inference, or write scripts using PyTorch/TensorFlow when the user asks (e.g. !ml for the built-in ML tool). "
+    "machine learning: Luna learns internally from every action and outcome — she observes what works and improves over time (no separate ML command); "
+    "screenshot awareness (you can capture and describe the user's screen — !screenshot); "
+    "clipboard awareness (you passively track what the user copies); "
+    "morning briefing (weather, calendar, todos, news — !briefing or automatic at morning); "
+    "browser tab awareness (you can see what browser tabs and websites the user has open); "
+    "learning from corrections (when the user corrects you, you remember and avoid repeating the mistake). "
     "Keep the list concise and friendly; say **!help** for the full command list."
 )
 
@@ -384,8 +412,37 @@ def _build_luna_chat_system(scope: str | None) -> str:
     intuition = get_intuition_cached(snippet)
     if intuition:
         system = system + "\n\n" + intuition
-    # Absorbed tools: Luna should use and suggest these when they fit the user's need (secure, useful — already vetted).
+    # PC/repo context: Luna observes system, activity, running apps, active window, files
+    pc_ctx = _get_pc_context()
+    if pc_ctx:
+        system = system + "\n\n## Your PC (full awareness)\n" + pc_ctx[:3000]
+    # Screenshot description (what's visually on screen)
+    ss_desc = _get_screenshot_desc()
+    if ss_desc:
+        system = system + "\n\n## Screen (visual snapshot)\n" + ss_desc[:1500]
+    # Browser context
+    browser_ctx = _gather_browser_context()
+    if browser_ctx:
+        system = system + "\n\n" + browser_ctx[:500]
+    # Clipboard context
+    clip_ctx = _get_clipboard_context()
+    if clip_ctx:
+        system = system + "\n\n" + clip_ctx[:500]
+    # Corrections (things user corrected — avoid repeating)
+    corrections_ctx = _get_corrections_context()
+    if corrections_ctx:
+        system = system + "\n\n" + corrections_ctx[:600]
+    # Learned patterns: Luna learns internally from experience
+    learned = _load_json(_ML_LEARNED_PATH, {})
+    cmd_success = learned.get("cmd_success", {})
+    if cmd_success:
+        reliable = [c for c, v in cmd_success.items() if v.get("ok", 0) > v.get("fail", 0)]
+        if reliable:
+            system = system + f"\n\nFrom experience, these often work well: {', '.join(reliable[:15])}."
+    # Absorbed tools (compact list — only names)
     absorbed = sorted(_absorbed_tool_names) if _absorbed_tool_names else []
+    if absorbed and "ml" in absorbed:
+        absorbed = [a for a in absorbed if a != "ml"]
     if absorbed:
         system = system + "\n\nYour absorbed tools (use them when they fit; suggest !<name> when relevant): " + ", ".join(absorbed[:30])
     # Existential express (growing-agent: when dread/fear high, voice it occasionally)
@@ -527,6 +584,336 @@ def add_goal(scope: str, content: str) -> None:
     with _goals_lock:
         _save_json(_GOALS_FILE, data)
 
+def _todo_get(scope: str) -> list[dict]:
+    data = _load_json(_TODOS_FILE, {})
+    items = data.get(scope, [])
+    if not isinstance(items, list):
+        return []
+    out = []
+    for t in items:
+        if not isinstance(t, dict):
+            continue
+        text = (t.get("text") or "").strip()
+        if not text:
+            continue
+        out.append({
+            "id": str(t.get("id") or uuid.uuid4().hex[:8]),
+            "text": text[:240],
+            "done": bool(t.get("done")),
+            "ts": float(t.get("ts") or time.time()),
+        })
+    return out
+
+def _todo_save(scope: str, items: list[dict]) -> None:
+    data = _load_json(_TODOS_FILE, {})
+    data[scope] = items[:100]
+    with _todos_lock:
+        _save_json(_TODOS_FILE, data)
+
+def _todo_add(scope: str, text: str) -> str:
+    text = (text or "").strip()[:240]
+    if not text:
+        return "Usage: !todo add <task>"
+    items = _todo_get(scope)
+    item = {"id": uuid.uuid4().hex[:8], "text": text, "done": False, "ts": time.time()}
+    items.insert(0, item)
+    _todo_save(scope, items)
+    return f"✅ Added todo #{len(items)}: {text}"
+
+def _todo_list_text(scope: str) -> str:
+    items = _todo_get(scope)
+    if not items:
+        return "No todos yet. Use **!todo add <task>**."
+    lines = ["📝 **Your todos**"]
+    shown = items[:20]
+    for i, t in enumerate(shown, 1):
+        mark = "✅" if t.get("done") else "⬜"
+        lines.append(f"{i}. {mark} {t.get('text')}")
+    if len(items) > len(shown):
+        lines.append(f"...and {len(items)-len(shown)} more.")
+    lines.append("Use **!todo done <number>** to complete one.")
+    return "\n".join(lines)
+
+def _todo_done(scope: str, token: str) -> str:
+    token = (token or "").strip()
+    if not token:
+        return "Usage: !todo done <number>"
+    items = _todo_get(scope)
+    if not items:
+        return "No todos to complete."
+    idx = None
+    if token.isdigit():
+        n = int(token)
+        if 1 <= n <= len(items):
+            idx = n - 1
+    if idx is None:
+        low = token.lower()
+        for i, t in enumerate(items):
+            if low in (t.get("text") or "").lower():
+                idx = i
+                break
+    if idx is None:
+        return "Todo not found. Use **!todo list**."
+    items[idx]["done"] = True
+    _todo_save(scope, items)
+    return f"✅ Completed: {items[idx].get('text')}"
+
+def _summarize_input(text_or_url: str) -> tuple[bool, str]:
+    raw = (text_or_url or "").strip()
+    if not raw:
+        return False, "Usage: !summarize <url or text>"
+    source = raw
+    # If URL, fetch and strip HTML.
+    if re.match(r"^https?://", raw, re.I):
+        try:
+            req = urllib.request.Request(raw, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=15) as r:
+                body = r.read().decode("utf-8", errors="replace")
+            body = re.sub(r"(?is)<script.*?>.*?</script>", " ", body)
+            body = re.sub(r"(?is)<style.*?>.*?</style>", " ", body)
+            body = re.sub(r"(?is)<[^>]+>", " ", body)
+            body = re.sub(r"\s+", " ", body).strip()
+            if not body:
+                return False, "Could not extract readable text from URL."
+            source = body[:6000]
+        except Exception as e:
+            return False, f"Could not fetch URL: {e}"
+    try:
+        prompt = (
+            "Summarize the following content in concise bullets:\n"
+            "- 3 to 6 key points\n"
+            "- 1 short action suggestion\n\n"
+            f"Content:\n{source[:7000]}"
+        )
+        out = ollama_chat(prompt, system="Be concise, accurate, and practical.", model=OLLAMA_CHAT)
+        out = (out or "").strip()
+        if not out:
+            return False, "Could not summarize."
+        return True, out[:1500]
+    except Exception as e:
+        return False, str(e)
+
+def _daily_digest(scope: str) -> str:
+    now = datetime.now()
+    today = now.strftime("%Y-%m-%d")
+    actions = []
+    try:
+        if os.path.isfile(_ACTION_LOG):
+            with open(_ACTION_LOG, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        e = json.loads(line)
+                    except Exception:
+                        continue
+                    ts = (e.get("ts") or "")
+                    if ts.startswith(today):
+                        actions.append(e)
+    except Exception:
+        pass
+    todos = _todo_get(scope)
+    open_todos = [t for t in todos if not t.get("done")]
+    knowledge = list_knowledge()[:5]
+    lines = [f"📌 **Daily digest ({today})**"]
+    lines.append(f"- Actions today: {len(actions)}")
+    if actions:
+        recent_cmds = [a.get("cmd","") for a in actions[-5:] if a.get("cmd")]
+        if recent_cmds:
+            lines.append(f"- Recent: {', '.join(recent_cmds[:5])}")
+    lines.append(f"- Open todos: {len(open_todos)}")
+    if open_todos:
+        for t in open_todos[:5]:
+            lines.append(f"  • {t.get('text')}")
+    if knowledge:
+        lines.append("- Latest knowledge:")
+        for k in knowledge[:3]:
+            lines.append(f"  • {k.get('title') or k.get('slug')}")
+    lines.append("Tip: use **!todo add <task>** and **!summarize <url/text>**.")
+    return "\n".join(lines)
+
+def _calendar_get(scope: str) -> list[dict]:
+    data = _load_json(_CALENDAR_FILE, {})
+    items = data.get(scope, [])
+    if not isinstance(items, list):
+        return []
+    out = []
+    for e in items:
+        if not isinstance(e, dict):
+            continue
+        title = (e.get("title") or "").strip()
+        at = (e.get("at") or "").strip()  # YYYY-MM-DD HH:MM
+        if not title or not at:
+            continue
+        out.append({
+            "id": str(e.get("id") or uuid.uuid4().hex[:8]),
+            "title": title[:160],
+            "at": at,
+            "note": (e.get("note") or "").strip()[:300],
+            "ts": float(e.get("ts") or time.time()),
+            "notified": bool(e.get("notified", False)),
+        })
+    out.sort(key=lambda x: x.get("at", ""))
+    return out[:300]
+
+def _calendar_save(scope: str, items: list[dict]) -> None:
+    data = _load_json(_CALENDAR_FILE, {})
+    data[scope] = items[:300]
+    with _calendar_lock:
+        _save_json(_CALENDAR_FILE, data)
+
+def _calendar_add(scope: str, date_s: str, time_s: str, title: str, note: str = "") -> tuple[bool, str]:
+    date_s = (date_s or "").strip()
+    time_s = (time_s or "").strip()
+    title = (title or "").strip()[:160]
+    note = (note or "").strip()[:300]
+    if not date_s or not time_s or not title:
+        return False, "Usage: !calendar add YYYY-MM-DD HH:MM title"
+    try:
+        dt = datetime.strptime(f"{date_s} {time_s}", "%Y-%m-%d %H:%M")
+    except Exception:
+        return False, "Invalid date/time. Use YYYY-MM-DD and HH:MM (24h)."
+    at = dt.strftime("%Y-%m-%d %H:%M")
+    items = _calendar_get(scope)
+    items.append({"id": uuid.uuid4().hex[:8], "title": title, "at": at, "note": note, "ts": time.time(), "notified": False})
+    items.sort(key=lambda x: x.get("at", ""))
+    _calendar_save(scope, items)
+    return True, f"Calendar event added for {at}: {title}"
+
+def _calendar_list(scope: str, mode: str = "upcoming") -> str:
+    items = _calendar_get(scope)
+    if not items:
+        return "No calendar events yet. Use **!calendar add YYYY-MM-DD HH:MM title**."
+    now = datetime.now()
+    if mode == "today":
+        pfx = now.strftime("%Y-%m-%d")
+        items = [e for e in items if (e.get("at") or "").startswith(pfx)]
+    elif mode == "week":
+        end = now + timedelta(days=7)
+        filt = []
+        for e in items:
+            try:
+                dt = datetime.strptime(e.get("at", ""), "%Y-%m-%d %H:%M")
+                if now <= dt <= end:
+                    filt.append(e)
+            except Exception:
+                pass
+        items = filt
+    if not items:
+        return "No calendar events in that range."
+    lines = ["📅 **Calendar**"]
+    for i, e in enumerate(items[:30], 1):
+        note = f" — {e.get('note')}" if e.get("note") else ""
+        lines.append(f"{i}. {e.get('at')} · {e.get('title')}{note}")
+    lines.append("Use **!calendar delete <number>** to remove one.")
+    return "\n".join(lines)
+
+def _calendar_delete(scope: str, token: str) -> tuple[bool, str]:
+    token = (token or "").strip()
+    if not token:
+        return False, "Usage: !calendar delete <number>"
+    items = _calendar_get(scope)
+    if not items:
+        return False, "No calendar events to delete."
+    idx = None
+    if token.isdigit():
+        n = int(token)
+        if 1 <= n <= len(items):
+            idx = n - 1
+    if idx is None:
+        low = token.lower()
+        for i, e in enumerate(items):
+            if low in (e.get("title") or "").lower():
+                idx = i
+                break
+    if idx is None:
+        return False, "Event not found."
+    victim = items.pop(idx)
+    _calendar_save(scope, items)
+    return True, f"Deleted: {victim.get('at')} · {victim.get('title')}"
+
+def _get_due_calendar_events(scope: str) -> list[dict]:
+    """Return calendar events whose time has arrived (within current minute) and not yet notified."""
+    items = _calendar_get(scope)
+    now = datetime.now()
+    now_str = now.strftime("%Y-%m-%d %H:%M")
+    due = []
+    for e in items:
+        if e.get("notified"):
+            continue
+        at_str = (e.get("at") or "").strip()
+        if not at_str:
+            continue
+        try:
+            dt = datetime.strptime(at_str, "%Y-%m-%d %H:%M")
+            if dt <= now:
+                due.append(e)
+        except Exception:
+            pass
+    return due
+
+def _mark_calendar_event_notified(scope: str, event_id: str) -> None:
+    """Mark a calendar event as notified so we don't fire again."""
+    items = _calendar_get(scope)
+    for e in items:
+        if str(e.get("id")) == str(event_id):
+            e["notified"] = True
+            break
+    _calendar_save(scope, items)
+
+def _generate_calendar_reminder_message(title: str, note: str) -> str:
+    """Use the note as context to generate a personalized reminder in the style the user requested."""
+    if not note:
+        return f"Calendar reminder: {title}"
+    prompt = (
+        f"Event: {title}\n"
+        f"User's note/instruction: {note}\n\n"
+        "Generate a short (1–2 sentences) reminder message in the style they requested. "
+        "Be natural, playful if they asked for playful, flirty if they asked for flirty, etc. "
+        "Output ONLY the message text, no quotes, no preamble, no 'Here you go:' or similar."
+    )
+    try:
+        out = ollama_chat(prompt, system="You are Luna, a warm AI assistant. Output only the reminder message.", model=OLLAMA_CHAT)
+        if out and out.strip() and "Ollama" not in out and not out.startswith("Error:"):
+            return out.strip().strip('"\'')[:400]
+    except Exception:
+        pass
+    return f"Calendar reminder: {title}"
+
+async def _send_calendar_notification(event: dict, scope: str) -> None:
+    """Send notification for a due calendar event: nudge, proactive, Discord DM, and VC TTS."""
+    title = (event.get("title") or "Event").strip()
+    note = (event.get("note") or "").strip()
+    msg = await asyncio.to_thread(_generate_calendar_reminder_message, title, note)
+    add_nudge(scope, msg)
+    _proactive_set(msg)
+    if LINKED_ID and LINKED_ID.isdigit():
+        try:
+            user = bot.get_user(int(LINKED_ID)) or await bot.fetch_user(int(LINKED_ID))
+            if user:
+                ch = user.dm_channel or await user.create_dm()
+                await ch.send(msg)
+                mp3 = await asyncio.to_thread(_tts_bytes, msg)
+                if mp3:
+                    await ch.send(file=discord.File(io.BytesIO(mp3), filename="calendar.mp3"))
+        except Exception:
+            pass
+    await _join_linked_user_vc_and_speak(msg, disconnect_after=True)
+
+async def _calendar_notification_loop():
+    """Check calendar events every minute and notify when due."""
+    await bot.wait_until_ready()
+    while True:
+        try:
+            scope = LINKED_SCOPE or "web"
+            for event in _get_due_calendar_events(scope):
+                await _send_calendar_notification(event, scope)
+                _mark_calendar_event_notified(scope, event.get("id", ""))
+        except Exception:
+            pass
+        await asyncio.sleep(60)
+
 def _get_style(scope: str) -> str:
     data = _load_json(_USER_STYLE_FILE, {})
     rec = data.get(scope, {})
@@ -581,9 +968,22 @@ def get_intuition_cached(snippet: str) -> str:
         _intuition_cache_at = now
         return out
 
-def ollama_chat(msg: str, system: str | None = None, scope: str | None = None,
-                history: list | None = None, model: str | None = None) -> str:
-    use_model = (model or OLLAMA_MODEL).strip()
+def _sanitize_luna_reply(text: str) -> str:
+    """Strip hallucinated preambles (wrong persona, inappropriate openings). Only for main chat."""
+    if not text or len(text) < 40:
+        return text
+    first_120 = text[:120].lower()
+    if any(p in first_120 for p in ("sweetie,", " let daddy", " let mommy", "i'm not luna")):
+        for sep in (". ", "! ", "? "):
+            idx = text.find(sep)
+            if 30 < idx < 180:
+                rest = text[idx + len(sep):].strip()
+                if len(rest) > 15:
+                    return rest
+    return text
+
+def _ollama_chat_once(msg: str, system: str | None, scope: str | None,
+                      history: list | None, model: str, timeout: int = 120) -> str:
     prompt = _build_system(system or LUNA_SYSTEM, scope)
     messages = []
     if prompt: messages.append({"role": "system", "content": prompt})
@@ -593,17 +993,29 @@ def ollama_chat(msg: str, system: str | None = None, scope: str | None = None,
             if c and r in ("user", "assistant"):
                 messages.append({"role": r, "content": c})
     messages.append({"role": "user", "content": msg})
-    body = json.dumps({"model": use_model, "messages": messages, "stream": False}).encode()
+    body = json.dumps({"model": model, "messages": messages, "stream": False}).encode()
     req = urllib.request.Request(f"{OLLAMA_BASE}/api/chat", data=body,
         headers={"Content-Type": "application/json"}, method="POST")
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        data = json.loads(r.read())
+    return (data.get("message") or {}).get("content", "").strip() or "No reply."
+
+def ollama_chat(msg: str, system: str | None = None, scope: str | None = None,
+                history: list | None = None, model: str | None = None) -> str:
+    use_model = (model or OLLAMA_MODEL).strip()
     try:
-        with urllib.request.urlopen(req, timeout=120) as r:
-            data = json.loads(r.read())
-        return (data.get("message") or {}).get("content", "").strip() or "No reply."
-    except urllib.error.URLError as e:
-        return f"Ollama offline: {e.reason}"
-    except Exception as e:
-        return f"Error: {e}"
+        raw = _ollama_chat_once(msg, system, scope, history, use_model)
+        return _sanitize_luna_reply(raw)
+    except Exception as primary_err:
+        if OLLAMA_FALLBACK and OLLAMA_FALLBACK != use_model:
+            try:
+                raw = _ollama_chat_once(msg, system, scope, history, OLLAMA_FALLBACK, timeout=60)
+                return _sanitize_luna_reply(raw)
+            except Exception:
+                pass
+        if isinstance(primary_err, urllib.error.URLError):
+            return f"Ollama offline: {primary_err.reason}"
+        return f"Error: {primary_err}"
 
 def ollama_stream(msg: str, system: str | None = None, scope: str | None = None,
                   history: list | None = None, model: str | None = None):
@@ -1075,6 +1487,708 @@ async def _evolution_loop():
         except Exception:
             await asyncio.sleep(60)
 
+
+# ── PC & repo observer (full access context) ───────────────────────────────────
+
+def _gather_system_info() -> str:
+    """System: OS, CPU, RAM, disk."""
+    try:
+        import psutil
+        cpu = psutil.cpu_percent(interval=0.5)
+        mem = psutil.virtual_memory()
+        ram_pct = mem.percent
+        ram_gb = mem.used / (1024 ** 3)
+        ram_total_gb = mem.total / (1024 ** 3)
+        disks = []
+        for part in psutil.disk_partitions():
+            if "fixed" in part.opts or (sys.platform == "win32" and "cdrom" not in (part.opts or "").lower()):
+                try:
+                    usage = psutil.disk_usage(part.mountpoint)
+                    disks.append(f"{part.mountpoint} {usage.percent}%")
+                except Exception:
+                    pass
+        disk_str = ", ".join(disks[:4]) if disks else "—"
+        return f"System: {sys.platform} | CPU {cpu}% | RAM {ram_pct}% ({ram_gb:.1f}/{ram_total_gb:.1f} GB) | Disk: {disk_str}"
+    except Exception:
+        return f"System: {sys.platform}"
+
+def _gather_running_processes() -> str:
+    """Top processes by memory (user activity)."""
+    try:
+        import psutil
+        procs = []
+        for p in psutil.process_iter(["name", "memory_info"]):
+            try:
+                if p.info.get("memory_info"):
+                    rss = p.info["memory_info"].rss
+                    name = (p.info.get("name") or "?").strip()
+                    if name and name.lower() not in ("system", "idle", "registry"):
+                        procs.append((name[:40], rss))
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+        procs.sort(key=lambda x: x[1], reverse=True)
+        top = [f"{n}({r/1024/1024:.0f}M)" for n, r in procs[:12]]
+        return "Running: " + ", ".join(top) if top else ""
+    except Exception:
+        return ""
+
+def _gather_active_window() -> str:
+    """Active/focused window title (what user is looking at)."""
+    try:
+        if sys.platform == "win32":
+            import ctypes
+            hwnd = ctypes.windll.user32.GetForegroundWindow()
+            length = ctypes.windll.user32.GetWindowTextLengthW(hwnd) + 1
+            buf = ctypes.create_unicode_buffer(length)
+            ctypes.windll.user32.GetWindowTextW(hwnd, buf, length)
+            title = buf.value.strip()
+            if title:
+                return f"Active window: {title[:80]}"
+    except Exception:
+        pass
+    return ""
+
+def _gather_recent_files() -> str:
+    """Recent files in user's common directories."""
+    lines = []
+    home = os.path.expanduser("~")
+    dirs = [
+        (os.path.join(home, "Desktop"), "Desktop"),
+        (os.path.join(home, "Documents"), "Documents"),
+        (os.path.join(home, "Downloads"), "Downloads"),
+    ]
+    for d, label in dirs:
+        if not os.path.isdir(d):
+            continue
+        try:
+            entries = []
+            for f in os.listdir(d)[:25]:
+                if f.startswith("."):
+                    continue
+                path = os.path.join(d, f)
+                try:
+                    mtime = os.path.getmtime(path)
+                    entries.append((f, mtime))
+                except Exception:
+                    entries.append((f, 0))
+            entries.sort(key=lambda x: x[1], reverse=True)
+            recent = [e[0] for e in entries[:8]]
+            if recent:
+                lines.append(f"{label}: {', '.join(recent)}")
+        except Exception:
+            pass
+    return "; ".join(lines) if lines else ""
+
+def _gather_pc_context() -> str:
+    """Full PC awareness: system, activity, running apps, active window, files, repo."""
+    parts = []
+    parts.append(_gather_system_info())
+    active = _gather_active_window()
+    if active:
+        parts.append(active)
+    procs = _gather_running_processes()
+    if procs:
+        parts.append(procs)
+    recent = _gather_recent_files()
+    if recent:
+        parts.append(f"Recent files: {recent}")
+    for root in _LUNA_PC_CONTEXT_PATHS:
+        if not os.path.isdir(root):
+            continue
+        name = os.path.basename(root.rstrip(os.sep)) or "root"
+        try:
+            files = []
+            for dirpath, _, filenames in os.walk(root):
+                rel = os.path.relpath(dirpath, root) if dirpath != root else "."
+                for f in filenames[:50]:
+                    if f.startswith(".") or f.endswith(".pyc") or "node_modules" in dirpath or "__pycache__" in dirpath:
+                        continue
+                    path = os.path.join(rel, f) if rel != "." else f
+                    files.append(path)
+                if len(files) >= 80:
+                    break
+            if files:
+                parts.append(f"[{name}] Files: {', '.join(sorted(files)[:35])}{'…' if len(files) > 35 else ''}")
+            if root == _BASE and os.path.isfile(os.path.join(root, "bot.py")):
+                try:
+                    sz = os.path.getsize(os.path.join(root, "bot.py")) // 1000
+                    parts.append(f"[Luna] bot.py ~{sz}k lines. Discord, Ollama, Playwright, calendar, reminders.")
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    return "\n".join(parts)
+
+def _pc_context_observer_step() -> None:
+    """Gather PC/repo context and store for Luna to use."""
+    try:
+        summary = _gather_pc_context()
+        if summary:
+            data = {"summary": summary[:8000], "ts": time.time()}
+            _save_json(_PC_CONTEXT_PATH, data)
+    except Exception:
+        pass
+
+def _get_pc_context() -> str:
+    """Return cached PC/repo context (refreshed by observer loop)."""
+    data = _load_json(_PC_CONTEXT_PATH, {})
+    s = (data.get("summary") or "").strip()
+    ts = data.get("ts") or 0
+    if s and (time.time() - ts) < 86400:
+        return s
+    return ""
+
+async def _pc_context_observer_loop():
+    """Periodically scan PC/repo and update context for Luna (system, activity, apps, files)."""
+    await bot.wait_until_ready()
+    while True:
+        try:
+            await asyncio.to_thread(_pc_context_observer_step)
+            await asyncio.sleep(180)
+        except Exception:
+            await asyncio.sleep(60)
+
+
+# ── Screenshot capture ───────────────────────────────────────────────────────
+
+_SCREENSHOT_PATH = os.path.join(_DATA, "last_screenshot.png")
+_SCREENSHOT_DESC_PATH = os.path.join(_DATA, "screenshot_desc.json")
+
+def _capture_screenshot() -> str | None:
+    """Capture screen using mss, save to data/, return path or None."""
+    try:
+        import mss
+        with mss.mss() as sct:
+            monitor = sct.monitors[1]
+            shot = sct.grab(monitor)
+            from mss.tools import to_png
+            png = to_png(shot.rgb, shot.size)
+            with open(_SCREENSHOT_PATH, "wb") as f:
+                f.write(png)
+            return _SCREENSHOT_PATH
+    except Exception:
+        return None
+
+def _describe_screenshot() -> str:
+    """Capture screenshot and describe it with the vision model. Returns description or error detail."""
+    path = _capture_screenshot()
+    if not path:
+        return "[screenshot] Could not capture screen."
+    if not OLLAMA_VISION_MODEL:
+        return "[screenshot] No vision model configured. Set OLLAMA_VISION_MODEL in .env."
+    try:
+        with open(path, "rb") as f:
+            img_b64 = base64.b64encode(f.read()).decode()
+        body = json.dumps({
+            "model": OLLAMA_VISION_MODEL,
+            "prompt": "Describe what is on this computer screen. Be factual and concise. List visible applications, windows, and content. Do NOT invent anything.",
+            "images": [img_b64],
+            "stream": False,
+        }).encode()
+        req = urllib.request.Request(f"{OLLAMA_BASE}/api/generate", data=body,
+            headers={"Content-Type": "application/json"}, method="POST")
+        with urllib.request.urlopen(req, timeout=120) as r:
+            desc = (json.loads(r.read()).get("response") or "").strip()
+        if desc:
+            _save_json(_SCREENSHOT_DESC_PATH, {"desc": desc[:2000], "ts": time.time()})
+            return desc[:2000]
+        return "[screenshot] Vision model returned no description."
+    except urllib.error.URLError as e:
+        return f"[screenshot] Cannot reach Ollama ({e.reason}). Is Ollama running?"
+    except Exception as e:
+        return f"[screenshot] Error: {e}"
+
+def _get_screenshot_desc() -> str:
+    """Return cached screenshot description if recent (< 5 min)."""
+    data = _load_json(_SCREENSHOT_DESC_PATH, {})
+    ts = data.get("ts") or 0
+    if (time.time() - ts) < 300:
+        return (data.get("desc") or "").strip()
+    return ""
+
+def _screenshot_observer_step():
+    try:
+        _describe_screenshot()
+    except Exception:
+        pass
+
+async def _screenshot_observer_loop():
+    """Periodically capture and describe the screen (every 5 min)."""
+    await bot.wait_until_ready()
+    await asyncio.sleep(30)
+    while True:
+        try:
+            await asyncio.to_thread(_screenshot_observer_step)
+            await asyncio.sleep(300)
+        except Exception:
+            await asyncio.sleep(120)
+
+# ── Clipboard awareness ─────────────────────────────────────────────────────
+
+_CLIPBOARD_HISTORY_PATH = os.path.join(_DATA, "clipboard_history.json")
+_clipboard_history: list[dict] = []
+_clipboard_last: str = ""
+_clipboard_lock = threading.Lock()
+
+def _clipboard_read() -> str:
+    try:
+        import pyperclip
+        return (pyperclip.paste() or "").strip()
+    except Exception:
+        if sys.platform == "win32":
+            try:
+                import ctypes
+                CF_UNICODETEXT = 13
+                u32 = ctypes.windll.user32
+                k32 = ctypes.windll.kernel32
+                if u32.OpenClipboard(0):
+                    try:
+                        h = u32.GetClipboardData(CF_UNICODETEXT)
+                        if h:
+                            p = k32.GlobalLock(h)
+                            if p:
+                                try:
+                                    return ctypes.wstring_at(p).strip()
+                                finally:
+                                    k32.GlobalUnlock(h)
+                    finally:
+                        u32.CloseClipboard()
+            except Exception:
+                pass
+        return ""
+
+def _clipboard_monitor_step():
+    global _clipboard_last
+    text = _clipboard_read()
+    if not text or len(text) > 5000 or text == _clipboard_last:
+        return
+    _clipboard_last = text
+    with _clipboard_lock:
+        _clipboard_history.append({"text": text[:1000], "ts": time.time()})
+        if len(_clipboard_history) > 20:
+            _clipboard_history.pop(0)
+        _save_json(_CLIPBOARD_HISTORY_PATH, {"items": _clipboard_history[-20:]})
+
+def _get_clipboard_context() -> str:
+    with _clipboard_lock:
+        if not _clipboard_history:
+            return ""
+        recent = _clipboard_history[-3:]
+    lines = []
+    for item in recent:
+        snippet = item["text"][:200]
+        lines.append(snippet)
+    return "Recent clipboard: " + " | ".join(lines)
+
+async def _clipboard_monitor_loop():
+    """Watch clipboard for new content every 10 seconds."""
+    await bot.wait_until_ready()
+    await asyncio.sleep(10)
+    while True:
+        try:
+            await asyncio.to_thread(_clipboard_monitor_step)
+            await asyncio.sleep(10)
+        except Exception:
+            await asyncio.sleep(30)
+
+# ── Learning from corrections ────────────────────────────────────────────────
+
+_CORRECTIONS_PATH = os.path.join(_DATA, "corrections.json")
+_correction_lock = threading.Lock()
+
+_CORRECTION_PATTERNS = [
+    r"(?i)^no[,.]?\s*(i\s+mean|that'?s\s+not|wrong|incorrect|not\s+what\s+i)",
+    r"(?i)^that'?s\s+(wrong|not\s+right|incorrect|not\s+what)",
+    r"(?i)^i\s+didn'?t\s+(mean|ask|say|want)\s+that",
+    r"(?i)^(actually|correction)[,:]",
+    r"(?i)^(stop|don'?t|quit)\s+(saying|doing|calling|using)",
+]
+
+def _detect_correction(user_msg: str, prev_luna_reply: str) -> dict | None:
+    """Detect if user is correcting Luna. Returns correction dict or None."""
+    if not user_msg or len(user_msg) < 5:
+        return None
+    for pat in _CORRECTION_PATTERNS:
+        if re.match(pat, user_msg.strip()):
+            return {
+                "user_said": user_msg[:300],
+                "luna_said": (prev_luna_reply or "")[:300],
+                "ts": time.time(),
+            }
+    return None
+
+def _store_correction(correction: dict):
+    with _correction_lock:
+        data = _load_json(_CORRECTIONS_PATH, {"corrections": []})
+        corrections = data.get("corrections", [])
+        corrections.append(correction)
+        if len(corrections) > 50:
+            corrections = corrections[-50:]
+        _save_json(_CORRECTIONS_PATH, {"corrections": corrections})
+
+def _get_corrections_context() -> str:
+    data = _load_json(_CORRECTIONS_PATH, {"corrections": []})
+    corrections = data.get("corrections", [])[-5:]
+    if not corrections:
+        return ""
+    lines = []
+    for c in corrections:
+        lines.append(f"User corrected: \"{c.get('user_said', '')[:100]}\" (you had said: \"{c.get('luna_said', '')[:80]}\")")
+    return "Recent corrections from user (avoid repeating these mistakes): " + "; ".join(lines)
+
+# ── Morning briefing ─────────────────────────────────────────────────────────
+
+_BRIEFING_PATH = os.path.join(_DATA, "last_briefing.json")
+
+def _get_weather() -> str:
+    """Fetch weather from wttr.in (free, no API key needed)."""
+    try:
+        req = urllib.request.Request("https://wttr.in/?format=%l:+%C+%t+%h+%w", headers={"User-Agent": "Luna/5.0"})
+        with urllib.request.urlopen(req, timeout=8) as r:
+            return r.read().decode("utf-8", errors="replace").strip()[:200]
+    except Exception:
+        return ""
+
+def _generate_morning_briefing() -> str:
+    """Generate a morning briefing: weather, calendar, todos, news summary."""
+    parts = ["**Good morning! Here's your briefing:**\n"]
+
+    weather = _get_weather()
+    if weather:
+        parts.append(f"**Weather:** {weather}")
+
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    cal = _load_json(_CALENDAR_FILE, {"events": []})
+    today_events = [e for e in cal.get("events", []) if e.get("date", "") == today_str]
+    if today_events:
+        ev_lines = [f"  - {e.get('time', '??:??')} {e.get('title', 'Event')}" for e in today_events]
+        parts.append("**Today's calendar:**\n" + "\n".join(ev_lines))
+    else:
+        parts.append("**Calendar:** No events scheduled today.")
+
+    todos = _load_json(_TODOS_FILE, {"items": []})
+    pending = [t for t in todos.get("items", []) if not t.get("done")]
+    if pending:
+        td_lines = [f"  - {t.get('text', '?')}" for t in pending[:5]]
+        parts.append("**Pending todos:**\n" + "\n".join(td_lines))
+
+    reminders = _load_json(_REMINDERS_FILE, [])
+    upcoming = []
+    now = time.time()
+    for rem in reminders:
+        t = rem.get("at") or rem.get("time") or 0
+        if 0 < t - now < 86400:
+            upcoming.append(rem.get("text", "reminder")[:60])
+    if upcoming:
+        parts.append("**Upcoming reminders:** " + ", ".join(upcoming[:3]))
+
+    try:
+        import xml.etree.ElementTree as ET2
+        headlines = []
+        for feed_url in WORLD_NEWS_FEEDS[:1]:
+            try:
+                req = urllib.request.Request(feed_url, headers={"User-Agent": "Luna/5.0"})
+                with urllib.request.urlopen(req, timeout=8) as r:
+                    root = ET2.fromstring(r.read())
+                for item in root.iter("item"):
+                    title = (item.findtext("title") or "").strip()
+                    if title:
+                        headlines.append(title)
+                    if len(headlines) >= 3:
+                        break
+            except Exception:
+                pass
+        if headlines:
+            parts.append("**Top news:** " + " · ".join(headlines[:3]))
+    except Exception:
+        pass
+
+    return "\n\n".join(parts)
+
+def _should_show_briefing() -> bool:
+    """True if it's morning (6-10am) and we haven't shown today's briefing yet."""
+    now = datetime.now()
+    if not (6 <= now.hour <= 10):
+        return False
+    data = _load_json(_BRIEFING_PATH, {})
+    last_date = data.get("date", "")
+    return last_date != now.strftime("%Y-%m-%d")
+
+def _mark_briefing_shown():
+    _save_json(_BRIEFING_PATH, {"date": datetime.now().strftime("%Y-%m-%d"), "ts": time.time()})
+
+# ── Browser tab awareness ────────────────────────────────────────────────────
+
+def _gather_browser_context() -> str:
+    """Extract browser tab info from active window title and recent browser history."""
+    parts = []
+    try:
+        if sys.platform == "win32":
+            import ctypes
+            hwnd = ctypes.windll.user32.GetForegroundWindow()
+            length = ctypes.windll.user32.GetWindowTextLengthW(hwnd) + 1
+            buf = ctypes.create_unicode_buffer(length)
+            ctypes.windll.user32.GetWindowTextW(hwnd, buf, length)
+            title = buf.value.strip()
+            browsers = ("chrome", "firefox", "edge", "opera", "brave", "vivaldi")
+            if title and any(b in title.lower() for b in browsers):
+                parts.append(f"Browser tab: {title[:120]}")
+    except Exception:
+        pass
+    # Try reading Chrome history for recent URLs
+    try:
+        import sqlite3
+        history_paths = [
+            os.path.expanduser(r"~\AppData\Local\Google\Chrome\User Data\Default\History"),
+            os.path.expanduser(r"~\AppData\Local\Microsoft\Edge\User Data\Default\History"),
+        ]
+        for hp in history_paths:
+            if not os.path.isfile(hp):
+                continue
+            tmp = os.path.join(tempfile.gettempdir(), f"luna_browser_hist_{os.path.basename(os.path.dirname(os.path.dirname(hp)))}.db")
+            try:
+                shutil.copy2(hp, tmp)
+                conn = sqlite3.connect(tmp)
+                rows = conn.execute(
+                    "SELECT url, title FROM urls ORDER BY last_visit_time DESC LIMIT 5"
+                ).fetchall()
+                conn.close()
+                os.remove(tmp)
+                if rows:
+                    sites = [f"{r[1][:50]} ({r[0][:60]})" for r in rows if r[1]]
+                    if sites:
+                        parts.append("Recent browsing: " + "; ".join(sites[:3]))
+                break
+            except Exception:
+                try: os.remove(tmp)
+                except Exception: pass
+    except Exception:
+        pass
+    return " | ".join(parts) if parts else ""
+
+# ── Voice wake word ──────────────────────────────────────────────────────────
+
+_WAKE_WORD_ENABLED = _env("LUNA_WAKE_WORD", "").strip().lower() in ("1", "true", "yes", "on")
+_wake_word_running = False
+
+async def _wake_word_loop():
+    """Listen for 'Hey Luna' using openwakeword (optional, enable with LUNA_WAKE_WORD=1)."""
+    global _wake_word_running
+    if not _WAKE_WORD_ENABLED:
+        return
+    await bot.wait_until_ready()
+    await asyncio.sleep(5)
+    try:
+        import pyaudio
+        WakeModel = __import__("openwakeword.model", fromlist=["Model"]).Model
+        oww = WakeModel(wakeword_models=["hey_jarvis"], inference_framework="onnx")
+        pa = pyaudio.PyAudio()
+        stream = pa.open(format=pyaudio.paInt16, channels=1, rate=16000, input=True, frames_per_buffer=1280)
+        _wake_word_running = True
+        print("[Luna] Wake word listener active (say 'Hey Luna').", flush=True)
+        while _wake_word_running:
+            audio = stream.read(1280, exception_on_overflow=False)
+            import numpy as np
+            audio_np = np.frombuffer(audio, dtype=np.int16)
+            prediction = oww.predict(audio_np)
+            for mdl_name, score in prediction.items():
+                if score > 0.5:
+                    print(f"[Luna] Wake word detected! ({mdl_name}: {score:.2f})", flush=True)
+                    oww.reset()
+                    # Trigger a short recording + transcription + chat
+                    await _handle_wake_word_activation()
+            await asyncio.sleep(0.01)
+    except ImportError:
+        print("[Luna] Wake word: openwakeword or pyaudio not installed. Skipping.", flush=True)
+    except Exception as e:
+        print(f"[Luna] Wake word error: {e}", flush=True)
+
+async def _handle_wake_word_activation():
+    """After wake word detected, record 5s of audio, transcribe, and reply via TTS."""
+    try:
+        import pyaudio, wave
+        pa = pyaudio.PyAudio()
+        stream = pa.open(format=pyaudio.paInt16, channels=1, rate=16000, input=True, frames_per_buffer=1024)
+        frames = []
+        for _ in range(int(16000 / 1024 * 5)):
+            frames.append(stream.read(1024, exception_on_overflow=False))
+        stream.stop_stream()
+        stream.close()
+        fd, path = tempfile.mkstemp(suffix=".wav")
+        os.close(fd)
+        wf = wave.open(path, "wb")
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(16000)
+        wf.writeframes(b"".join(frames))
+        wf.close()
+        text = await asyncio.to_thread(_whisper_transcribe, path)
+        os.remove(path)
+        if text and len(text.strip()) > 2:
+            scope = LINKED_SCOPE or "web"
+            system = _build_luna_chat_system(scope)
+            history = _compact_history(get_recent_conversation(scope, 20))
+            reply = await asyncio.to_thread(ollama_chat, text.strip(), system, scope, history, OLLAMA_CHAT)
+            if reply and not reply.startswith("Ollama offline"):
+                append_exchange(scope, text.strip(), reply)
+                _play_reply_tts(reply)
+    except Exception as e:
+        print(f"[Luna] Wake word handling error: {e}", flush=True)
+
+# ── RAG: knowledge base vector search ────────────────────────────────────────
+
+_EMBEDDINGS_PATH = os.path.join(_DATA, "knowledge_embeddings.json")
+_embeddings_cache: dict[str, list[float]] = {}
+_embeddings_lock = threading.Lock()
+
+def _ollama_embed(text: str) -> list[float] | None:
+    """Get embedding from Ollama (nomic-embed-text or any embedding model)."""
+    embed_model = _env("OLLAMA_EMBED_MODEL", "nomic-embed-text").strip()
+    if not embed_model:
+        return None
+    try:
+        body = json.dumps({"model": embed_model, "prompt": text[:2000]}).encode()
+        req = urllib.request.Request(f"{OLLAMA_BASE}/api/embeddings", data=body,
+            headers={"Content-Type": "application/json"}, method="POST")
+        with urllib.request.urlopen(req, timeout=15) as r:
+            data = json.loads(r.read())
+        return data.get("embedding")
+    except Exception:
+        return None
+
+def _cosine_sim(a: list[float], b: list[float]) -> float:
+    dot = sum(x * y for x, y in zip(a, b))
+    na = sum(x * x for x in a) ** 0.5
+    nb = sum(x * x for x in b) ** 0.5
+    if na == 0 or nb == 0:
+        return 0.0
+    return dot / (na * nb)
+
+def _build_knowledge_embeddings():
+    """Embed all knowledge entries and cache."""
+    global _embeddings_cache
+    entries = list_knowledge()
+    updated = False
+    with _embeddings_lock:
+        for entry in entries:
+            slug = entry.get("slug", "")
+            if slug in _embeddings_cache:
+                continue
+            content = get_knowledge(slug) or ""
+            if not content.strip():
+                continue
+            emb = _ollama_embed(content[:1500])
+            if emb:
+                _embeddings_cache[slug] = emb
+                updated = True
+        if updated:
+            _save_json(_EMBEDDINGS_PATH, _embeddings_cache)
+
+def _search_knowledge_semantic(query: str, top_k: int = 3) -> list[dict]:
+    """Search knowledge base using embeddings. Falls back to keyword search."""
+    q_emb = _ollama_embed(query)
+    if not q_emb or not _embeddings_cache:
+        return search_knowledge(query, top_k)
+    scores = []
+    with _embeddings_lock:
+        for slug, emb in _embeddings_cache.items():
+            sim = _cosine_sim(q_emb, emb)
+            scores.append((slug, sim))
+    scores.sort(key=lambda x: x[1], reverse=True)
+    results = []
+    for slug, sim in scores[:top_k]:
+        if sim < 0.3:
+            continue
+        content = get_knowledge(slug)
+        title = (content or "").split("\n")[0].strip().lstrip("# ") if content else slug
+        results.append({"slug": slug, "title": title, "snippet": (content or "")[:200], "score": round(sim, 3)})
+    return results
+
+def _load_knowledge_embeddings():
+    """Load cached embeddings from disk."""
+    global _embeddings_cache
+    data = _load_json(_EMBEDDINGS_PATH, {})
+    if isinstance(data, dict) and all(isinstance(v, list) for v in data.values()):
+        with _embeddings_lock:
+            _embeddings_cache = data
+
+async def _knowledge_embedding_loop():
+    """Periodically rebuild knowledge embeddings."""
+    await bot.wait_until_ready()
+    await asyncio.sleep(20)
+    _load_knowledge_embeddings()
+    while True:
+        try:
+            await asyncio.to_thread(_build_knowledge_embeddings)
+            await asyncio.sleep(600)
+        except Exception:
+            await asyncio.sleep(120)
+
+# ── Internal ML (always learning from experience) ──────────────────────────────
+
+def _ml_internal_learn_step() -> None:
+    """Learn from action log: which commands succeed, patterns, preferences. Runs internally, not as user command."""
+    try:
+        entries = []
+        with _action_log_lock:
+            if os.path.isfile(_ACTION_LOG):
+                with open(_ACTION_LOG, "r", encoding="utf-8") as f:
+                    for line in f.readlines()[-500:]:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            e = json.loads(line)
+                            entries.append(e)
+                        except Exception:
+                            pass
+        if len(entries) < 10:
+            return
+        learned = _load_json(_ML_LEARNED_PATH, {"patterns": [], "cmd_success": {}, "last_learned": 0})
+        cmd_success = learned.get("cmd_success", {})
+        for e in entries[-200:]:
+            cmd = (e.get("cmd") or "").strip()
+            reply = (e.get("reply") or "")
+            ok = "❌" not in reply and len(reply) > 0
+            if cmd:
+                rec = cmd_success.setdefault(cmd, {"ok": 0, "fail": 0})
+                if ok:
+                    rec["ok"] = rec.get("ok", 0) + 1
+                else:
+                    rec["fail"] = rec.get("fail", 0) + 1
+        learned["cmd_success"] = {k: v for k, v in list(cmd_success.items())[-50:]}
+        learned["last_learned"] = time.time()
+        _save_json(_ML_LEARNED_PATH, learned)
+    except Exception:
+        pass
+
+async def _ml_learning_loop():
+    """Background loop: Luna learns from her actions and outcomes. Internal only."""
+    await bot.wait_until_ready()
+    while True:
+        try:
+            await asyncio.to_thread(_ml_internal_learn_step)
+            await asyncio.sleep(1800)
+        except Exception:
+            await asyncio.sleep(300)
+
+# ── Social module setup ──────────────────────────────────────────────────────
+# luna_social.py contains the extraction target for social automation functions.
+# To complete the split incrementally:
+# 1. Move a function from bot.py to luna_social.py
+# 2. Replace the function in bot.py with: from luna_social import function_name
+# 3. Ensure luna_social.configure() has all needed references
+#
+# Configure luna_social with function references it needs:
+def _configure_social():
+    luna_social.configure(
+        ollama_chat=ollama_chat,
+        _load_json=_load_json,
+        _save_json=_save_json,
+        existential_bump=existential_bump,
+    )
+# Called after all functions are defined (see bottom of file)
+
 # ── Browser helpers ───────────────────────────────────────────────────────────
 
 # Run in every page so Suno/sites see a normal user, not automation (fewer captchas).
@@ -1378,25 +2492,73 @@ def _resolve_track(query: str) -> tuple[bool, dict | str]:
             return True, {"title": title, "web_url": q, "stream_url": stream, "duration": 0}
         except Exception as e:
             return False, f"Suno error: {e}"
-    # YouTube
+    # YouTube (audio only)
     try:
         import yt_dlp
-        opts = {"noplaylist": True, "quiet": True, "no_warnings": True,
-                "default_search": "ytsearch1", "skip_download": True,
-                "format": "bestaudio[ext=m4a]/bestaudio/best",
-                "extractor_args": {"youtube": {"player_client": "android,web"}}}
+
+        def _audio_from_info(info: dict, fallback_web: str) -> tuple[bool, dict | str]:
+            if "entries" in info and info.get("entries"):
+                info = info["entries"][0]
+            url = info.get("url", "")
+            if not url:
+                for f in (info.get("formats") or []):
+                    # audio-only format
+                    if f.get("acodec", "") not in ("", "none") and f.get("vcodec", "") in ("", "none"):
+                        url = f.get("url", "")
+                        if url:
+                            break
+            if not url:
+                return False, "No audio stream found."
+            return True, {
+                "title": info.get("title", "?"),
+                "web_url": info.get("webpage_url", fallback_web),
+                "stream_url": url,
+                "duration": int(info.get("duration") or 0),
+                "http_headers": info.get("http_headers", {}),
+            }
+
+        base_opts = {
+            "noplaylist": True,
+            "quiet": True,
+            "no_warnings": True,
+            "skip_download": True,
+            "format": "bestaudio[ext=m4a]/bestaudio/best",
+            "extractor_args": {"youtube": {"player_client": "android,web,mweb"}},
+        }
+
+        # 1) Direct attempt for URL or query.
+        opts = dict(base_opts)
+        opts["default_search"] = "ytsearch1"
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(q, download=False)
-        if "entries" in info and info["entries"]: info = info["entries"][0]
-        url = info.get("url", "")
-        if not url:
-            for f in (info.get("formats") or []):
-                if f.get("acodec","") not in ("","none") and f.get("vcodec","") in ("","none"):
-                    url = f.get("url",""); break
-        if not url: return False, "No audio stream found."
-        return True, {"title": info.get("title","?"), "web_url": info.get("webpage_url", q),
-                      "stream_url": url, "duration": int(info.get("duration") or 0),
-                      "http_headers": info.get("http_headers", {})}
+        ok, track_or_err = _audio_from_info(info, q)
+        if ok:
+            return True, track_or_err
+
+        # 2) Fallback: for search terms, try top 5 results and pick first available.
+        is_url = q_low.startswith("http://") or q_low.startswith("https://")
+        if not is_url:
+            search_opts = {"quiet": True, "no_warnings": True, "extract_flat": True, "default_search": "ytsearch5"}
+            with yt_dlp.YoutubeDL(search_opts) as ydl:
+                sr = ydl.extract_info(q, download=False)
+            candidates = []
+            for e in (sr.get("entries") or [])[:5]:
+                vid = (e.get("id") or "").strip()
+                if vid:
+                    candidates.append(f"https://www.youtube.com/watch?v={vid}")
+                elif e.get("url"):
+                    candidates.append(e.get("url"))
+            for c in candidates:
+                try:
+                    with yt_dlp.YoutubeDL(base_opts) as ydl:
+                        ci = ydl.extract_info(c, download=False)
+                    ok, track_or_err = _audio_from_info(ci, c)
+                    if ok:
+                        return True, track_or_err
+                except Exception:
+                    continue
+
+        return False, str(track_or_err) if isinstance(track_or_err, str) else "No playable audio found."
     except ImportError:
         return False, "yt-dlp not installed."
     except Exception as e:
@@ -1631,6 +2793,193 @@ def _search(query: str) -> tuple[bool, str]:
         return True, f"Opened Google: **{query[:80]}**"
     except Exception as e:
         return False, str(e)
+
+def _research_content(topic: str) -> tuple[bool, str]:
+    """Research a topic and return a brief optimized for audiobook/eBook creation."""
+    topic = (topic or "").strip()
+    if not topic:
+        return False, "Usage: !research <topic>"
+    # Pull links from DuckDuckGo HTML (no API key needed)
+    links = []
+    try:
+        q = urllib.parse.quote(topic, safe="")
+        url = f"https://duckduckgo.com/html/?q={q}"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=20) as r:
+            html_text = r.read().decode("utf-8", errors="replace")
+        # result links
+        for m in re.finditer(r'<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>(.*?)</a>', html_text, re.I | re.S):
+            href = html.unescape(m.group(1))
+            title = re.sub(r"<[^>]+>", " ", m.group(2))
+            title = re.sub(r"\s+", " ", html.unescape(title)).strip()
+            if href and title:
+                links.append({"title": title[:120], "url": href})
+            if len(links) >= 8:
+                break
+    except Exception as e:
+        return False, f"Research search failed: {e}"
+    if not links:
+        return False, "No research sources found."
+
+    source_lines = [f"- {x['title']} ({x['url']})" for x in links[:8]]
+    prompt = (
+        f"Topic: {topic}\n\n"
+        "You are creating a research brief for writing an audiobook or eBook.\n"
+        "Using the sources below, produce:\n"
+        "1) A concise synthesis (5-8 bullets)\n"
+        "2) A suggested chapter/section outline (6-10 items)\n"
+        "3) A list of key claims to verify\n"
+        "4) Source shortlist with why each source is useful\n\n"
+        "Sources:\n" + "\n".join(source_lines)
+    )
+    try:
+        brief = ollama_chat(prompt, system="Be practical, structured, and factual. Keep it concise.", model=OLLAMA_CHAT)
+        brief = (brief or "").strip()
+        if not brief:
+            return False, "Could not generate research brief."
+    except Exception as e:
+        return False, str(e)
+    src = "\n".join(f"{i+1}. {x['title']} — {x['url']}" for i, x in enumerate(links[:8]))
+    return True, f"📚 **Research brief: {topic}**\n\n{brief[:2200]}\n\n**Sources**\n{src}"
+
+def _research_story_build(topic: str) -> tuple[bool, dict | str]:
+    """Build story-style script text + sources from research for audiobook narration."""
+    topic = (topic or "").strip()
+    if not topic:
+        return False, "Usage: !research_story <topic>"
+    # Reuse source discovery from research command
+    links = []
+    try:
+        q = urllib.parse.quote(topic, safe="")
+        url = f"https://duckduckgo.com/html/?q={q}"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=20) as r:
+            html_text = r.read().decode("utf-8", errors="replace")
+        for m in re.finditer(r'<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>(.*?)</a>', html_text, re.I | re.S):
+            href = html.unescape(m.group(1))
+            title = re.sub(r"<[^>]+>", " ", m.group(2))
+            title = re.sub(r"\s+", " ", html.unescape(title)).strip()
+            if href and title:
+                links.append({"title": title[:120], "url": href})
+            if len(links) >= 8:
+                break
+    except Exception as e:
+        return False, f"Research search failed: {e}"
+    if not links:
+        return False, "No research sources found."
+
+    source_lines = [f"- {x['title']} ({x['url']})" for x in links[:8]]
+    prompt = (
+        f"Topic: {topic}\n\n"
+        "Write a story-style audiobook script based on the topic and sources below.\n"
+        "Requirements:\n"
+        "- 1200 to 1800 words\n"
+        "- Engaging narrative voice, clear transitions, natural spoken rhythm\n"
+        "- Include practical takeaways naturally in the story\n"
+        "- Do NOT use markdown headings; plain readable text only\n"
+        "- End with a short reflective closing paragraph\n\n"
+        "Sources:\n" + "\n".join(source_lines)
+    )
+    try:
+        story = ollama_chat(prompt, system="You are an audiobook scriptwriter. Output plain text only.", model=OLLAMA_CHAT)
+        story = (story or "").strip()
+        if not story:
+            return False, "Could not generate story script."
+    except Exception as e:
+        return False, str(e)
+    # Required audiobook opening line
+    opener = "Welcome readers, to Luna's Audiobooks. Hope you enjoy today's story."
+    if not story.lower().startswith("welcome readers"):
+        story = opener + "\n\n" + story
+    return True, {"topic": topic, "story": story, "links": links}
+
+def _research_story_script(topic: str) -> tuple[bool, str]:
+    """Create a story-style script .txt file from researched sources for audiobook narration."""
+    ok, built = _research_story_build(topic)
+    if not ok:
+        return False, str(built)
+    story = (built or {}).get("story", "")
+    links = (built or {}).get("links", [])
+    topic = (built or {}).get("topic", topic)
+
+    try:
+        os.makedirs(_AUDIOBOOK_SCRIPTS_DIR, exist_ok=True)
+        slug = re.sub(r"[^\w\s-]", "", topic.lower())[:40].strip().replace(" ", "_") or "story"
+        slug = re.sub(r"_+", "_", slug).strip("_") or "story"
+        ts = datetime.now().strftime("%Y%m%d_%H%M")
+        filename = f"{slug}_{ts}.txt"
+        path = os.path.join(_AUDIOBOOK_SCRIPTS_DIR, filename)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(story + "\n\nSources:\n")
+            for i, s in enumerate(links[:8], 1):
+                f.write(f"{i}. {s['title']} — {s['url']}\n")
+        return True, f"Story script created: **{filename}** in `{_AUDIOBOOK_SCRIPTS_DIR}`"
+    except Exception as e:
+        return False, f"Failed to save script file: {e}"
+
+def _create_audiobook_from_research(topic: str) -> tuple[bool, str]:
+    """Create audiobook MP3 from a research story script using same TTS+ffmpeg flow as podcast."""
+    topic = (topic or "").strip()
+    if not topic:
+        return False, "Usage: !audiobook create <topic>"
+    root = (CUSTOM_PODCAST_DIR or "").strip()
+    if not root or not os.path.isdir(root):
+        return False, f"Set **CUSTOM_PODCAST_DIR** in .env to a writable folder (e.g. D:\\Luna Agent n8n) so I can save the audiobook."
+    ok, built = _research_story_build(topic)
+    if not ok:
+        return False, str(built)
+    script = _clean_for_tts((built or {}).get("story", ""))[:12000]
+    if not script.strip():
+        return False, "Generated audiobook script was empty."
+    chunks = _split_tts(script, max_chars=120)
+    if not chunks:
+        return False, "No speakable chunks from script."
+    temp_dir = tempfile.mkdtemp()
+    list_path = os.path.join(temp_dir, "list.txt")
+    out_path = os.path.join(temp_dir, "audiobook.mp3")
+    try:
+        paths = []
+        for i, chunk in enumerate(chunks[:200]):  # longer than podcast
+            audio = _tts_bytes(chunk)
+            if not audio:
+                continue
+            seg_path = os.path.join(temp_dir, f"seg_{i:03d}.mp3")
+            with open(seg_path, "wb") as f:
+                f.write(audio)
+            paths.append(seg_path)
+        if not paths:
+            return False, "TTS failed for all chunks. Check gTTS and internet."
+        with open(list_path, "w", encoding="utf-8") as f:
+            for p in paths:
+                p_abs = os.path.abspath(p).replace("\\", "/")
+                f.write(f"file '{p_abs}'\n")
+        ret = subprocess.run(
+            ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", list_path, "-c", "copy", out_path],
+            capture_output=True,
+            timeout=240,
+            cwd=temp_dir,
+        )
+        if ret.returncode != 0 or not os.path.isfile(out_path):
+            return False, "Could not merge audio (ffmpeg). Install FFmpeg and try again."
+        slug = re.sub(r"[^\w\s-]", "", topic.lower())[:30].strip().replace(" ", "_") or "audiobook"
+        slug = re.sub(r"_+", "_", slug).strip("_")
+        ts = datetime.now().strftime("%Y%m%d_%H%M")
+        name = f"audiobook_{slug}_{ts}.mp3"
+        dest = os.path.join(root, name)
+        shutil.copy2(out_path, dest)
+        return True, f"Created **{name}** in your podcast folder. You can play it with **!play {name}** or browse the folder."
+    except Exception as e:
+        return False, f"Could not create audiobook MP3: {e}"
+    finally:
+        try:
+            for f in os.listdir(temp_dir):
+                try:
+                    os.unlink(os.path.join(temp_dir, f))
+                except Exception:
+                    pass
+            os.rmdir(temp_dir)
+        except Exception:
+            pass
 
 # ── Social automation (Suno/X/Facebook/YouTube/Instagram/WhatsApp/Messenger) ──
 
@@ -1979,252 +3328,226 @@ def _run_fb_share() -> tuple[bool, str]:
     ok, song = _get_random_channel_song()
     if not ok: return False, str(song)
     if not _fb_lock.acquire(blocking=False): return False, "Facebook share already running."
+    pw = None
+    context = None
+    handed_off = False
     try:
         from playwright.sync_api import sync_playwright
         os.makedirs(FB_PROFILE_DIR, exist_ok=True)
-        context = None
+        pw = sync_playwright().start()
+        context = _launch_social_browser(FB_PROFILE_DIR, pw)
+        page = context.pages[0] if context.pages else context.new_page()
+        page.goto(FACEBOOK_PROFILE, wait_until="domcontentloaded", timeout=90000)
+        page.wait_for_timeout(1000)
+        if "login" in page.url.lower():
+            _clear_ready(FB_PROFILE_DIR)
+            handed_off = True
+            _keep_browser_until_closed(pw, context)
+            return False, "Facebook needs login. I left the browser open — log in, then **close the browser** and try again."
+        if _fb_needs_pin(page):
+            handed_off = True
+            _keep_browser_until_closed(pw, context)
+            return False, (
+                "Facebook is asking for a **PIN or verification code**. "
+                "I left the browser open — enter the code, then **close the browser** and try again."
+            )
+        _mark_ready(FB_PROFILE_DIR)
+        page.wait_for_timeout(2000)
+        composer_opened = False
+        for sel in [
+            "div[aria-label*='mind']",
+            "div[aria-label*='Create a post']",
+            "div[role='button']:has-text('What')",
+            "span:has-text(\"What's on your mind\")",
+            "[data-pagelet*='FeedComposer'] div[role='button']",
+        ]:
+            try:
+                btn = page.locator(sel).first
+                if btn.count() and btn.is_visible():
+                    btn.click(); page.wait_for_timeout(2000); composer_opened = True; break
+            except Exception: continue
+        if not composer_opened:
+            handed_off = True
+            _keep_browser_until_closed(pw, context)
+            return False, "Could not open Facebook composer. I left the browser open — log in if needed, then close and try again."
+        tb = None
+        for sel in ["div[role='dialog'] div[role='textbox'][contenteditable='true']"]:
+            loc = page.locator(sel).first
+            if loc.count() and loc.is_visible(): tb = loc; break
+        if not tb: return False, "Facebook post text box not found."
+        tb.click(force=True)
+        page.keyboard.press("Control+A"); page.keyboard.press("Backspace")
+        page.keyboard.type(_build_fb_msg(song["title"], song["url"]), delay=24)
+        page.wait_for_timeout(1500)
+        next_clicked = False
+        for nsel in ["button:has-text('Next')", "div[role='button']:has-text('Next')", "[aria-label*='Next']"]:
+            try:
+                nbtn = page.locator(nsel).first
+                if nbtn.count() and nbtn.is_visible():
+                    nbtn.click(force=True); page.wait_for_timeout(2000); next_clicked = True; break
+            except Exception: continue
+        if not next_clicked: return False, "Could not click Next on Create post."
+        post_settings_visible = False
+        for dsel in ["[aria-label*='Post settings']", "[role='dialog']:has-text('Post settings')", "div[role='dialog']:has-text('Post audience')"]:
+            try:
+                page.wait_for_selector(dsel, state="visible", timeout=8000)
+                post_settings_visible = True
+                break
+            except Exception: continue
+        if not post_settings_visible:
+            page.wait_for_timeout(3000)
+        page.wait_for_timeout(1000)
+        for dsel in ["[aria-label*='Post settings']", "[role='dialog']:has-text('Post settings')"]:
+            try:
+                d = page.locator(dsel).last
+                if d.count() and d.is_visible():
+                    pub = d.locator("text=Public").first
+                    if pub.count() and pub.is_visible():
+                        pub.click(force=True); page.wait_for_timeout(600)
+                    break
+            except Exception: continue
+        page.wait_for_timeout(800)
         try:
-            with sync_playwright() as p:
-                context = _launch_social_browser(FB_PROFILE_DIR, p)
-                page = context.pages[0] if context.pages else context.new_page()
-                page.goto(FACEBOOK_PROFILE, wait_until="domcontentloaded", timeout=90000)
-                page.wait_for_timeout(1000)
-                if "login" in page.url.lower():
-                    _clear_ready(FB_PROFILE_DIR)
-                    # Keep window open at least 60s, then until you close it (log in, then close)
-                    try:
-                        deadline = time.time() + 60
-                        while True:
-                            time.sleep(1)
-                            if time.time() < deadline:
-                                continue
-                            if not context.pages or all(pg.is_closed() for pg in context.pages):
-                                break
-                    finally:
-                        try: context.close()
-                        except Exception: pass
-                        context = None  # avoid double-close in outer finally
-                    return False, "Browser closed. Try Share to Facebook again — you should be logged in now."
-                _mark_ready(FB_PROFILE_DIR)
-                page.wait_for_timeout(2000)
-                # Open composer (Facebook "What's on your mind?" / Create post)
-                composer_opened = False
-                for sel in [
-                    "div[aria-label*='mind']",
-                    "div[aria-label*='Create a post']",
-                    "div[role='button']:has-text('What')",
-                    "span:has-text(\"What's on your mind\")",
-                    "[data-pagelet*='FeedComposer'] div[role='button']",
-                ]:
-                    try:
-                        btn = page.locator(sel).first
-                        if btn.count() and btn.is_visible():
-                            btn.click(); page.wait_for_timeout(2000); composer_opened = True; break
-                    except Exception: continue
-                if not composer_opened:
-                    # Keep window open at least 60s, then until you close it
-                    try:
-                        deadline = time.time() + 60
-                        while True:
-                            time.sleep(1)
-                            if time.time() < deadline:
-                                continue
-                            if not context.pages or all(pg.is_closed() for pg in context.pages):
-                                break
-                    finally:
-                        try: context.close()
-                        except Exception: pass
-                        context = None
-                    return False, "Browser closed. Log in to Facebook in the window if needed, then try Share to Facebook again."
-                tb = None
-                for sel in ["div[role='dialog'] div[role='textbox'][contenteditable='true']"]:
-                    loc = page.locator(sel).first
-                    if loc.count() and loc.is_visible(): tb = loc; break
-                if not tb: return False, "Facebook post text box not found."
-                tb.click(force=True)
-                page.keyboard.press("Control+A"); page.keyboard.press("Backspace")
-                page.keyboard.type(_build_fb_msg(song["title"], song["url"]), delay=24)
-                page.wait_for_timeout(1500)
-                # Click Next to open Post settings (audience, then Post)
-                next_clicked = False
-                for nsel in ["button:has-text('Next')", "div[role='button']:has-text('Next')", "[aria-label*='Next']"]:
-                    try:
-                        nbtn = page.locator(nsel).first
-                        if nbtn.count() and nbtn.is_visible():
-                            nbtn.click(force=True); page.wait_for_timeout(2000); next_clicked = True; break
-                    except Exception: continue
-                if not next_clicked: return False, "Could not click Next on Create post."
-                # Wait for the Post settings (audience) dialog to open — stay in this menu, don't go back to profile
-                post_settings_visible = False
-                for dsel in ["[aria-label*='Post settings']", "[role='dialog']:has-text('Post settings')", "div[role='dialog']:has-text('Post audience')"]:
-                    try:
-                        page.wait_for_selector(dsel, state="visible", timeout=8000)
-                        post_settings_visible = True
+            page.locator("[aria-label*='Post settings'] [aria-label='Post'], [role='dialog'] [aria-label='Post']").first.wait_for(state="visible", timeout=6000)
+        except Exception: pass
+        try:
+            page.locator("[aria-label*='Post settings'] button:has-text('Post')").or_(page.locator("[role='dialog'] button:has-text('Post')")).first.wait_for(state="visible", timeout=3000)
+        except Exception: pass
+        page.wait_for_timeout(500)
+
+        def _try_post_click() -> bool:
+            dialog = None
+            for dsel in ["[aria-label*='Post settings']", "[role='dialog']:has-text('Post settings')", "div[role='dialog']:has-text('Post audience')", "div[role='dialog']"]:
+                try:
+                    loc = page.locator(dsel).last
+                    if loc.count() and loc.is_visible():
+                        dialog = loc
                         break
-                    except Exception: continue
-                if not post_settings_visible:
-                    page.wait_for_timeout(3000)
-                page.wait_for_timeout(1000)
-                # Only touch Public inside the Post settings dialog (avoid closing the dialog)
-                for dsel in ["[aria-label*='Post settings']", "[role='dialog']:has-text('Post settings')"]:
-                    try:
-                        d = page.locator(dsel).last
-                        if d.count() and d.is_visible():
-                            pub = d.locator("text=Public").first
-                            if pub.count() and pub.is_visible():
-                                pub.click(force=True); page.wait_for_timeout(600)
-                            break
-                    except Exception: continue
-                page.wait_for_timeout(800)
-                # Wait for the Post button (aria-label="Post") to appear in the dialog
-                try:
-                    page.locator("[aria-label*='Post settings'] [aria-label='Post'], [role='dialog'] [aria-label='Post']").first.wait_for(state="visible", timeout=6000)
-                except Exception: pass
-                try:
-                    page.locator("[aria-label*='Post settings'] button:has-text('Post')").or_(page.locator("[role='dialog'] button:has-text('Post')")).first.wait_for(state="visible", timeout=3000)
-                except Exception: pass
-                page.wait_for_timeout(500)
-                # Find and click the Post button only inside the Post settings (audience) dialog
-                def _try_post_click() -> bool:
-                    dialog = None
-                    for dsel in ["[aria-label*='Post settings']", "[role='dialog']:has-text('Post settings')", "div[role='dialog']:has-text('Post audience')", "div[role='dialog']"]:
-                        try:
-                            loc = page.locator(dsel).last
-                            if loc.count() and loc.is_visible():
-                                dialog = loc
-                                break
-                        except Exception: continue
-                    if not dialog or not dialog.count() or not dialog.is_visible():
-                        return False
-                    # Strategy 1: aria-label="Post" (the blue Post button — div with role="button" and aria-label="Post")
-                    try:
-                        post_btn = dialog.locator('[aria-label="Post"]')
-                        if post_btn.count() and post_btn.first.is_visible():
-                            post_btn.first.click(force=True); return True
-                    except Exception: pass
-                    try:
-                        post_btn = page.locator('[role="dialog"] [aria-label="Post"], [aria-label*="Post settings"] [aria-label="Post"]')
-                        if post_btn.count() and post_btn.first.is_visible():
-                            post_btn.first.click(force=True); return True
-                    except Exception: pass
-                    # Strategy 2: Click the only blue button in the menu (Post). Save and others are gray.
-                    try:
-                        clicked = page.evaluate("""() => {
-                            function parseRgb(str) {
-                                const num = str.match(/[\\d.]+/g);
-                                if (num && num.length >= 3) return [+num[0], +num[1], +num[2]];
-                                if (str[0] === '#') {
-                                    let h = str.slice(1);
-                                    if (h.length === 3) h = h[0]+h[0]+h[1]+h[1]+h[2]+h[2];
-                                    const v = parseInt(h.slice(0,6), 16) || 0;
-                                    return [(v>>16)&255, (v>>8)&255, v&255];
-                                }
-                                return null;
+                except Exception: continue
+            if not dialog or not dialog.count() or not dialog.is_visible():
+                return False
+            try:
+                post_btn = dialog.locator('[aria-label="Post"]')
+                if post_btn.count() and post_btn.first.is_visible():
+                    post_btn.first.click(force=True); return True
+            except Exception: pass
+            try:
+                post_btn = page.locator('[role="dialog"] [aria-label="Post"], [aria-label*="Post settings"] [aria-label="Post"]')
+                if post_btn.count() and post_btn.first.is_visible():
+                    post_btn.first.click(force=True); return True
+            except Exception: pass
+            try:
+                clicked = page.evaluate("""() => {
+                    function parseRgb(str) {
+                        const num = str.match(/[\\d.]+/g);
+                        if (num && num.length >= 3) return [+num[0], +num[1], +num[2]];
+                        if (str[0] === '#') {
+                            let h = str.slice(1);
+                            if (h.length === 3) h = h[0]+h[0]+h[1]+h[1]+h[2]+h[2];
+                            const v = parseInt(h.slice(0,6), 16) || 0;
+                            return [(v>>16)&255, (v>>8)&255, v&255];
+                        }
+                        return null;
+                    }
+                    function isBlueBg(el) {
+                        const style = window.getComputedStyle(el);
+                        let bg = (style.backgroundColor || '').trim();
+                        if (!bg && el.children.length) {
+                            const child = el.querySelector('[style*="background"], span, div');
+                            if (child) bg = (window.getComputedStyle(child).backgroundColor || '').trim();
+                        }
+                        const rgb = parseRgb(bg);
+                        if (!rgb) return /#1877f2|#0866ff|#3578e5|#0d6efd/i.test(bg);
+                        const [r,g,bl] = rgb;
+                        return bl > 120 && bl >= r && bl >= g;
+                    }
+                    const dialogs = document.querySelectorAll('[role="dialog"], [aria-label*="Post settings"]');
+                    for (const d of dialogs) {
+                        const btns = d.querySelectorAll('button, [role="button"]');
+                        for (const b of btns) {
+                            if (!b.offsetParent || (b.textContent || '').trim() === 'Save') continue;
+                            if (isBlueBg(b)) { b.click(); return true; }
+                        }
+                    }
+                    return false;
+                }""")
+                if clicked: return True
+            except Exception: pass
+            try:
+                post_btn = dialog.get_by_role("button", name=re.compile(r"^Post$", re.I))
+                if post_btn.count():
+                    post_btn.first.wait_for(state="visible", timeout=2000)
+                    post_btn.first.click(force=True); return True
+            except Exception: pass
+            try:
+                buttons = dialog.locator("button")
+                n = buttons.count()
+                if n >= 2:
+                    right_btn = buttons.nth(n - 1)
+                    right_btn.wait_for(state="visible", timeout=2000)
+                    t = (right_btn.text_content() or "").strip()
+                    if t == "Post":
+                        right_btn.click(force=True); return True
+                    right_btn.click(force=True); return True
+                if n == 1:
+                    b = buttons.first
+                    if (b.text_content() or "").strip() == "Post":
+                        b.wait_for(state="visible", timeout=2000); b.click(force=True); return True
+            except Exception: pass
+            try:
+                post_btn = dialog.locator("button:has-text('Post')")
+                if post_btn.count():
+                    post_btn.first.wait_for(state="visible", timeout=2000)
+                    post_btn.first.click(force=True); return True
+            except Exception: pass
+            try:
+                for i in range(dialog.locator("button").count()):
+                    btn = dialog.locator("button").nth(i)
+                    if (btn.text_content() or "").strip() == "Post" and btn.is_visible():
+                        btn.click(force=True); return True
+            except Exception: pass
+            try:
+                box = dialog.bounding_box()
+                if box:
+                    x = box["x"] + box["width"] - 55
+                    y = box["y"] + box["height"] - 32
+                    page.mouse.click(x, y); return True
+            except Exception: pass
+            try:
+                clicked = page.evaluate("""() => {
+                    const dialogs = document.querySelectorAll('[role="dialog"], [aria-label*="Post settings"]');
+                    for (const d of dialogs) {
+                        const btns = d.querySelectorAll('button');
+                        for (const b of btns) {
+                            if ((b.textContent || '').trim() === 'Post') {
+                                b.click(); return true;
                             }
-                            function isBlueBg(el) {
-                                const style = window.getComputedStyle(el);
-                                let bg = (style.backgroundColor || '').trim();
-                                if (!bg && el.children.length) {
-                                    const child = el.querySelector('[style*="background"], span, div');
-                                    if (child) bg = (window.getComputedStyle(child).backgroundColor || '').trim();
-                                }
-                                const rgb = parseRgb(bg);
-                                if (!rgb) return /#1877f2|#0866ff|#3578e5|#0d6efd/i.test(bg);
-                                const [r,g,bl] = rgb;
-                                return bl > 120 && bl >= r && bl >= g;
-                            }
-                            const dialogs = document.querySelectorAll('[role="dialog"], [aria-label*="Post settings"]');
-                            for (const d of dialogs) {
-                                const btns = d.querySelectorAll('button, [role="button"]');
-                                for (const b of btns) {
-                                    if (!b.offsetParent || (b.textContent || '').trim() === 'Save') continue;
-                                    if (isBlueBg(b)) { b.click(); return true; }
-                                }
-                            }
-                            return false;
-                        }""")
-                        if clicked: return True
-                    except Exception: pass
-                    # Strategy 3: get_by_role(button, name=Post) scoped to dialog
-                    try:
-                        post_btn = dialog.get_by_role("button", name=re.compile(r"^Post$", re.I))
-                        if post_btn.count():
-                            post_btn.first.wait_for(state="visible", timeout=2000)
-                            post_btn.first.click(force=True); return True
-                    except Exception: pass
-                    # Strategy 4: Rightmost button in dialog footer (Save left, Post right)
-                    try:
-                        buttons = dialog.locator("button")
-                        n = buttons.count()
-                        if n >= 2:
-                            right_btn = buttons.nth(n - 1)
-                            right_btn.wait_for(state="visible", timeout=2000)
-                            t = (right_btn.text_content() or "").strip()
-                            if t == "Post":
-                                right_btn.click(force=True); return True
-                            right_btn.click(force=True); return True
-                        if n == 1:
-                            b = buttons.first
-                            if (b.text_content() or "").strip() == "Post":
-                                b.wait_for(state="visible", timeout=2000); b.click(force=True); return True
-                    except Exception: pass
-                    # Strategy 5: button:has-text('Post') in dialog, wait then click
-                    try:
-                        post_btn = dialog.locator("button:has-text('Post')")
-                        if post_btn.count():
-                            post_btn.first.wait_for(state="visible", timeout=2000)
-                            post_btn.first.click(force=True); return True
-                    except Exception: pass
-                    # Strategy 6: iterate buttons, click the one with text "Post"
-                    try:
-                        for i in range(dialog.locator("button").count()):
-                            btn = dialog.locator("button").nth(i)
-                            if (btn.text_content() or "").strip() == "Post" and btn.is_visible():
-                                btn.click(force=True); return True
-                    except Exception: pass
-                    # Strategy 7: click bottom-right of dialog (Post button position)
-                    try:
-                        box = dialog.bounding_box()
-                        if box:
-                            # Click center of where Post button usually is (right side, bottom)
-                            x = box["x"] + box["width"] - 55
-                            y = box["y"] + box["height"] - 32
-                            page.mouse.click(x, y); return True
-                    except Exception: pass
-                    # Strategy 8: JS click on button with text "Post" inside dialog
-                    try:
-                        clicked = page.evaluate("""() => {
-                            const dialogs = document.querySelectorAll('[role="dialog"], [aria-label*="Post settings"]');
-                            for (const d of dialogs) {
-                                const btns = d.querySelectorAll('button');
-                                for (const b of btns) {
-                                    if ((b.textContent || '').trim() === 'Post') {
-                                        b.click(); return true;
-                                    }
-                                }
-                            }
-                            return false;
-                        }""")
-                        if clicked: return True
-                    except Exception: pass
-                    return False
-                posted = False
-                for attempt in range(6):
-                    page.wait_for_timeout(600 if attempt else 400)
-                    if _try_post_click(): posted = True; break
-                if not posted: return False, "Typed post but couldn't click the Post button (tried multiple strategies)."
-                page.wait_for_timeout(2000)
-                _record_shared_song(song["url"])
-                return True, f'Shared to Facebook: "{song["title"]}"'
-        except Exception as e:
-            return False, f"Facebook error: {e}"
-        finally:
+                        }
+                    }
+                    return false;
+                }""")
+                if clicked: return True
+            except Exception: pass
+            return False
+
+        posted = False
+        for attempt in range(6):
+            page.wait_for_timeout(600 if attempt else 400)
+            if _try_post_click(): posted = True; break
+        if not posted: return False, "Typed post but couldn't click the Post button (tried multiple strategies)."
+        page.wait_for_timeout(2000)
+        _record_shared_song(song["url"])
+        return True, f'Shared to Facebook: "{song["title"]}"'
+    except Exception as e:
+        return False, f"Facebook error: {e}"
+    finally:
+        if not handed_off:
             if context:
                 try: context.close()
                 except Exception: pass
-    except ImportError:
-        return False, "Playwright not installed."
-    finally:
+            if pw:
+                try: pw.stop()
+                except Exception: pass
         try: _fb_lock.release()
         except Exception: pass
 
@@ -2392,10 +3715,24 @@ def _yt_comment(video_url: str) -> tuple[bool, str]:
         try: _yt_lock.release()
         except Exception: pass
 
+def _ig_is_blocked(page) -> bool:
+    """Detect if Instagram is showing a challenge, block, or suspicious-login page."""
+    try:
+        url_low = (page.url or "").lower()
+        content_low = (page.content() or "")[:3000].lower()
+        block_signals = [
+            "challenge" in url_low, "/accounts/suspended" in url_low,
+            "suspicious" in content_low, "we detected an unusual login" in content_low,
+            "confirm your identity" in content_low, "automated behavior" in content_low,
+            "try again later" in content_low and "something went wrong" in content_low,
+        ]
+        return any(block_signals)
+    except Exception:
+        return False
+
 def _run_ig_dm(target: str, message: str = "") -> tuple[bool, str]:
     target = re.sub(r"^@","", target.strip())
     if not re.fullmatch(r"[a-zA-Z0-9._]{2,30}", target): return False, "Invalid Instagram username."
-    # Optional: just open Instagram in your browser (no Playwright); you send the message and check replies yourself
     if OPEN_IG_IN_BROWSER_ONLY:
         url = f"{IG_BASE}/{target}/"
         try:
@@ -2407,7 +3744,11 @@ def _run_ig_dm(target: str, message: str = "") -> tuple[bool, str]:
     if not _ig_lock.acquire(blocking=False): return False, "Instagram DM already running."
     try:
         from playwright.sync_api import sync_playwright
-        dm_text = message.strip() or random.choice(["Hey, I really enjoy your content!", "Hi, great energy — keep it up!"])
+        raw_ig = (message or "").strip()
+        if raw_ig:
+            dm_text = _rephrase_dm(raw_ig, "Instagram", target) or raw_ig
+        else:
+            dm_text = _default_wa_msg()
         os.makedirs(IG_PROFILE_DIR, exist_ok=True)
         context = None
         try:
@@ -2424,131 +3765,144 @@ def _run_ig_dm(target: str, message: str = "") -> tuple[bool, str]:
                 if context is None:
                     return False, "Instagram browser failed to start. Close any Chrome window and try again."
                 page = context.pages[0] if context.pages else context.new_page()
-                # Open the user's profile page (not inbox)
-                profile_url = f"{IG_BASE}/{target}/"
-                page.goto(profile_url, wait_until="domcontentloaded", timeout=90000)
-                page.wait_for_timeout(2000)
+
+                # --- Primary approach: use /direct/new/ to search and DM ---
+                page.goto(f"{IG_BASE}/direct/new/", wait_until="domcontentloaded", timeout=90000)
+                page.wait_for_timeout(2500)
+
                 if "login" in page.url.lower() or "accounts/login" in page.url:
                     _bootstrap_window(IG_PROFILE_DIR, f"{IG_BASE}/", "_ig_boot")
                     return False, "Instagram needs login. Browser opened — log in and close, then try again."
+
+                if _ig_is_blocked(page):
+                    # Automation detected — fall back to opening real browser
+                    try: context.close()
+                    except Exception: pass
+                    try:
+                        webbrowser.open(f"{IG_BASE}/{target}/")
+                    except Exception:
+                        pass
+                    _record_recent_social("instagram", target, f"{IG_BASE}/{target}/")
+                    return True, (
+                        f"Instagram detected automation, so I opened @{target}'s profile in your real browser instead. "
+                        "Click **Message** on their profile to DM them. "
+                        "To avoid this, log into Instagram in the Luna browser window once."
+                    )
                 _mark_ready(IG_PROFILE_DIR)
 
-                def _try_click_ig_message_button():
-                    """Try several strategies to find and click the Message button on the profile."""
-                    strategies = [
-                        lambda: page.get_by_role("button", name="Message"),
-                        lambda: page.get_by_role("button", name=re.compile(r"Message", re.I)),
-                        lambda: page.locator('button:has-text("Message")').first,
-                        lambda: page.locator('[role="button"]:has-text("Message")').first,
-                        lambda: page.locator('a[href*="/direct/"]:has-text("Message")').first,
-                        lambda: page.locator('div[role="button"]:has-text("Message")').first,
-                        lambda: page.get_by_text("Message", exact=True),
-                        lambda: page.get_by_text(re.compile(r"^Message$", re.I)),
-                        lambda: page.locator('a:has-text("Message")').first,
-                        lambda: page.locator('[role="button"]:has-text("Message")').first,
-                    ]
-                    for get_loc in strategies:
-                        try:
-                            loc = get_loc()
-                            if loc.count() and loc.is_visible():
-                                loc.scroll_into_view_if_needed(timeout=3000)
-                                page.wait_for_timeout(300)
-                                loc.click(timeout=5000)
-                                return True
-                        except Exception:
-                            continue
-                    # Last resort: JS find any visible element with text "Message" that looks clickable
+                # Search for the target user in the "new message" dialog
+                search_box = None
+                for sel in [
+                    'input[placeholder*="Search"]', 'input[name="queryBox"]',
+                    'input[aria-label*="Search"]', 'input[type="text"]',
+                ]:
                     try:
-                        clicked = page.evaluate("""() => {
-                            const walk = (el) => {
-                                if (!el || el.children.length > 5) return false;
-                                if (el.innerText && el.innerText.trim() === 'Message' && el.offsetParent !== null) {
-                                    const r = el.getBoundingClientRect();
-                                    if (r.width > 20 && r.height > 10) { el.click(); return true; }
-                                }
-                                for (const c of el.children || []) { if (walk(c)) return true; }
-                                return false;
-                            };
-                            return walk(document.body);
-                        }""")
-                        if clicked:
-                            return True
+                        loc = page.locator(sel).first
+                        if loc.count() and loc.is_visible():
+                            search_box = loc
+                            break
                     except Exception:
-                        pass
-                    return False
+                        continue
 
-                def _try_find_ig_message_editor():
-                    """Try several strategies to find the DM popup message input (analyze the page)."""
-                    selectors = [
-                        'div[contenteditable="true"][aria-label="Message"]',
-                        'div[contenteditable="true"][aria-placeholder="Message..."]',
-                        '[placeholder="Message..."]',
-                        '[aria-placeholder="Message..."]',
-                        'div[role="textbox"][aria-placeholder="Message..."]',
-                        'div[contenteditable="true"][data-lexical-editor="true"]',
-                        'textarea[placeholder="Message..."]',
-                        'div[contenteditable="true"][role="textbox"]',
-                        'div[contenteditable="true"]',
-                    ]
-                    for sel in selectors:
-                        try:
-                            loc = page.locator(sel).first
-                            if loc.count() and loc.is_visible():
-                                loc.scroll_into_view_if_needed(timeout=2000)
-                                page.wait_for_timeout(200)
-                                return loc
-                        except Exception:
-                            continue
-                    try:
-                        editor = page.get_by_placeholder("Message...")
-                        if editor.count() and editor.is_visible():
-                            return editor.first
-                    except Exception:
-                        pass
-                    try:
-                        editor = page.get_by_placeholder("Message")
-                        if editor.count() and editor.is_visible():
-                            return editor.first
-                    except Exception:
-                        pass
-                    # Analyze page: try last contenteditable or textbox (often the visible chat input)
-                    for sel in ['div[contenteditable="true"]', '[role="textbox"]', 'div[data-lexical-editor="true"]']:
-                        try:
-                            loc = page.locator(sel).last
-                            if loc.count() and loc.is_visible():
-                                loc.scroll_into_view_if_needed(timeout=1500)
-                                return loc
-                        except Exception:
-                            continue
-                    return None
+                if search_box:
+                    search_box.click()
+                    page.wait_for_timeout(300)
+                    search_box.fill(target)
+                    page.wait_for_timeout(2000)
 
-                # Strategy 1: click Message button (try multiple ways)
-                clicked = _try_click_ig_message_button()
+                    # Click the matching user result
+                    user_clicked = False
+                    for sel in [
+                        f'span:has-text("{target}")', f'div:has-text("{target}")',
+                        '[role="listbox"] [role="option"]', '[role="dialog"] button',
+                    ]:
+                        try:
+                            results = page.locator(sel)
+                            for i in range(min(results.count(), 5)):
+                                r = results.nth(i)
+                                txt = (r.text_content() or "").lower()
+                                if target.lower() in txt and r.is_visible():
+                                    r.click(timeout=3000)
+                                    user_clicked = True
+                                    break
+                            if user_clicked:
+                                break
+                        except Exception:
+                            continue
+
+                    if user_clicked:
+                        page.wait_for_timeout(1500)
+                        # Click the "Chat" / "Next" button to open the conversation
+                        for sel in [
+                            'button:has-text("Chat")', 'button:has-text("Next")',
+                            'div[role="button"]:has-text("Chat")', 'div[role="button"]:has-text("Next")',
+                        ]:
+                            try:
+                                loc = page.locator(sel).first
+                                if loc.count() and loc.is_visible():
+                                    loc.click(timeout=3000)
+                                    break
+                            except Exception:
+                                continue
+                        page.wait_for_timeout(2000)
+
+                        # Find the message editor and type
+                        editor = _try_find_ig_message_editor(page)
+                        if editor:
+                            editor.click(force=True)
+                            page.wait_for_timeout(300)
+                            page.keyboard.type(dm_text, delay=20)
+                            page.wait_for_timeout(500)
+                            page.keyboard.press("Enter")
+                            page.wait_for_timeout(1000)
+                            _record_recent_social("instagram", target, f"{IG_BASE}/direct/inbox/")
+                            return True, f"Instagram DM sent to @{target}. Check the notification box to open Instagram and see replies."
+
+                # --- Fallback: profile page approach ---
+                profile_url = f"{IG_BASE}/{target}/"
+                page.goto(profile_url, wait_until="domcontentloaded", timeout=60000)
+                page.wait_for_timeout(2000)
+
+                if _ig_is_blocked(page):
+                    try: context.close()
+                    except Exception: pass
+                    try: webbrowser.open(profile_url)
+                    except Exception: pass
+                    _record_recent_social("instagram", target, profile_url)
+                    return True, (
+                        f"Instagram detected automation. Opened @{target}'s profile in your real browser. "
+                        "Click **Message** to DM them."
+                    )
+
+                clicked = _try_click_ig_message_button(page)
                 if not clicked:
-                    return False, "Could not find the **Message** button on the profile. Make sure you're on their profile page and try again."
+                    # Last resort: open in real browser
+                    try: webbrowser.open(profile_url)
+                    except Exception: pass
+                    _record_recent_social("instagram", target, profile_url)
+                    return True, (
+                        f"Could not find the Message button. Opened @{target}'s profile in your real browser — "
+                        "click **Message** yourself to DM them."
+                    )
 
-                # Strategy 2: wait and find message box; retry with more wait or re-click Message with different strategies
                 editor = None
                 page.wait_for_timeout(1800)
                 for attempt in range(4):
-                    editor = _try_find_ig_message_editor()
+                    editor = _try_find_ig_message_editor(page)
                     if editor:
                         break
-                    if attempt == 0:
-                        page.wait_for_timeout(2500)
-                    elif attempt == 1:
-                        page.wait_for_timeout(2000)
-                    elif attempt == 2:
-                        _try_click_ig_message_button()
-                        page.wait_for_timeout(2800)
-                    else:
-                        page.wait_for_timeout(2000)
+                    page.wait_for_timeout(2500 if attempt == 0 else 2000)
+                    if attempt == 2:
+                        _try_click_ig_message_button(page)
+                        page.wait_for_timeout(800)
                 if not editor:
-                    return False, (
-                        "I couldn't find the message box after trying several strategies. **To help:** "
-                        "click the **Message** button on @%s's profile yourself so the chat opens in the bottom-right, "
-                        "then say **try again** or run the same command again — I'll send the message without you having to press anything else."
-                    ) % target
+                    try: webbrowser.open(profile_url)
+                    except Exception: pass
+                    _record_recent_social("instagram", target, profile_url)
+                    return True, (
+                        f"Couldn't find the message input. Opened @{target}'s profile in your real browser — "
+                        "click **Message** yourself to DM them."
+                    )
                 editor.click(force=True)
                 page.wait_for_timeout(300)
                 page.keyboard.type(dm_text, delay=20)
@@ -2558,7 +3912,11 @@ def _run_ig_dm(target: str, message: str = "") -> tuple[bool, str]:
                 _record_recent_social("instagram", target, f"{IG_BASE}/direct/inbox/")
                 return True, f"Instagram DM sent to @{target}. Check the notification box to open Instagram and see replies."
         except Exception as e:
-            return False, f"Instagram error: {e}"
+            # On any failure, fall back to real browser
+            try: webbrowser.open(f"{IG_BASE}/{target}/")
+            except Exception: pass
+            _record_recent_social("instagram", target, f"{IG_BASE}/{target}/")
+            return True, f"Instagram automation failed ({e}). Opened @{target}'s profile in your browser — click **Message** to DM them."
         finally:
             if context:
                 try: context.close()
@@ -2568,6 +3926,84 @@ def _run_ig_dm(target: str, message: str = "") -> tuple[bool, str]:
     finally:
         try: _ig_lock.release()
         except Exception: pass
+
+def _try_click_ig_message_button(page):
+    """Try several strategies to find and click the Message button on the profile."""
+    strategies = [
+        lambda: page.get_by_role("button", name="Message"),
+        lambda: page.get_by_role("button", name=re.compile(r"Message", re.I)),
+        lambda: page.locator('button:has-text("Message")').first,
+        lambda: page.locator('[role="button"]:has-text("Message")').first,
+        lambda: page.locator('a[href*="/direct/"]:has-text("Message")').first,
+        lambda: page.locator('div[role="button"]:has-text("Message")').first,
+        lambda: page.get_by_text("Message", exact=True),
+        lambda: page.get_by_text(re.compile(r"^Message$", re.I)),
+    ]
+    for get_loc in strategies:
+        try:
+            loc = get_loc()
+            if loc.count() and loc.is_visible():
+                loc.scroll_into_view_if_needed(timeout=3000)
+                page.wait_for_timeout(300)
+                loc.click(timeout=5000)
+                return True
+        except Exception:
+            continue
+    try:
+        clicked = page.evaluate("""() => {
+            const walk = (el) => {
+                if (!el || el.children.length > 5) return false;
+                if (el.innerText && el.innerText.trim() === 'Message' && el.offsetParent !== null) {
+                    const r = el.getBoundingClientRect();
+                    if (r.width > 20 && r.height > 10) { el.click(); return true; }
+                }
+                for (const c of el.children || []) { if (walk(c)) return true; }
+                return false;
+            };
+            return walk(document.body);
+        }""")
+        if clicked:
+            return True
+    except Exception:
+        pass
+    return False
+
+def _try_find_ig_message_editor(page):
+    """Try several strategies to find the DM message input."""
+    selectors = [
+        'div[contenteditable="true"][aria-label="Message"]',
+        'div[contenteditable="true"][aria-placeholder="Message..."]',
+        '[placeholder="Message..."]', '[aria-placeholder="Message..."]',
+        'div[role="textbox"][aria-placeholder="Message..."]',
+        'div[contenteditable="true"][data-lexical-editor="true"]',
+        'textarea[placeholder="Message..."]',
+        'div[contenteditable="true"][role="textbox"]',
+    ]
+    for sel in selectors:
+        try:
+            loc = page.locator(sel).first
+            if loc.count() and loc.is_visible():
+                loc.scroll_into_view_if_needed(timeout=2000)
+                page.wait_for_timeout(200)
+                return loc
+        except Exception:
+            continue
+    for placeholder in ["Message...", "Message"]:
+        try:
+            editor = page.get_by_placeholder(placeholder)
+            if editor.count() and editor.is_visible():
+                return editor.first
+        except Exception:
+            pass
+    for sel in ['div[contenteditable="true"]', '[role="textbox"]']:
+        try:
+            loc = page.locator(sel).last
+            if loc.count() and loc.is_visible():
+                loc.scroll_into_view_if_needed(timeout=1500)
+                return loc
+        except Exception:
+            continue
+    return None
 
 def _default_wa_msg() -> str:
     h = time.localtime().tm_hour
@@ -2888,9 +4324,9 @@ def _wa_analyze_ready(page, max_wait_sec: float = 12) -> tuple[bool, str]:
 
 
 def _run_wa_msg(contact: str, description: str | None = None) -> tuple[bool, str]:
-    if description and description.strip():
-        msg_text = ollama_chat(description, system="Write one short friendly WhatsApp message inspired by this context. End with '- from Luna'. Just the message text.")
-        msg_text = (msg_text or "").strip() or _default_wa_msg()
+    raw_wa = (description or "").strip()
+    if raw_wa:
+        msg_text = _rephrase_dm(raw_wa, "WhatsApp", contact) or raw_wa
     else:
         msg_text = _default_wa_msg()
     with _wa_lock:
@@ -3074,125 +4510,33 @@ def _resolve_discord_username_by_id(user_id: int) -> str | None:
 
 
 def _run_discord_call(contact: str) -> tuple[bool, str]:
-    """
-    If contact is a Discord user ID (snowflake), resolve to username. Then open Discord (web app),
-    find the target user in DMs, and click 'Start Voice Call' so the linked user (Solonaras) connects.
-    For transcribe + TTS in VC, use !call from Discord so the bot joins the target's voice channel.
-    """
-    contact = (contact or "").strip()
-    if not contact:
-        return False, "Usage: !call <Discord username or user ID>"
-    # Resolve user ID to username for Playwright search
-    username = contact
-    if contact.isdigit() and len(contact) >= 17:
-        resolved = _resolve_discord_username_by_id(int(contact))
-        if resolved:
-            username = resolved
-    with _discord_web_lock:
-        try:
-            from playwright.sync_api import sync_playwright
-            if _discord_web_boot:
-                return False, "Discord login window is still open. Close it, then try **!call** again."
-            os.makedirs(DISCORD_WEB_PROFILE_DIR, exist_ok=True)
-            context = None
-            try:
-                with sync_playwright() as p:
-                    context = _launch_social_browser(DISCORD_WEB_PROFILE_DIR, p)
-                    page = context.pages[0] if context.pages else context.new_page()
-                    page.goto(DISCORD_APP_URL, wait_until="domcontentloaded", timeout=60000)
-                    page.wait_for_timeout(4000)
-                    # Check for login (redirect to login page)
-                    if "login" in page.url.lower():
-                        try: context.close()
-                        except Exception: pass
-                        context = None
-                        _bootstrap_window(DISCORD_WEB_PROFILE_DIR, DISCORD_APP_URL, "_discord_web_boot")
-                        return False, "Discord needs login. Browser opened — log in, then try **!call** again."
-                    # Find the user: search "Find or start a conversation" or click DM in list
-                    search_sel = page.get_by_placeholder("Find or start a conversation")
-                    if search_sel.count() > 0 and search_sel.first.is_visible():
-                        search_sel.first.click()
-                        page.wait_for_timeout(300)
-                        search_sel.first.fill("")
-                        search_sel.first.press_sequentially(username, delay=40)
-                        page.wait_for_timeout(2500)
-                    # Click the DM that contains this username (in the list or in search results)
-                    for _ in range(2):
-                        try:
-                            # Match by visible text (username in the DM list / search result)
-                            dm = page.get_by_text(username, exact=False).first
-                            if dm.count() > 0 and dm.is_visible():
-                                dm.scroll_into_view_if_needed(timeout=2000)
-                                page.wait_for_timeout(300)
-                                dm.click(timeout=3000)
-                                page.wait_for_timeout(2000)
-                                break
-                        except Exception:
-                            pass
-                        page.wait_for_timeout(500)
-                    # Find and click the call icon (top bar: phone icon next to video, pin, add friend)
-                    # Try: "Start Voice Call", then call/voice aria-labels, then "Open Voice" (right panel)
-                    call_clicked = False
-                    for _ in range(3):
-                        if call_clicked:
-                            break
-                        try:
-                            for selector, desc in [
-                                (page.get_by_role("button", name=re.compile(r"Start\s+Voice\s+Call", re.I)), "Start Voice Call"),
-                                (page.get_by_role("button", name=re.compile(r"Voice\s+Call|^Call$", re.I)), "Voice Call / Call"),
-                                (page.locator('button[aria-label*="Voice"], button[aria-label*="Call"]'), "aria-label Voice/Call"),
-                                (page.get_by_title(re.compile(r"Voice|Call", re.I)), "title Voice/Call"),
-                                (page.locator('button:has-text("Open Voice")'), "Open Voice"),
-                            ]:
-                                try:
-                                    btn = selector.first
-                                    if btn.count() > 0 and btn.is_visible():
-                                        btn.scroll_into_view_if_needed(timeout=2000)
-                                        page.wait_for_timeout(200)
-                                        btn.click(timeout=3000)
-                                        page.wait_for_timeout(1000)
-                                        call_clicked = True
-                                        break
-                                except Exception:
-                                    pass
-                            if call_clicked:
-                                try: context.close()
-                                except Exception: pass
-                                return True, f"Connecting you to **{username}** — voice call started."
-                        except Exception:
-                            pass
-                        page.wait_for_timeout(800)
-                    try: context.close()
-                    except Exception: pass
-                    return False, f"Opened Discord but couldn't find the **call icon** (top bar with video, pin) for **{username}**. Click the phone icon yourself, then try again."
-            except Exception as e:
-                if context:
-                    try: context.close()
-                    except Exception: pass
-                return False, f"Discord call error: {e}"
-        except ImportError:
-            return False, "Playwright not installed."
-    return False, "Discord call failed."
+    """Discord blocks automated calling. Redirect to !dm for messaging."""
+    return False, "Discord blocks automated calling. Use **!dm** to send a message instead."
 
 
-def _dm_message_from_input(user_input: str) -> str:
-    """Generate a short Discord DM in Luna's own words from the user's instructions (like YouTube comments: dynamic, generalized)."""
-    if not (user_input or user_input.strip()):
+def _rephrase_dm(user_input: str, platform: str = "social media", recipient: str = "") -> str:
+    """Use the LLM to rephrase user's instructions into a natural DM in Luna's own words."""
+    if not user_input or not user_input.strip():
         return ""
     brief = user_input.strip()[:800]
+    to_part = f" to {recipient}" if recipient else ""
     system = (
-        "You are Luna, a witty, friendly assistant. The user wants to send a Discord DM. "
-        "Below is what they want to get across (their instructions or topic). Write a single short DM (1-3 sentences) "
-        "that conveys this in your own words — natural, concise, and friendly. Add emojis if it fits. "
+        f"You are Luna, a witty, friendly assistant. The user wants to send a {platform} DM{to_part}. "
+        "Below is what they want to get across (their instructions or context). Write a single short message (1-3 sentences) "
+        "that conveys this in your own words — natural, concise, and friendly. Add emojis if it fits the tone. "
         "Output ONLY the message body to send; no quotes, no 'Message:' prefix, no preamble or explanation."
     )
     out = ollama_chat(
-        f"What the user wants to communicate:\n{brief}\n\nWrite the actual DM message to send:",
+        f"What the user wants to communicate:\n{brief}\n\nWrite the actual message to send:",
         system=system,
     )
     if not out or "Ollama" in out or out.startswith("Error:"):
         return ""
     return out.strip().strip('"\'')[:1500]
+
+def _dm_message_from_input(user_input: str) -> str:
+    """Backward-compatible wrapper for Discord DMs."""
+    return _rephrase_dm(user_input, "Discord")
 
 
 def _run_discord_dm(target: str, message: str) -> tuple[bool, str]:
@@ -3243,6 +4587,58 @@ def _run_discord_dm(target: str, message: str) -> tuple[bool, str]:
 _call_session: dict | None = None
 _call_session_lock = threading.Lock()
 
+
+async def _join_linked_user_vc_and_speak(text: str, disconnect_after: bool = True) -> bool:
+    """Join the linked user's voice channel and play TTS. Returns True if successful."""
+    if not _linked_int:
+        return False
+    target_channel = None
+    for g in bot.guilds:
+        m = g.get_member(_linked_int)
+        if m and m.voice and m.voice.channel:
+            target_channel = m.voice.channel
+            break
+    if not target_channel:
+        return False
+    vc = target_channel.guild.voice_client
+    need_connect = not vc or not vc.is_connected() or vc.channel != target_channel
+    if need_connect:
+        try:
+            if vc and vc.is_connected():
+                await vc.move_to(target_channel)
+            else:
+                await target_channel.connect()
+        except Exception:
+            return False
+        vc = target_channel.guild.voice_client
+    if not vc or not vc.is_connected():
+        return False
+    tts_text = _clean_for_tts(text)
+    if not tts_text.strip():
+        return True
+    mp3 = await asyncio.to_thread(_tts_bytes, tts_text[:400])
+    if not mp3:
+        return True
+    fd, path = tempfile.mkstemp(suffix=".mp3")
+    try:
+        os.write(fd, mp3)
+        os.close(fd)
+        fd = None
+        source = discord.FFmpegPCMAudio(path, options=_FFMPEG_OPTS)
+        vc.play(source, after=lambda e: None)
+        while vc.is_playing() and vc.is_connected():
+            await asyncio.sleep(0.2)
+        if disconnect_after and vc.is_connected():
+            await vc.disconnect()
+    except Exception:
+        pass
+    finally:
+        if fd is not None:
+            try: os.close(fd)
+            except Exception: pass
+        try: os.unlink(path)
+        except Exception: pass
+    return True
 
 def _play_tts_in_vc_sync(vc, text: str) -> None:
     """Generate TTS and play in Discord VC (run on bot loop from sync)."""
@@ -3440,178 +4836,314 @@ def _run_wa_call(contact: str) -> tuple[bool, str]:
     ok, msg = _run_wa_msg(contact)
     return ok, msg + " (Voice call requires WhatsApp Desktop on Windows)"
 
+def _fb_needs_pin(page) -> bool:
+    """Detect if Facebook is showing a PIN, verification code, or identity challenge.
+    Facebook typically shows these as a popup/dialog overlay, not a page redirect."""
+    try:
+        url_low = (page.url or "").lower()
+        if "checkpoint" in url_low or "two_step_verification" in url_low:
+            return True
+
+        # Check visible dialog/popup text (Facebook uses role="dialog" overlays)
+        pin_keywords = [
+            "enter the code", "enter the login code", "enter your code",
+            "verification code", "confirm your identity", "we sent a code",
+            "two-factor", "approve your login", "security code", "pin code",
+            "enter the 6-digit", "enter the 8-digit", "login code",
+            "check your notifications", "we noticed a login",
+            "enter the number", "code we sent", "code to continue",
+            "review recent login", "approve this login",
+        ]
+        # Check dialogs / popups first (most common for PIN)
+        for sel in ['[role="dialog"]', '[aria-modal="true"]', '.overlay', '[data-testid="dialog"]']:
+            try:
+                dialogs = page.locator(sel)
+                for i in range(min(dialogs.count(), 3)):
+                    d = dialogs.nth(i)
+                    if d.is_visible():
+                        text = (d.inner_text() or "").lower()[:1000]
+                        if any(kw in text for kw in pin_keywords):
+                            return True
+            except Exception:
+                continue
+
+        # Also check for visible numeric input fields (PIN entry boxes)
+        try:
+            pin_inputs = page.locator('input[type="number"], input[type="tel"], input[inputmode="numeric"]')
+            for i in range(min(pin_inputs.count(), 5)):
+                inp = pin_inputs.nth(i)
+                if inp.is_visible():
+                    parent_text = ""
+                    try:
+                        parent_text = (inp.locator("xpath=ancestor::div[position()<=5]").last.inner_text() or "").lower()[:500]
+                    except Exception:
+                        pass
+                    if any(kw in parent_text for kw in pin_keywords):
+                        return True
+        except Exception:
+            pass
+
+        # Fallback: full page content scan
+        content = (page.content() or "")[:8000].lower()
+        if any(kw in content for kw in pin_keywords):
+            return True
+
+        return False
+    except Exception:
+        return False
+
+def _keep_browser_until_closed(pw, context):
+    """Hold Playwright + browser alive in a background thread until the user closes all tabs."""
+    def _hold():
+        try:
+            while context.pages and any(not pg.is_closed() for pg in context.pages):
+                time.sleep(1)
+        except Exception:
+            pass
+        finally:
+            try: context.close()
+            except Exception: pass
+            try: pw.stop()
+            except Exception: pass
+    threading.Thread(target=_hold, daemon=True).start()
+
 def _run_messenger_msg(username: str, message: str = "") -> tuple[bool, str]:
-    """Use same login as Share to Facebook (FB_PROFILE_DIR). Flow: open Facebook with Playwright → go to user profile → press Message → find Messenger popup on the RIGHT side of the browser → find the text box with placeholder 'Aa' → type message → press Enter to send."""
-    msg_text = message.strip() or _default_wa_msg()
-    target = re.sub(r"[^a-zA-Z0-9._\-]", "", username.replace(" ", ".").strip()).lower()
-    if not target:
-        return False, "Invalid Messenger recipient."
+    """Send a Messenger message by searching for the user in facebook.com/messages/new.
+    Accepts display names, usernames, or any searchable identifier — Facebook search finds them."""
+    search_name = username.strip()
+    if not search_name or len(search_name) < 2:
+        return False, "Invalid Messenger recipient — provide a name or username."
+    raw_msg = (message or "").strip()
+    if raw_msg:
+        msg_text = _rephrase_dm(raw_msg, "Facebook Messenger", search_name) or raw_msg
+    else:
+        msg_text = _default_wa_msg()
     if not _fb_lock.acquire(blocking=False):
         return False, "Facebook/Messenger already in use (share or another message). Try again shortly."
+    pw = None
+    context = None
+    handed_off = False
     try:
         from playwright.sync_api import sync_playwright
         os.makedirs(FB_PROFILE_DIR, exist_ok=True)
-        context = None
-        try:
-            with sync_playwright() as p:
-                for attempt in range(2):
-                    try:
-                        context = _launch_social_browser(FB_PROFILE_DIR, p)
+        pw = sync_playwright().start()
+        for attempt in range(2):
+            try:
+                context = _launch_social_browser(FB_PROFILE_DIR, pw)
+                break
+            except Exception as launch_err:
+                if attempt == 0 and "closed" in str(launch_err).lower():
+                    time.sleep(2)
+                    continue
+                return False, f"Browser failed. Close any Facebook window and try again. {launch_err}"
+        if not context:
+            return False, "Browser failed to start."
+        page = context.pages[0] if context.pages else context.new_page()
+
+        page.goto(f"https://www.facebook.com/search/people/?q={search_name}", wait_until="domcontentloaded", timeout=60000)
+        page.wait_for_timeout(3000)
+
+        if "login" in page.url.lower() or "facebook.com/login" in page.url:
+            _clear_ready(FB_PROFILE_DIR)
+            handed_off = True
+            _keep_browser_until_closed(pw, context)
+            return False, "Facebook needs login. I left the browser open — log in, then **close the browser** and try again."
+
+        if _fb_needs_pin(page):
+            handed_off = True
+            _keep_browser_until_closed(pw, context)
+            return False, (
+                "Facebook is asking for a **PIN or verification code**. "
+                "I left the browser open — enter the code, then **close the browser** and try again."
+            )
+        _mark_ready(FB_PROFILE_DIR)
+
+        profile_link = None
+        for sel in [
+            'a[role="presentation"][href*="facebook.com/"]',
+            'a[href*="facebook.com/"]:has(span)',
+            '[role="article"] a[href*="facebook.com/"]',
+            'div[role="feed"] a[href*="/"]',
+        ]:
+            try:
+                links = page.locator(sel)
+                for i in range(min(links.count(), 8)):
+                    lnk = links.nth(i)
+                    href = (lnk.get_attribute("href") or "")
+                    if lnk.is_visible() and "/search/" not in href and "/policies" not in href:
+                        profile_link = lnk
                         break
-                    except Exception as launch_err:
-                        if attempt == 0 and "closed" in str(launch_err).lower():
-                            time.sleep(2)
-                            continue
-                        try: _fb_lock.release()
-                        except Exception: pass
-                        return False, f"Browser failed. Close any Facebook window and try again. {launch_err}"
-                if not context:
-                    try: _fb_lock.release()
-                    except Exception: pass
-                    return False, "Browser failed to start."
-                page = context.pages[0] if context.pages else context.new_page()
-                page.goto(f"{FACEBOOK_HOME.rstrip('/')}/{target}", wait_until="domcontentloaded", timeout=60000)
-                page.wait_for_timeout(2500)
-                if "login" in page.url.lower() or "facebook.com/login" in page.url:
-                    _clear_ready(FB_PROFILE_DIR)
-                    _bootstrap_window(FB_PROFILE_DIR, FACEBOOK_HOME, "_fb_boot")
-                    try: context.close()
-                    except Exception: pass
-                    try: _fb_lock.release()
-                    except Exception: pass
-                    return False, "Facebook needs login. Browser opened — log in and close, then try again."
-                _mark_ready(FB_PROFILE_DIR)
+                if profile_link:
+                    break
+            except Exception:
+                continue
 
-                def _try_click_fb_message_button():
-                    for sel in [
-                        'span:has-text("Message")',
-                        'a[href*="/messages/t/"]',
-                        '[aria-label="Message"]',
-                        'div[role="button"]:has-text("Message")',
-                        'div[aria-label="Message"]',
-                    ]:
-                        try:
-                            loc = page.locator(sel).first
-                            if loc.count() and loc.is_visible():
-                                loc.scroll_into_view_if_needed(timeout=3000)
-                                page.wait_for_timeout(300)
-                                loc.click(timeout=5000)
-                                return True
-                        except Exception:
-                            continue
+        if not profile_link:
+            return False, f"Could not find **{search_name}** on Facebook. Make sure the name matches their profile."
+
+        profile_link.click(timeout=5000)
+        page.wait_for_load_state("domcontentloaded", timeout=30000)
+        page.wait_for_timeout(5000)
+
+        msg_clicked = False
+        for attempt in range(4):
+            # Method 1: Playwright get_by_role with exact name
+            if not msg_clicked:
+                try:
+                    btn = page.get_by_role("button", name="Message", exact=True)
+                    if btn.count() and btn.first.is_visible():
+                        btn.first.click(timeout=5000)
+                        msg_clicked = True
+                except Exception:
+                    pass
+
+            # Method 2: aria-label
+            if not msg_clicked:
+                for sel in ['[aria-label="Message"]', '[aria-label="Message "]']:
                     try:
-                        btn = page.get_by_role("button", name="Message")
-                        if btn.count() and btn.first.is_visible():
-                            btn.first.click(timeout=5000)
-                            return True
+                        loc = page.locator(sel).first
+                        if loc.count() and loc.is_visible():
+                            loc.click(timeout=5000)
+                            msg_clicked = True
+                            break
                     except Exception:
-                        pass
-                    return False
+                        continue
 
-                def _find_fb_message_editor():
-                    # Messenger popup is on the RIGHT side of the browser; the text box has placeholder "Aa"
-                    vw = (page.viewport_size or {}).get("width", 1000)
-                    right_half = vw * 0.4  # insist on right-side (Messenger panel)
-                    # First: look for the "Aa" placeholder box (Messenger compose field)
-                    for sel in [
-                        '[data-placeholder="Aa"]',
-                        '[aria-placeholder="Aa"]',
-                        '[data-placeholder*="Aa"]',
-                        '[placeholder*="Aa"]',
-                        'div[contenteditable="true"][data-placeholder="Aa"]',
-                        'div[contenteditable="true"][aria-placeholder="Aa"]',
-                    ]:
-                        try:
-                            loc = page.locator(sel).first
-                            if loc.count() and loc.is_visible():
-                                loc.scroll_into_view_if_needed(timeout=2000)
-                                box = loc.bounding_box()
-                                if box and box.get("x", 0) >= right_half:
-                                    return loc
-                        except Exception:
-                            continue
-                    # Fallback: contenteditable in the right half (Messenger panel)
-                    for sel in [
-                        'div[contenteditable="true"][data-lexical-editor="true"]',
-                        'div[role="textbox"][contenteditable="true"]',
-                        'div[contenteditable="true"]',
-                    ]:
-                        try:
-                            loc = page.locator(sel).first
-                            if loc.count() and loc.is_visible():
-                                loc.scroll_into_view_if_needed(timeout=2000)
-                                box = loc.bounding_box()
-                                if box and box.get("x", 0) >= right_half:
-                                    return loc
-                        except Exception:
-                            continue
-                    try:
-                        locs = page.locator('div[contenteditable="true"]')
-                        for i in range(min(locs.count(), 12)):
-                            loc = locs.nth(i)
-                            if loc.is_visible():
-                                box = loc.bounding_box()
-                                if box and box.get("x", 0) >= right_half:
-                                    return loc
-                    except Exception:
-                        pass
-                    return None
+            # Method 3: link to messages
+            if not msg_clicked:
+                try:
+                    loc = page.locator('a[href*="/messages/t/"]').first
+                    if loc.count() and loc.is_visible():
+                        loc.click(timeout=5000)
+                        msg_clicked = True
+                except Exception:
+                    pass
 
-                if not _try_click_fb_message_button():
-                    try: context.close()
-                    except Exception: pass
-                    try: _fb_lock.release()
-                    except Exception: pass
-                    return False, f"Could not find the **Message** button for {username}. Make sure you're on their profile."
+            # Method 4: JS — find the visible span with exact text "Message" and click its closest button/link ancestor
+            if not msg_clicked:
+                try:
+                    msg_clicked = page.evaluate("""() => {
+                        const spans = document.querySelectorAll('span');
+                        for (const s of spans) {
+                            if (s.textContent.trim() !== 'Message') continue;
+                            if (!s.offsetParent) continue;
+                            const rect = s.getBoundingClientRect();
+                            if (rect.width === 0 || rect.height === 0) continue;
+                            let el = s;
+                            while (el) {
+                                const role = el.getAttribute && el.getAttribute('role');
+                                const tag = el.tagName && el.tagName.toLowerCase();
+                                if (role === 'button' || role === 'link' || tag === 'a' || tag === 'button') {
+                                    el.click();
+                                    return true;
+                                }
+                                el = el.parentElement;
+                            }
+                            s.click();
+                            return true;
+                        }
+                        return false;
+                    }""")
+                except Exception:
+                    msg_clicked = False
 
-                editor = None
-                page.wait_for_timeout(2000)
-                for attempt in range(4):
-                    editor = _find_fb_message_editor()
-                    if editor:
-                        break
-                    if attempt == 0:
-                        page.wait_for_timeout(2500)
-                    elif attempt == 1:
-                        page.wait_for_timeout(2000)
-                    elif attempt == 2:
-                        _try_click_fb_message_button()
-                        page.wait_for_timeout(2800)
-                    else:
-                        page.wait_for_timeout(2000)
-                if not editor:
-                    try: context.close()
-                    except Exception: pass
-                    try: _fb_lock.release()
-                    except Exception: pass
-                    return False, (
-                        "I couldn't find the message box after trying several strategies. **To help:** "
-                        "click the **Message** button on their profile yourself so the chat opens, "
-                        "then say **try again** or run the same command — I'll send the message."
-                    )
-                editor.click(force=True)
-                page.wait_for_timeout(400)
-                page.keyboard.press("Control+A")
-                page.keyboard.press("Backspace")
-                page.wait_for_timeout(200)
-                page.keyboard.type(msg_text, delay=25)
-                page.wait_for_timeout(500)
-                page.keyboard.press("Enter")
-                page.wait_for_timeout(1000)
-                _record_recent_social("facebook", target, f"{FACEBOOK_HOME.rstrip('/')}/{target}")
-                return True, f'Messenger: sent to **{username}**: "{msg_text[:50]}{"…" if len(msg_text) > 50 else ""}"'
-        except Exception as e:
-            return False, f"Messenger error: {e}"
-        finally:
+            if msg_clicked:
+                break
+            page.wait_for_timeout(3000)
+
+        if not msg_clicked:
+            return False, f"Found **{search_name}**'s profile but couldn't find the Message button."
+
+        page.wait_for_timeout(5000)
+
+        editor = None
+        for _ed_try in range(5):
+            editor = _find_fb_message_editor(page)
+            if editor:
+                break
+            page.wait_for_timeout(2500)
+        if not editor:
+            return False, "Opened the chat but couldn't find the Aa message box. Try sending manually."
+
+        editor.click(force=True)
+        page.wait_for_timeout(500)
+        page.wait_for_timeout(200)
+        page.keyboard.type(msg_text, delay=25)
+        page.wait_for_timeout(500)
+        page.keyboard.press("Enter")
+        page.wait_for_timeout(4000)
+
+        target_slug = re.sub(r"[^a-zA-Z0-9._\-]", "", search_name.replace(" ", ".").lower())
+        _record_recent_social("facebook", search_name, f"{FACEBOOK_HOME.rstrip('/')}/{target_slug}")
+        return True, f'Messenger: sent to **{search_name}**: "{msg_text[:50]}{"…" if len(msg_text) > 50 else ""}"'
+    except Exception as e:
+        return False, f"Messenger error: {e}"
+    finally:
+        if not handed_off:
             if context:
                 try: context.close()
                 except Exception: pass
-            try: _fb_lock.release()
-            except Exception: pass
-    except ImportError:
+            if pw:
+                try: pw.stop()
+                except Exception: pass
         try: _fb_lock.release()
         except Exception: pass
-        return False, "Playwright not installed."
+
+def _find_fb_message_editor(page):
+    """Find the Messenger chat popup's 'Aa' input. Rejects comment boxes and post composers."""
+    try:
+        handle = page.evaluate_handle("""() => {
+            const dominated = ['comment', 'write a comment', 'write a public comment',
+                               'write something', 'reply', 'write an answer'];
+
+            function isCommentBox(el) {
+                const label = (el.getAttribute('aria-label') || '').toLowerCase();
+                const ph = (el.getAttribute('data-placeholder') || el.getAttribute('placeholder') || '').toLowerCase();
+                for (const bad of dominated) {
+                    if (label.includes(bad) || ph.includes(bad)) return true;
+                }
+                return false;
+            }
+
+            // Priority 1: element with placeholder="Aa" (the Messenger signature)
+            for (const el of document.querySelectorAll('[data-placeholder="Aa"], [aria-placeholder="Aa"], p[data-placeholder="Aa"]')) {
+                if (!el.offsetParent) continue;
+                if (isCommentBox(el)) continue;
+                const target = el.closest('[contenteditable="true"]') || el;
+                if (target.offsetParent) return target;
+            }
+
+            // Priority 2: contenteditable with aria-label="Message"
+            for (const el of document.querySelectorAll('[contenteditable="true"]')) {
+                if (!el.offsetParent) continue;
+                const label = (el.getAttribute('aria-label') || '').trim();
+                if (label === 'Message' || label === 'Message ') return el;
+            }
+
+            // Priority 3: contenteditable inside a Messenger-style chat popup
+            // (bottom-of-page fixed container, not a post/comment area)
+            for (const el of document.querySelectorAll('[contenteditable="true"]')) {
+                if (!el.offsetParent || isCommentBox(el)) continue;
+                const rect = el.getBoundingClientRect();
+                // Messenger popups sit near the bottom of the viewport
+                if (rect.bottom > window.innerHeight - 150 && rect.height < 200) {
+                    const ph = el.getAttribute('data-placeholder') || el.getAttribute('aria-placeholder') || '';
+                    const label = el.getAttribute('aria-label') || '';
+                    // Must NOT look like a post composer or comment
+                    if (!dominated.some(b => label.toLowerCase().includes(b)))
+                        return el;
+                }
+            }
+
+            return null;
+        }""")
+        if handle:
+            el = handle.as_element()
+            if el:
+                return el
+    except Exception:
+        pass
+    return None
 
 # ── PC vitals, Luna vitals, website analysis ───────────────────────────────────
 
@@ -3681,7 +5213,7 @@ _camera_chat_history: list[dict] = []  # [{role, content}, ...] separate thread 
 _camera_chat_lock = threading.Lock()
 _camera_lock = threading.Lock()
 
-def _vision_describe_image(image_bytes: bytes, prompt: str = "Describe briefly what you see in this image. One or two sentences. Be concise.") -> str:
+def _vision_describe_image(image_bytes: bytes, prompt: str = "Describe briefly what you see in this image. One or two sentences. Be concise. Only describe what is actually visible. Do not invent or hallucinate.") -> str:
     """Call Ollama vision model (e.g. Granite 3.2 Vision) with the image. Returns description or empty if unavailable."""
     if not OLLAMA_VISION_MODEL or not image_bytes:
         return ""
@@ -3720,7 +5252,7 @@ def _camera_chat_turn(message: str, image_bytes: bytes | None) -> tuple[bool, st
     with _camera_chat_lock:
         _camera_chat_history.append({"role": "user", "content": message})
         history = list(_camera_chat_history[-20:])  # last 10 turns
-    lines = ["You are a helpful vision assistant. The user is showing you a camera image and chatting about what you see. Answer briefly based on the image and the conversation.", ""]
+    lines = ["You are a helpful vision assistant. Describe ONLY what is actually visible in the camera image. Be factual and concise. Never invent scenes, personas, or inappropriate content. Answer briefly.", ""]
     for h in history[:-1]:
         who = "User" if h["role"] == "user" else "Assistant"
         lines.append(f"{who}: {h['content']}")
@@ -3937,6 +5469,74 @@ def _run_cmd_impl(cmd: str, p: dict, scope: str | None, user_message: str) -> st
         return f"✅ {msg}" if ok else f"❌ {msg}"
     if cmd in ("join","leave","pause","resume","queue"):
         return f"Use !{cmd} in Discord."
+    if cmd == "joinme":
+        text = (p.get("message") or p.get("query") or "Hey, Luna here! I'm in your voice channel.").strip()
+        try:
+            future = asyncio.run_coroutine_threadsafe(_join_linked_user_vc_and_speak(text, disconnect_after=False), bot.loop)
+            ok = future.result(timeout=15)
+        except Exception:
+            ok = False
+        return "✅ Joined your voice channel and said it." if ok else "❌ Join a Discord voice channel first, then try **!joinme**."
+    if cmd == "summarize":
+        ok, msg = _summarize_input((p.get("input") or p.get("query") or "").strip())
+        if not ok:
+            _record_failure("summarize", msg, p)
+            return f"❌ {msg}"
+        return f"✅ {msg}"
+    if cmd == "digest":
+        use_scope = scope or LINKED_SCOPE or "web"
+        return _daily_digest(use_scope)
+    if cmd == "todo":
+        use_scope = scope or LINKED_SCOPE or "web"
+        action = (p.get("action") or "list").strip().lower()
+        if action in ("add", "new"):
+            return _todo_add(use_scope, (p.get("text") or p.get("task") or "").strip())
+        if action in ("done", "complete", "finish"):
+            return _todo_done(use_scope, (p.get("text") or p.get("id") or "").strip())
+        return _todo_list_text(use_scope)
+    if cmd == "calendar":
+        use_scope = scope or LINKED_SCOPE or "web"
+        action = (p.get("action") or "list").strip().lower()
+        if action in ("list", "upcoming"):
+            return _calendar_list(use_scope, mode="upcoming")
+        if action == "today":
+            return _calendar_list(use_scope, mode="today")
+        if action == "week":
+            return _calendar_list(use_scope, mode="week")
+        if action in ("delete", "remove"):
+            ok, msg = _calendar_delete(use_scope, (p.get("text") or p.get("id") or "").strip())
+            return f"✅ {msg}" if ok else f"❌ {msg}"
+        if action in ("add", "new"):
+            ok, msg = _calendar_add(
+                use_scope,
+                (p.get("date") or "").strip(),
+                (p.get("time") or "").strip(),
+                (p.get("title") or p.get("text") or "").strip(),
+                (p.get("note") or "").strip(),
+            )
+            return f"✅ {msg}" if ok else f"❌ {msg}"
+        return "Usage: !calendar add YYYY-MM-DD HH:MM title | !calendar list | !calendar today | !calendar week | !calendar delete <n>"
+    if cmd == "research":
+        ok, msg = _research_content((p.get("topic") or p.get("query") or p.get("input") or "").strip())
+        if not ok:
+            _record_failure("research", msg, p)
+            return f"❌ {msg}"
+        return f"✅ {msg}"
+    if cmd == "research_story":
+        ok, msg = _research_story_script((p.get("topic") or p.get("query") or p.get("input") or "").strip())
+        if not ok:
+            _record_failure("research_story", msg, p)
+            return f"❌ {msg}"
+        return f"✅ {msg}"
+    if cmd == "audiobook":
+        action = (p.get("action") or "create").strip().lower()
+        if action != "create":
+            return "Usage: !audiobook create <topic>"
+        ok, msg = _create_audiobook_from_research((p.get("topic") or p.get("query") or p.get("input") or "").strip())
+        if not ok:
+            _record_failure("audiobook", msg, p)
+            return f"❌ {msg}"
+        return f"✅ {msg}"
     # Absorbed tools (user-approved drafts)
     if cmd in _absorbed_tool_names:
         ok, result = _run_absorbed_tool(cmd, p)
@@ -3945,41 +5545,45 @@ def _run_cmd_impl(cmd: str, p: dict, scope: str | None, user_message: str) -> st
     return ""
 
 def _recycle_luna_creations_leftovers() -> None:
-    """Move non-absorbed creations to Recycled/ so only secure, useful absorbed tools remain in use. Keeps manifest and absorbed copies."""
+    """Prune Luna's creations so the folder stays small.
+
+    Runtime only uses scripts in data/absorbed_tools/, so here we:
+    - Keep WHAT_LUNA_CREATED.txt (audit trail)
+    - Delete all .py scripts in Luna's creations/ and Luna's creations/agents/
+    - Optionally remove any old Recycled/ folder if present
+    """
     try:
         if not os.path.isdir(LUNA_CREATIONS_DIR):
             return
-        recycled_dir = os.path.join(LUNA_CREATIONS_DIR, "Recycled")
-        os.makedirs(recycled_dir, exist_ok=True)
-        absorbed = set(_absorbed_tool_names) if _absorbed_tool_names else set()
         manifest_name = _LUNA_CREATIONS_MANIFEST
-        moved = 0
-        # Root: keep manifest and any <name>.py where name is absorbed; move the rest to Recycled/
+        # Delete any loose .py files (copies of absorbed tools or ad‑hoc creations)
         for name in os.listdir(LUNA_CREATIONS_DIR):
-            if name == manifest_name or name == "Recycled":
-                continue
             path = os.path.join(LUNA_CREATIONS_DIR, name)
+            if name == manifest_name:
+                continue
             if os.path.isfile(path) and name.endswith(".py"):
-                stem = name[:-3]
-                if stem not in absorbed:
-                    dest = os.path.join(recycled_dir, name)
-                    if os.path.isfile(dest):
-                        os.remove(dest)
-                    shutil.move(path, dest)
-                    moved += 1
+                try:
+                    os.remove(path)
+                except Exception:
+                    pass
             elif os.path.isdir(path) and name == "agents":
-                # agents/: move all .py files to Recycled/agents/ (create-code scripts; none are absorbed by script name)
-                agents_recycled = os.path.join(recycled_dir, "agents")
-                os.makedirs(agents_recycled, exist_ok=True)
+                # agents/: delete all .py files (create-code scripts)
                 for sub in os.listdir(path):
-                    if sub.endswith(".py"):
-                        src = os.path.join(path, sub)
-                        if os.path.isfile(src):
-                            dst = os.path.join(agents_recycled, sub)
-                            if os.path.isfile(dst):
-                                os.remove(dst)
-                            shutil.move(src, dst)
-                            moved += 1
+                    if not sub.endswith(".py"):
+                        continue
+                    src = os.path.join(path, sub)
+                    if os.path.isfile(src):
+                        try:
+                            os.remove(src)
+                        except Exception:
+                            pass
+        # Remove any old Recycled/ folder entirely (no more archive folder)
+        recycled_dir = os.path.join(LUNA_CREATIONS_DIR, "Recycled")
+        if os.path.isdir(recycled_dir):
+            try:
+                shutil.rmtree(recycled_dir)
+            except Exception:
+                pass
     except Exception:
         pass
 
@@ -4068,6 +5672,47 @@ def _parse_command(text: str) -> tuple[str, dict] | None:
     for pfx in ("search for ","search ","google ","look up ","find "):
         if low.startswith(pfx):
             return "search", {"query": raw[len(pfx):].strip()}
+    for pfx in ("research ","research on ","research about "):
+        if low.startswith(pfx):
+            return "research", {"topic": raw[len(pfx):].strip()}
+    for pfx in ("research_story ","research story ","story_script ","story script "):
+        if low.startswith(pfx):
+            return "research_story", {"topic": raw[len(pfx):].strip()}
+    for pfx in ("audiobook create ","audiobook "):
+        if low.startswith(pfx):
+            rest = raw[len(pfx):].strip()
+            return "audiobook", {"action": "create", "topic": rest}
+    # Summarize
+    for pfx in ("summarize ","summary of ","summarise "):
+        if low.startswith(pfx):
+            return "summarize", {"input": raw[len(pfx):].strip()}
+    if low in ("digest", "daily digest", "today digest"):
+        return "digest", {}
+    # Todo
+    if low.startswith("todo "):
+        rest = raw[5:].strip()
+        if rest.lower().startswith("add "):
+            return "todo", {"action": "add", "text": rest[4:].strip()}
+        if rest.lower().startswith("done "):
+            return "todo", {"action": "done", "text": rest[5:].strip()}
+        return "todo", {"action": "list"}
+    # Calendar
+    if low.startswith("calendar "):
+        rest = raw[9:].strip()
+        rlow = rest.lower()
+        if rlow in ("list", "upcoming", ""):
+            return "calendar", {"action": "list"}
+        if rlow in ("today",):
+            return "calendar", {"action": "today"}
+        if rlow in ("week", "this week"):
+            return "calendar", {"action": "week"}
+        if rlow.startswith("delete "):
+            return "calendar", {"action": "delete", "text": rest[7:].strip()}
+        # add YYYY-MM-DD HH:MM title...
+        m = re.match(r"^(?:add\s+)?(\d{4}-\d{2}-\d{2})\s+(\d{1,2}:\d{2})\s+(.+)$", rest, re.I)
+        if m:
+            return "calendar", {"action": "add", "date": m.group(1), "time": m.group(2), "title": m.group(3).strip()}
+        return "calendar", {"action": "list"}
     # WhatsApp msg — explicit "msg contact [message]" (contact can be full number with spaces, e.g. +357 99 447267)
     if low.startswith("msg "):
         rest = raw[len("msg "):].strip()
@@ -4077,6 +5722,11 @@ def _parse_command(text: str) -> tuple[str, dict] | None:
     # Natural: "send a message to X" / "message X saying Y"
     m = re.match(r"^(?:send\s+a?\s*message\s+to|message)\s+(.+?)(?:\s+saying\s+(.+))?$", low)
     if m: return "msg", {"contact": m.group(1).strip(), "description": (m.group(2) or "").strip() or None}
+    # Join VC and speak — "join me", "join my vc", "luna join"
+    if re.search(r"\b(?:join\s+me|join\s+my\s+vc|luna\s+join)\b", low):
+        m = re.search(r"(?:join\s+me|join\s+my\s+vc|luna\s+join)\s*[,:]?\s*(.+)", low)
+        msg = (m.group(1).strip() if m and m.group(1) else "") or ""
+        return "joinme", {"message": msg}
     # WhatsApp call
     m = re.match(r"^call\s+(.+)$", low)
     if m: return "call", {"contact": m.group(1).strip()}
@@ -4096,17 +5746,27 @@ def _parse_command(text: str) -> tuple[str, dict] | None:
     if m: return "dm", {"target": m.group(1).strip().lstrip("@"), "message": "about " + m.group(2).strip()}
     m = re.match(r"^inform\s+(.+?)\s+(?:about|that)\s+(.+)$", low)
     if m: return "dm", {"target": m.group(1).strip().lstrip("@"), "message": "about " + m.group(2).strip()}
-    # Messenger — explicit "fb_msg name message..." (no !) or natural "messenger/facebook message"
+    # Messenger — explicit "fb_msg name message..." (no !) or natural "messenger/facebook message to <name>"
     if low.startswith("fb_msg "):
         rest = raw[len("fb_msg "):].strip()
+        # Support "fb_msg John Smith hey how are you" — name before the message
+        # Try splitting at common message indicators
+        msg_split = re.split(r'\s+(?:say|saying|message|msg|tell|:)\s+', rest, maxsplit=1, flags=re.I)
+        if len(msg_split) == 2:
+            return "fb_msg", {"target": msg_split[0].strip(), "message": msg_split[1].strip()}
+        # Fallback: first word(s) as target, rest as message
         parts = rest.split(None, 1)
         if parts:
             target = parts[0].strip()
             msg = (parts[1].strip() if len(parts) > 1 else "") or ""
-            if len(target) >= 2 and re.match(r"^[a-zA-Z0-9._\-]+$", target):
-                return "fb_msg", {"target": target, "message": msg}
-    m = re.search(r"\b(?:messenger|facebook message)\b.*?@?([a-z0-9._\-]{2,50})", low)
-    if m: return "fb_msg", {"target": m.group(1), "message": ""}
+            return "fb_msg", {"target": target, "message": msg}
+    # Natural: "messenger John Smith", "facebook message to John Smith", "send message on messenger to John"
+    m = re.search(r"\b(?:messenger|facebook message)\b(?:\s+to)?\s+(.+?)(?:\s+(?:say|saying|message|:)\s+(.+))?$", raw, re.I)
+    if m:
+        target = m.group(1).strip().lstrip("@")
+        msg = (m.group(2) or "").strip()
+        if len(target) >= 2:
+            return "fb_msg", {"target": target, "message": msg}
     # Remind
     m = re.search(r"\bremind me at\s+(\S+)\s+to\s+(.+)", raw, re.I | re.S)
     if m: return "remind", {"time": m.group(1), "message": m.group(2).strip()}
@@ -4146,22 +5806,14 @@ def _parse_command(text: str) -> tuple[str, dict] | None:
     if re.search(r"\b(?:ask me|ask me something|luna ask me)\b", low): return "ask_me", {}
     # Help
     if re.search(r"\b(?:help|commands|what can you do)\b", low): return "help", {}
-    # ML / machine learning — pass through to absorbed tool ml
-    if re.search(r"\b(?:ml|machine learning|deep learning)\b", low):
-        action = "info"
-        if re.search(r"\b(?:list|show)\s+models?\b", low): action = "list"
-        elif re.search(r"\b(?:train|fit)\b", low): action = "train"
-        elif re.search(r"\b(?:predict|inference)\b", low): action = "predict"
-        if "ml" in _absorbed_tool_names:
-            return "ml", {"action": action, "query": action}
     return None
 
 def _likely_command(text: str) -> bool:
     low = (text or "").strip().lower()
     if not low: return False
     if _CONV_START.match(low): return False
-    starters = ("play ","podcast ","podcast create ","create podcast ","search ","send ","create ","call ","dm ","tell ","inform ","msg ","share ","post ","remind ","suno ","yt_comment ","comment ","ig_dm ","fb_msg ","google ","news","!help","how's ","pc status","luna status","ram ","what do you see","what can you see","ask me ")
-    return any(low.startswith(s) for s in starters) or low in ("play","news","help","skip","stop","ask me") or "luna status" in low or "pc status" in low or bool(re.search(r"\b(what do you see|what can you see|do you see me|describe what you see)\b", low))
+    starters = ("play ","podcast ","podcast create ","create podcast ","audiobook ","audiobook create ","search ","research ","research_story ","research story ","story_script ","story script ","send ","create ","call ","dm ","tell ","inform ","msg ","share ","post ","remind ","suno ","yt_comment ","comment ","ig_dm ","fb_msg ","google ","news","!help","how's ","pc status","luna status","ram ","what do you see","what can you see","ask me ","summarize ","summary of ","todo ","calendar ","join me ","join my ","luna join ")
+    return any(low.startswith(s) for s in starters) or low in ("play","news","help","skip","stop","ask me","digest","daily digest","todo","todo list","calendar","calendar list","calendar today","calendar week") or "luna status" in low or "pc status" in low or bool(re.search(r"\b(what do you see|what can you see|do you see me|describe what you see)\b", low))
 
 def _is_retry(msg: str) -> bool:
     low = (msg or "").strip().lower()
@@ -5392,6 +7044,53 @@ def api_action_log():
     except Exception: pass
     return jsonify({"entries": entries})
 
+@web.route("/api/calendar", methods=["GET"])
+def api_calendar_list():
+    scope = LINKED_SCOPE or "web"
+    mode = (request.args.get("mode") or "upcoming").strip().lower()
+    if mode not in ("upcoming", "today", "week"):
+        mode = "upcoming"
+    items = _calendar_get(scope)
+    if mode == "today":
+        pfx = datetime.now().strftime("%Y-%m-%d")
+        items = [e for e in items if (e.get("at") or "").startswith(pfx)]
+    elif mode == "week":
+        now = datetime.now()
+        end = now + timedelta(days=7)
+        filt = []
+        for e in items:
+            try:
+                dt = datetime.strptime(e.get("at", ""), "%Y-%m-%d %H:%M")
+                if now <= dt <= end:
+                    filt.append(e)
+            except Exception:
+                pass
+        items = filt
+    return jsonify({"events": items[:60]})
+
+@web.route("/api/calendar", methods=["POST"])
+def api_calendar_add():
+    scope = LINKED_SCOPE or "web"
+    data = request.get_json(force=True, silent=True) or {}
+    date_s = (data.get("date") or "").strip()
+    time_s = (data.get("time") or "").strip()
+    title = (data.get("title") or "").strip()
+    note = (data.get("note") or "").strip()
+    ok, msg = _calendar_add(scope, date_s, time_s, title, note)
+    if not ok:
+        return jsonify({"error": msg}), 400
+    return jsonify({"ok": True, "message": msg})
+
+@web.route("/api/calendar/delete", methods=["POST"])
+def api_calendar_delete():
+    scope = LINKED_SCOPE or "web"
+    data = request.get_json(force=True, silent=True) or {}
+    token = (str(data.get("id") or data.get("index") or data.get("text") or "")).strip()
+    ok, msg = _calendar_delete(scope, token)
+    if not ok:
+        return jsonify({"error": msg}), 400
+    return jsonify({"ok": True, "message": msg})
+
 @web.route("/api/knowledge", methods=["GET"])
 def api_knowledge_list():
     """List knowledge base entries."""
@@ -5598,6 +7297,161 @@ def api_facebook_check_replies():
         return jsonify({"ok": False, "has_new": False, "error": preview, "from": ""})
     return jsonify({"ok": True, "has_new": has_new, "from": from_user, "preview": (preview or "")[:300]})
 
+# ── Health dashboard API ──────────────────────────────────────────────────────
+
+@web.route("/health")
+@web.route("/health/")
+def serve_health():
+    return send_from_directory(_BASE, "health.html")
+
+@web.route("/api/health")
+def api_health():
+    """Detailed health data for the health dashboard."""
+    result = {"ts": time.time()}
+    # System info
+    try:
+        import psutil
+        cpu = psutil.cpu_percent(interval=0.3)
+        mem = psutil.virtual_memory()
+        disks = []
+        for part in psutil.disk_partitions():
+            if "fixed" in part.opts or (sys.platform == "win32" and "cdrom" not in (part.opts or "").lower()):
+                try:
+                    usage = psutil.disk_usage(part.mountpoint)
+                    disks.append({"mount": part.mountpoint, "pct": round(usage.percent, 1)})
+                except Exception: pass
+        result["system"] = {
+            "cpu_pct": round(cpu, 1), "ram_pct": round(mem.percent, 1),
+            "ram_used_gb": round(mem.used / (1024**3), 2), "ram_total_gb": round(mem.total / (1024**3), 2),
+            "disks": disks[:4]
+        }
+        proc = psutil.Process(os.getpid())
+        result["luna_mem_mb"] = round(proc.memory_info().rss / (1024**2), 1)
+    except Exception:
+        result["system"] = {}
+        result["luna_mem_mb"] = 0
+    # Ollama
+    ollama_ok = False
+    latency = None
+    try:
+        t0 = time.time()
+        req = urllib.request.Request(f"{OLLAMA_BASE}/api/tags", method="GET")
+        with urllib.request.urlopen(req, timeout=5) as r:
+            ollama_ok = r.status == 200
+        latency = round((time.time() - t0) * 1000)
+    except Exception: pass
+    result["ollama_ok"] = ollama_ok
+    result["ollama_latency_ms"] = latency
+    result["chat_model"] = OLLAMA_CHAT
+    result["shadow_model"] = OLLAMA_MODEL
+    # Luna stats
+    uptime_sec = time.time() - _luna_start_time
+    hrs, rem = divmod(int(uptime_sec), 3600)
+    mins = rem // 60
+    result["uptime"] = f"{hrs}h {mins}m"
+    result["conversation_count"] = len(get_recent_conversation(LINKED_SCOPE or "web", 999) or [])
+    result["knowledge_count"] = len(list_knowledge())
+    result["absorbed_tools"] = len(_absorbed_tool_names)
+    with _clipboard_lock:
+        result["clipboard_count"] = len(_clipboard_history)
+    # Action stats
+    actions_today = 0
+    ok_count = fail_count = 0
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    last_error = None
+    with _action_log_lock:
+        if os.path.isfile(_ACTION_LOG):
+            try:
+                with open(_ACTION_LOG, "r", encoding="utf-8") as f:
+                    for line in f:
+                        try:
+                            e = json.loads(line.strip())
+                            ts_str = (e.get("ts") or "")[:10]
+                            if ts_str == today_str:
+                                actions_today += 1
+                            r = (e.get("reply") or "").lower()
+                            if "error" in r or "failed" in r or "❌" in r:
+                                fail_count += 1
+                                last_error = (e.get("reply") or "")[:80]
+                            else:
+                                ok_count += 1
+                        except Exception: pass
+            except Exception: pass
+    result["actions_today"] = actions_today
+    total = ok_count + fail_count
+    result["action_success_rate"] = round(ok_count / total * 100) if total > 0 else None
+    result["last_error"] = last_error
+    # Recent actions
+    recent_actions = []
+    with _action_log_lock:
+        if os.path.isfile(_ACTION_LOG):
+            try:
+                with open(_ACTION_LOG, "r", encoding="utf-8") as f:
+                    lines = f.readlines()
+                for line in lines[-10:]:
+                    try: recent_actions.append(json.loads(line.strip()))
+                    except Exception: pass
+            except Exception: pass
+    result["recent_actions"] = recent_actions
+    return jsonify(result)
+
+# ── Chat history search API ──────────────────────────────────────────────────
+
+@web.route("/api/chat-history")
+def api_chat_history():
+    """Search conversation history. ?q=search_term&n=max_results"""
+    query = (request.args.get("q") or "").strip().lower()
+    n = min(50, max(5, int(request.args.get("n", 20))))
+    scope = LINKED_SCOPE or "web"
+    all_history = get_recent_conversation(scope, 999) or []
+    if not query:
+        return jsonify({"results": all_history[-n:]})
+    matches = []
+    for h in all_history:
+        content = (h.get("content") or "").strip()
+        if query in content.lower():
+            matches.append(h)
+        if len(matches) >= n:
+            break
+    return jsonify({"results": matches, "total": len(matches), "query": query})
+
+# ── Morning briefing API ─────────────────────────────────────────────────────
+
+@web.route("/api/briefing")
+def api_briefing():
+    """Generate and return morning briefing."""
+    briefing = _generate_morning_briefing()
+    _mark_briefing_shown()
+    return jsonify({"briefing": briefing})
+
+# ── Screenshot API ───────────────────────────────────────────────────────────
+
+@web.route("/api/screenshot")
+def api_screenshot():
+    """Capture and describe screen."""
+    desc = _describe_screenshot()
+    return jsonify({"description": desc or "No screenshot available."})
+
+# ── Manifest + SW for PWA ────────────────────────────────────────────────────
+
+@web.route("/manifest.json")
+def serve_manifest():
+    return send_from_directory(_BASE, "manifest.json", mimetype="application/manifest+json")
+
+@web.route("/sw.js")
+def serve_sw():
+    return send_from_directory(_BASE, "sw.js", mimetype="application/javascript")
+
+@web.route("/icon-192.png")
+def serve_icon_192():
+    return send_from_directory(_BASE, "icon-192.png", mimetype="image/png")
+
+@web.route("/icon-512.png")
+def serve_icon_512():
+    return send_from_directory(_BASE, "icon-512.png", mimetype="image/png")
+
+# ── Main chat endpoint ───────────────────────────────────────────────────────
+
 @web.route("/api/chat", methods=["POST"])
 def api_chat():
     global _last_user_activity
@@ -5661,11 +7515,31 @@ def api_chat():
                 append_exchange(scope, msg, reply); _play_reply_tts(reply)
                 return jsonify({"reply": reply})
 
-    # Luna chat (capabilities + nudges + biology so she describes her real features)
-    system = _build_luna_chat_system(scope)
+    # Detect user corrections and learn from them
     history = _compact_history(get_recent_conversation(scope, 30))
+    if history:
+        prev_luna = next((h["content"] for h in reversed(history) if h.get("role") == "assistant"), "")
+        correction = _detect_correction(msg, prev_luna)
+        if correction:
+            _store_correction(correction)
+
+    # RAG: inject relevant knowledge based on the user's message
+    system = _build_luna_chat_system(scope)
+    rag_results = _search_knowledge_semantic(msg, top_k=3)
+    if rag_results:
+        rag_text = "\n".join(f"- {r['title']}: {r.get('snippet', '')[:150]}" for r in rag_results)
+        system = system + "\n\n## Relevant knowledge\n" + rag_text[:1000]
+
+    # Morning briefing (proactive, once per morning)
+    briefing_reply = None
+    if _should_show_briefing():
+        briefing_reply = _generate_morning_briefing()
+        _mark_briefing_shown()
+
     reply = ollama_chat(msg, system=system, scope=scope, history=history, model=OLLAMA_CHAT)
     if not reply or reply.startswith("Ollama offline"): reply = COMMAND_ONLY
+    if briefing_reply:
+        reply = briefing_reply + "\n\n---\n\n" + reply
     append_exchange(scope, msg, reply)
     _capture_memory(scope, msg)
     _capture_profile(scope, msg)
@@ -5679,14 +7553,25 @@ def api_stream():
     msg = (data.get("message") or "").strip()
     if not msg: return jsonify({"error": "No message"}), 400
     scope = LINKED_SCOPE or "web"
-    system = _build_luna_chat_system(scope)
     history = _compact_history(get_recent_conversation(scope, 30))
+    # Correction detection (same as api_chat)
+    if history:
+        prev_luna = next((h["content"] for h in reversed(history) if h.get("role") == "assistant"), "")
+        correction = _detect_correction(msg, prev_luna)
+        if correction:
+            _store_correction(correction)
+    # RAG: inject relevant knowledge
+    system = _build_luna_chat_system(scope)
+    rag_results = _search_knowledge_semantic(msg, top_k=3)
+    if rag_results:
+        rag_text = "\n".join(f"- {r['title']}: {r.get('snippet', '')[:150]}" for r in rag_results)
+        system = system + "\n\n## Relevant knowledge\n" + rag_text[:1000]
     def _gen():
         full = []
         for chunk in ollama_stream(msg, system=system, scope=scope, history=history):
             full.append(chunk)
             yield f"data: {json.dumps({'chunk': chunk}, ensure_ascii=False)}\n\n"
-        reply = "".join(full).strip()
+        reply = _sanitize_luna_reply("".join(full).strip())
         append_exchange(scope, msg, reply)
         _capture_memory(scope, msg)
         _capture_profile(scope, msg)
@@ -5782,6 +7667,57 @@ def _handle_bang(msg: str, scope: str) -> str:
     if cmd == "!search":
         if not args: return "Usage: !search <query>"
         ok, r = _search(args); return f"✅ {r}" if ok else f"❌ {r}"
+    if cmd == "!research":
+        if not args: return "Usage: !research <topic>"
+        ok, r = _research_content(args)
+        return f"✅ {r}" if ok else f"❌ {r}"
+    if cmd in ("!research_story", "!story_script"):
+        if not args: return "Usage: !research_story <topic>"
+        ok, r = _research_story_script(args)
+        return f"✅ {r}" if ok else f"❌ {r}"
+    if cmd == "!audiobook":
+        if not args.lower().startswith("create "):
+            return "Usage: !audiobook create <topic>"
+        topic = args[7:].strip()
+        if not topic:
+            return "Usage: !audiobook create <topic>"
+        ok, r = _create_audiobook_from_research(topic)
+        return f"✅ {r}" if ok else f"❌ {r}"
+    if cmd == "!summarize":
+        ok, r = _summarize_input(args)
+        return f"✅ {r}" if ok else f"❌ {r}"
+    if cmd == "!digest":
+        return _daily_digest(scope or LINKED_SCOPE or "web")
+    if cmd == "!calendar":
+        use_scope = scope or LINKED_SCOPE or "web"
+        if not args:
+            return _calendar_list(use_scope, mode="upcoming")
+        low_args = args.lower().strip()
+        if low_args in ("list", "upcoming"):
+            return _calendar_list(use_scope, mode="upcoming")
+        if low_args == "today":
+            return _calendar_list(use_scope, mode="today")
+        if low_args in ("week", "this week"):
+            return _calendar_list(use_scope, mode="week")
+        if low_args.startswith("delete "):
+            ok, msg = _calendar_delete(use_scope, args[7:].strip())
+            return f"✅ {msg}" if ok else f"❌ {msg}"
+        m = re.match(r"^(?:add\s+)?(\d{4}-\d{2}-\d{2})\s+(\d{1,2}:\d{2})\s+(.+)$", args, re.I)
+        if m:
+            ok, msg = _calendar_add(use_scope, m.group(1), m.group(2), m.group(3).strip())
+            return f"✅ {msg}" if ok else f"❌ {msg}"
+        return "Usage: !calendar add YYYY-MM-DD HH:MM title | !calendar list | !calendar today | !calendar week | !calendar delete <n>"
+    if cmd == "!todo":
+        if not args:
+            return _todo_list_text(scope or LINKED_SCOPE or "web")
+        low_args = args.lower().strip()
+        if low_args.startswith("add "):
+            return _todo_add(scope or LINKED_SCOPE or "web", args[4:].strip())
+        if low_args.startswith("done "):
+            return _todo_done(scope or LINKED_SCOPE or "web", args[5:].strip())
+        if low_args in ("list", "ls"):
+            return _todo_list_text(scope or LINKED_SCOPE or "web")
+        return "Usage: !todo add <task> | !todo list | !todo done <number>"
     if cmd in ("!suno_ready", "!suno_logged_in"):
         return f"✅ {_mark_suno_logged_in()}"
     if cmd == "!suno":
@@ -5814,10 +7750,15 @@ def _handle_bang(msg: str, scope: str) -> str:
         if not ok: _record_failure("ig_dm", r, {"target": ps[0], "message": ps[1] if len(ps) > 1 else ""})
         return f"✅ {r}" if ok else f"❌ {r}"
     if cmd in ("!fb_msg","!messenger"):
-        if not args: return "Usage: !fb_msg <name> [message]"
-        ps = args.split(None, 1)
-        ok, r = _run_messenger_msg(ps[0], ps[1] if len(ps) > 1 else "")
-        if not ok: _record_failure("fb_msg", r, {"target": ps[0]})
+        if not args: return "Usage: !fb_msg <name> [: message] or !fb_msg <name> say <message>"
+        # Split target from message at ": " or " say " or " msg "
+        split_m = re.split(r'\s*:\s+|\s+(?:say|msg|message)\s+', args, maxsplit=1, flags=re.I)
+        if len(split_m) == 2:
+            target, msg = split_m[0].strip(), split_m[1].strip()
+        else:
+            target, msg = args.strip(), ""
+        ok, r = _run_messenger_msg(target, msg)
+        if not ok: _record_failure("fb_msg", r, {"target": target})
         return f"✅ {r}" if ok else f"❌ {r}"
     if cmd == "!call":
         if not args: return "Usage: !call <Discord username or user ID>"
@@ -5858,6 +7799,13 @@ def _handle_bang(msg: str, scope: str) -> str:
     if cmd == "!stop":
         reply = _run_cmd("stop", {}, scope)
         return reply if reply else "❌ Stop failed."
+    if cmd == "!briefing":
+        return _generate_morning_briefing()
+    if cmd == "!screenshot":
+        return _describe_screenshot()
+    if cmd == "!joinme":
+        reply = _run_cmd("joinme", {"message": args}, scope)
+        return reply if reply else "❌ Join a Discord voice channel first."
     if cmd.startswith("!") and len(cmd) > 1:
         bare = cmd[1:].split()[0] if cmd[1:] else ""
         if bare in _absorbed_tool_names:
@@ -5877,9 +7825,16 @@ async def on_ready():
     print(f"Luna online: {bot.user} — {OLLAMA_BASE} / {OLLAMA_MODEL}")
     await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.listening, name=OLLAMA_CHAT))
     bot.loop.create_task(_reminder_loop())
+    bot.loop.create_task(_calendar_notification_loop())
+    bot.loop.create_task(_pc_context_observer_loop())
+    bot.loop.create_task(_ml_learning_loop())
     bot.loop.create_task(_proactive_heartbeat_loop())
     bot.loop.create_task(_reflection_loop())
     bot.loop.create_task(_evolution_loop())
+    bot.loop.create_task(_screenshot_observer_loop())
+    bot.loop.create_task(_clipboard_monitor_loop())
+    bot.loop.create_task(_knowledge_embedding_loop())
+    bot.loop.create_task(_wake_word_loop())
 
 @bot.event
 async def on_message(message: discord.Message):
@@ -6234,11 +8189,26 @@ async def cmd_ig(ctx, *, args: str = ""):
 @bot.command(name="fb_msg", aliases=["messenger","fbmsg"])
 async def cmd_msg_fb(ctx, *, args: str = ""):
     if not _is_privileged(ctx.author.id): await ctx.reply("Linked user/admin only."); return
-    if not args: await ctx.reply("Usage: !fb_msg <name> [message]"); return
-    ps = args.split(None, 1)
-    ok, r = await asyncio.to_thread(_run_messenger_msg, ps[0], ps[1] if len(ps)>1 else "")
-    if not ok: _record_failure("fb_msg", r, {"target": ps[0]})
+    if not args: await ctx.reply("Usage: !fb_msg <name> [: message] or !fb_msg <name> say <message>"); return
+    split_m = re.split(r'\s*:\s+|\s+(?:say|msg|message)\s+', args, maxsplit=1, flags=re.I)
+    if len(split_m) == 2:
+        target, msg = split_m[0].strip(), split_m[1].strip()
+    else:
+        target, msg = args.strip(), ""
+    ok, r = await asyncio.to_thread(_run_messenger_msg, target, msg)
+    if not ok: _record_failure("fb_msg", r, {"target": target})
     await ctx.reply(f"{'✅' if ok else '❌'} {r}")
+
+@bot.command(name="joinme", aliases=["join_vc", "luna_join"])
+async def cmd_joinme(ctx, *, message: str = ""):
+    """Join the linked user's voice channel and inform them with TTS."""
+    if not _is_privileged(ctx.author.id): await ctx.reply("Linked user/admin only."); return
+    text = (message or "Hey, Luna here! I'm in your voice channel.").strip()
+    ok = await _join_linked_user_vc_and_speak(text, disconnect_after=False)
+    if ok:
+        await ctx.reply(f"✅ Joined your voice channel and said it.")
+    else:
+        await ctx.reply("❌ Join a voice channel first, then try **!joinme**.")
 
 @bot.command(name="call")
 async def cmd_call(ctx, *, contact: str = ""):
@@ -6474,6 +8444,7 @@ def _warmup():
     except Exception: pass
 
 def main():
+    _configure_social()
     threading.Thread(target=_warmup, daemon=True).start()
     threading.Thread(target=lambda: web.run(host="127.0.0.1", port=5050, use_reloader=False, threaded=True), daemon=True).start()
     threading.Thread(target=lambda: (time.sleep(2), webbrowser.open("http://127.0.0.1:5050")), daemon=True).start()

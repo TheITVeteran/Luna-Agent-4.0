@@ -1,0 +1,5 @@
+{
+  "name": "dict_keys_case_all_except_last",
+  "description": "Cases all keys except last in a dictionary",
+  "script": "import json, sys\nparams = json.load(sys.stdin)\n\ndef case_keys_except_last(d):\n    result = {}\n    for k, v in d.items():\n        if k != next(iter(d)):\n            result[k] = v\n    return result\n\nif __name__ == \"__main__\":\n    result = dict_case_all_except_first(case_keys_except_last(params))\n    print(result)"
+}

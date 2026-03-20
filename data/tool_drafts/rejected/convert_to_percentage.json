@@ -1,0 +1,5 @@
+{
+  "name": "convert_to_percentage",
+  "description": "Convert a numeric value to percentage format",
+  "script": "import json, sys\nparams = json.load(sys.stdin)\nresult = params.get('value', 0) * 100 if params['unit'] == '%' else str(int(params.get('value', 0))) + ' %'\nprint(result)"
+}

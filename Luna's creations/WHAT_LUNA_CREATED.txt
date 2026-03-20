@@ -21,3 +21,251 @@
 2026-03-16 23:51 | evolved        | dict_key_case.py | Convert dictionary keys to lowercase while keeping values unchanged
 2026-03-17 00:01 | absorbed tool  | to_lowercase_dict_items.py | convert dict items' values to lowercase
 2026-03-17 00:01 | evolved        | to_lowercase_dict_items.py | convert dict items' values to lowercase
+2026-03-17 00:33 | absorbed tool  | json_sort_keys.py | Sorts keys of a JSON object in lexicographical order
+2026-03-17 00:33 | evolved        | json_sort_keys.py | Sorts keys of a JSON object in lexicographical order
+2026-03-17 00:48 | absorbed tool  | lowercase_dict_values.py | Convert dictionary values to lowercase
+2026-03-17 00:48 | evolved        | lowercase_dict_values.py | Convert dictionary values to lowercase
+2026-03-17 00:58 | absorbed tool  | dict_key_case_2.py | Changes keys in a dictionary to a specific case (lowercase/uppercase)
+2026-03-17 00:58 | evolved        | dict_key_case_2.py | Changes keys in a dictionary to a specific case (lowercase/uppercase)
+2026-03-17 01:08 | absorbed tool  | dict_key_case_from_values.py | Convert a dictionary's keys to lowercase based on case of corresponding values
+2026-03-17 01:08 | evolved        | dict_key_case_from_values.py | Convert a dictionary's keys to lowercase based on case of corresponding values
+2026-03-17 01:18 | absorbed tool  | to_lowercase_list_items.py | convert list items to lowercase in a JSON array element
+2026-03-17 01:18 | evolved        | to_lowercase_list_items.py | convert list items to lowercase in a JSON array element
+2026-03-17 01:28 | absorbed tool  | dict_values_lowercase.py | Convert all dictionary values to lowercase
+2026-03-17 01:28 | evolved        | dict_values_lowercase.py | Convert all dictionary values to lowercase
+2026-03-17 01:38 | absorbed tool  | to_lowercase_words_only.py | converts words in a JSON object to lowercase while keeping other values unchanged
+2026-03-17 01:38 | evolved        | to_lowercase_words_only.py | converts words in a JSON object to lowercase while keeping other values unchanged
+2026-03-17 01:48 | absorbed tool  | to_dict_case.py | Convert JSON key-value pairs to a dictionary with camel case keys
+2026-03-17 01:48 | evolved        | to_dict_case.py | Convert JSON key-value pairs to a dictionary with camel case keys
+2026-03-17 01:58 | absorbed tool  | sort_dict_keys_alphabetically.py | Sorts dictionary keys alphabetically in descending order
+2026-03-17 01:58 | evolved        | sort_dict_keys_alphabetically.py | Sorts dictionary keys alphabetically in descending order
+2026-03-17 02:09 | absorbed tool  | json_indent.py | Prints JSON with proper indentation
+2026-03-17 02:09 | evolved        | json_indent.py | Prints JSON with proper indentation
+2026-03-17 02:29 | absorbed tool  | dict_key_case_all.py | Convert all keys in a dictionary to lowercase
+2026-03-17 02:29 | evolved        | dict_key_case_all.py | Convert all keys in a dictionary to lowercase
+2026-03-17 02:39 | absorbed tool  | dict_key_case_ignore.py | Convert JSON keys to lowercase while ignoring case-insensitive matches
+2026-03-17 02:39 | evolved        | dict_key_case_ignore.py | Convert JSON keys to lowercase while ignoring case-insensitive matches
+2026-03-17 02:59 | absorbed tool  | to_lowercase_dict_items_only.py | prints the lowercase values of dictionary items without keys
+2026-03-17 02:59 | evolved        | to_lowercase_dict_items_only.py | prints the lowercase values of dictionary items without keys
+2026-03-17 03:09 | absorbed tool  | dict_key_case_list.py | Print keys in a list case
+2026-03-17 03:09 | evolved        | dict_key_case_list.py | Print keys in a list case
+2026-03-17 03:19 | absorbed tool  | dict_key_case_all_except_first.py | Convert keys in a dictionary to all caps except for the first one, which remains unchanged
+2026-03-17 03:19 | evolved        | dict_key_case_all_except_first.py | Convert keys in a dictionary to all caps except for the first one, which remains unchanged
+2026-03-17 03:29 | absorbed tool  | dict_key_case_regex.py | Capitalizes keys in a dictionary using regular expressions
+2026-03-17 03:29 | evolved        | dict_key_case_regex.py | Capitalizes keys in a dictionary using regular expressions
+2026-03-17 03:39 | absorbed tool  | dict_key_case_limit.py | Limit words in key to a specified length when using dict_key_case
+2026-03-17 03:39 | evolved        | dict_key_case_limit.py | Limit words in key to a specified length when using dict_key_case
+2026-03-17 03:49 | absorbed tool  | dict_case_around_value.py | Convert dictionary keys to case around specific values
+2026-03-17 03:49 | evolved        | dict_case_around_value.py | Convert dictionary keys to case around specific values
+2026-03-17 03:59 | absorbed tool  | capitalize_first_word.py | Capitalize the first word of each value in a dictionary
+2026-03-17 03:59 | evolved        | capitalize_first_word.py | Capitalize the first word of each value in a dictionary
+2026-03-17 04:09 | absorbed tool  | dict_key_case_with_space.py | Converts dictionary keys to lowercase with spaces instead of underscores
+2026-03-17 04:09 | evolved        | dict_key_case_with_space.py | Converts dictionary keys to lowercase with spaces instead of underscores
+2026-03-17 04:19 | absorbed tool  | dict_case_all_except_first.py | Convert dictionary values to a specific case while keeping the first value unchanged
+2026-03-17 04:19 | evolved        | dict_case_all_except_first.py | Convert dictionary values to a specific case while keeping the first value unchanged
+2026-03-17 04:29 | absorbed tool  | dict_key_case_from_values.py | converts dict keys to lowercase while keeping values unchanged
+2026-03-17 04:29 | evolved        | dict_key_case_from_values.py | converts dict keys to lowercase while keeping values unchanged
+2026-03-17 04:39 | absorbed tool  | dict_key_case_everywhere.py | Convert all dictionary keys to a specific case
+2026-03-17 04:39 | evolved        | dict_key_case_everywhere.py | Convert all dictionary keys to a specific case
+2026-03-17 04:49 | absorbed tool  | dict_case_everywhere_except_first.py | Convert all values in a dictionary to a specified case, except for the first key
+2026-03-17 04:49 | evolved        | dict_case_everywhere_except_first.py | Convert all values in a dictionary to a specified case, except for the first key
+2026-03-17 04:59 | absorbed tool  | dict_key_case_except_first_values.py | Convert dictionary key values to a case (except for first value)
+2026-03-17 04:59 | evolved        | dict_key_case_except_first_values.py | Convert dictionary key values to a case (except for first value)
+2026-03-17 05:19 | absorbed tool  | dict_key_case_with_space.py | Capitalizes keys in a dictionary with spaces
+2026-03-17 05:19 | evolved        | dict_key_case_with_space.py | Capitalizes keys in a dictionary with spaces
+2026-03-17 05:29 | absorbed tool  | dict_key_case_ignore_case.py | Change keys in a dictionary to ignore case while maintaining original value
+2026-03-17 05:29 | evolved        | dict_key_case_ignore_case.py | Change keys in a dictionary to ignore case while maintaining original value
+2026-03-17 05:39 | absorbed tool  | dict_key_case_except_first_values.py | Lowercases all values in a dictionary except for the first one
+2026-03-17 05:39 | evolved        | dict_key_case_except_first_values.py | Lowercases all values in a dictionary except for the first one
+2026-03-17 05:49 | absorbed tool  | dict_case_except_first_values_list.py | Convert dictionary values to a list with case adjustment except for first element
+2026-03-17 05:49 | evolved        | dict_case_except_first_values_list.py | Convert dictionary values to a list with case adjustment except for first element
+2026-03-17 05:59 | absorbed tool  | dict_case_always.py | Convert all dictionary values to a specific case
+2026-03-17 05:59 | evolved        | dict_case_always.py | Convert all dictionary values to a specific case
+2026-03-17 06:19 | absorbed tool  | dict_values_first_lowercase.py | prints dictionary values in lowercase until first uppercase value
+2026-03-17 06:19 | evolved        | dict_values_first_lowercase.py | prints dictionary values in lowercase until first uppercase value
+2026-03-17 06:29 | absorbed tool  | dict_values_first_lowercase_except_dict_.py | convert all dictionary values to lowercase except those that are not keys
+2026-03-17 06:29 | evolved        | dict_values_first_lowercase_except_dict_.py | convert all dictionary values to lowercase except those that are not keys
+2026-03-17 06:39 | absorbed tool  | dict_values_first_lowercase_except_dict_.py | Lowercase all values except those within dictionaries
+2026-03-17 06:39 | evolved        | dict_values_first_lowercase_except_dict_.py | Lowercase all values except those within dictionaries
+2026-03-17 06:49 | absorbed tool  | add_prefix_to_values.py | adds a prefix to dictionary values except for specified lists of values
+2026-03-17 06:49 | evolved        | add_prefix_to_values.py | adds a prefix to dictionary values except for specified lists of values
+2026-03-17 07:09 | absorbed tool  | dict_values_lowercase_except_dict_.py | Convert dictionary values to lowercase except for those inside a specific nested dictionary
+2026-03-17 07:09 | evolved        | dict_values_lowercase_except_dict_.py | Convert dictionary values to lowercase except for those inside a specific nested dictionary
+2026-03-17 07:19 | absorbed tool  | remove_default_values.py | Remove default values from a JSON object
+2026-03-17 07:19 | evolved        | remove_default_values.py | Remove default values from a JSON object
+2026-03-17 07:29 | absorbed tool  | dict_values_first_lowercase_except_list.py | Converts dictionary values to lowercase except for a specified list of keys
+2026-03-17 07:29 | evolved        | dict_values_first_lowercase_except_list.py | Converts dictionary values to lowercase except for a specified list of keys
+2026-03-17 07:39 | absorbed tool  | dict_values_first_underscores.py | Convert values in a dictionary to underscores instead of dots
+2026-03-17 07:39 | evolved        | dict_values_first_underscores.py | Convert values in a dictionary to underscores instead of dots
+2026-03-17 07:50 | absorbed tool  | dict_values_first_underscores_always.py | Convert dictionary values to underscores and lowercase
+2026-03-17 07:50 | evolved        | dict_values_first_underscores_always.py | Convert dictionary values to underscores and lowercase
+2026-03-17 08:00 | absorbed tool  | dict_values_lower_except_dict_.py | Lowercase values except those inside dictionaries
+2026-03-17 08:00 | evolved        | dict_values_lower_except_dict_.py | Lowercase values except those inside dictionaries
+2026-03-17 08:20 | absorbed tool  | dict_values_lowercase_except_set.py | Convert dictionary values to lowercase except for sets
+2026-03-17 08:20 | evolved        | dict_values_lowercase_except_set.py | Convert dictionary values to lowercase except for sets
+2026-03-17 08:30 | absorbed tool  | remove_prefix_from_values.py | Remove prefix from values in a dictionary
+2026-03-17 08:30 | evolved        | remove_prefix_from_values.py | Remove prefix from values in a dictionary
+2026-03-17 08:40 | absorbed tool  | remove_prefix_from_values.py | Removes prefix from all values in a dictionary
+2026-03-17 08:40 | evolved        | remove_prefix_from_values.py | Removes prefix from all values in a dictionary
+2026-03-17 08:50 | absorbed tool  | dict_values_first_underscores_always_lis.py | converts list values to lowercase underscores in dictionary keys
+2026-03-17 08:50 | evolved        | dict_values_first_underscores_always_lis.py | converts list values to lowercase underscores in dictionary keys
+2026-03-17 09:00 | absorbed tool  | dict_values_last_lowercase.py | Convert values in a dictionary to lowercase except for specific ones
+2026-03-17 09:00 | evolved        | dict_values_last_lowercase.py | Convert values in a dictionary to lowercase except for specific ones
+2026-03-17 09:10 | absorbed tool  | remove_suffix_from_values.py | Removes a specified suffix from values in a dictionary
+2026-03-17 09:10 | evolved        | remove_suffix_from_values.py | Removes a specified suffix from values in a dictionary
+2026-03-17 09:20 | absorbed tool  | to_dict.py   | Convert JSON stdin to Python dict
+2026-03-17 09:20 | evolved        | to_dict.py   | Convert JSON stdin to Python dict
+2026-03-17 09:30 | absorbed tool  | remove_empty_values.py | Removes empty values from a JSON object
+2026-03-17 09:30 | evolved        | remove_empty_values.py | Removes empty values from a JSON object
+2026-03-17 09:40 | absorbed tool  | dict_values_first_underscores_always_low.py | Convert all values to lowercase and underscores to single characters
+2026-03-17 09:40 | evolved        | dict_values_first_underscores_always_low.py | Convert all values to lowercase and underscores to single characters
+2026-03-17 09:50 | absorbed tool  | dict_values_first_underscores_always_cas.py | Convert dictionary values to caseless while keeping keys unchanged
+2026-03-17 09:50 | evolved        | dict_values_first_underscores_always_cas.py | Convert dictionary values to caseless while keeping keys unchanged
+2026-03-17 10:00 | absorbed tool  | dict_values_lowercase_except_dict_.py | Convert dictionary values to lowercase except for dictionary keys
+2026-03-17 10:00 | evolved        | dict_values_lowercase_except_dict_.py | Convert dictionary values to lowercase except for dictionary keys
+2026-03-17 10:10 | absorbed tool  | remove_values_from_dict.py | removes specified values from all dictionary keys
+2026-03-17 10:10 | evolved        | remove_values_from_dict.py | removes specified values from all dictionary keys
+2026-03-17 10:20 | absorbed tool  | dict_values_first_lowercase_except_list.py | Lowercase dictionary values except for those in a specified list
+2026-03-17 10:20 | evolved        | dict_values_first_lowercase_except_list.py | Lowercase dictionary values except for those in a specified list
+2026-03-17 10:40 | absorbed tool  | dict_values_to_lowercase_except_list.py | Converts dictionary values to lowercase except for list values
+2026-03-17 10:40 | evolved        | dict_values_to_lowercase_except_list.py | Converts dictionary values to lowercase except for list values
+2026-03-17 10:51 | absorbed tool  | dict_values_last_lowercase.py | Print all values in a dictionary with the last character lowercased
+2026-03-17 10:51 | evolved        | dict_values_last_lowercase.py | Print all values in a dictionary with the last character lowercased
+2026-03-17 11:01 | absorbed tool  | dict_values_lowercase_except_first_list.py | Convert dictionary values to lowercase except for the first element in a list value
+2026-03-17 11:01 | evolved        | dict_values_lowercase_except_first_list.py | Convert dictionary values to lowercase except for the first element in a list value
+2026-03-17 11:11 | absorbed tool  | dict_values_first_underscores_always_lis.py | Convert values in a dictionary to underscores if they start with uppercase letters
+2026-03-17 11:11 | evolved        | dict_values_first_underscores_always_lis.py | Convert values in a dictionary to underscores if they start with uppercase letters
+2026-03-17 11:21 | absorbed tool  | remove_quotes_from_values.py | Remove double quotes from values in a JSON object
+2026-03-17 11:21 | evolved        | remove_quotes_from_values.py | Remove double quotes from values in a JSON object
+2026-03-17 11:31 | absorbed tool  | uppercase_first_word.py | Uppercase the first word in each value of a dictionary
+2026-03-17 11:31 | evolved        | uppercase_first_word.py | Uppercase the first word in each value of a dictionary
+2026-03-17 11:44 | absorbed tool  | trim_values.py | Removes leading/trailing whitespace from values in a JSON object
+2026-03-17 11:44 | evolved        | trim_values.py | Removes leading/trailing whitespace from values in a JSON object
+2026-03-17 11:54 | absorbed tool  | remove_quotes.py | Removes all double quotes from a JSON object
+2026-03-17 11:54 | evolved        | remove_quotes.py | Removes all double quotes from a JSON object
+2026-03-17 12:04 | absorbed tool  | dict_keys_case.py | Converts dictionary keys to a specified case
+2026-03-17 12:04 | evolved        | dict_keys_case.py | Converts dictionary keys to a specified case
+2026-03-17 12:14 | absorbed tool  | dict_values_first_lowercase_except_dict_.py | Convert dictionary values to lowercase except for dictionary values
+2026-03-17 12:14 | evolved        | dict_values_first_lowercase_except_dict_.py | Convert dictionary values to lowercase except for dictionary values
+2026-03-17 12:24 | absorbed tool  | remove_empty_values.py | Remove empty values from a JSON object
+2026-03-17 12:24 | evolved        | remove_empty_values.py | Remove empty values from a JSON object
+2026-03-17 12:34 | absorbed tool  | dict_values_first_lowercase_except_list.py | Convert dict values to lowercase, except for list values
+2026-03-17 12:34 | evolved        | dict_values_first_lowercase_except_list.py | Convert dict values to lowercase, except for list values
+2026-03-17 12:44 | absorbed tool  | lower_values_dict_case.py | Convert dictionary values to lowercase using a custom case
+2026-03-17 12:44 | evolved        | lower_values_dict_case.py | Convert dictionary values to lowercase using a custom case
+2026-03-17 12:54 | absorbed tool  | remove_first_item_from_list.py | removes the first item from a list in a JSON object
+2026-03-17 12:54 | evolved        | remove_first_item_from_list.py | removes the first item from a list in a JSON object
+2026-03-17 13:04 | absorbed tool  | keys_first_lowercase.py | prints a list of dictionary keys in lowercase order
+2026-03-17 13:04 | evolved        | keys_first_lowercase.py | prints a list of dictionary keys in lowercase order
+2026-03-17 13:14 | absorbed tool  | remove_empty_values.py | Remove empty values from JSON input
+2026-03-17 13:14 | evolved        | remove_empty_values.py | Remove empty values from JSON input
+2026-03-17 13:24 | absorbed tool  | dict_keys_lower_case_except_first.py | Print lowercase first key, else keys as is
+2026-03-17 13:24 | evolved        | dict_keys_lower_case_except_first.py | Print lowercase first key, else keys as is
+2026-03-17 13:34 | absorbed tool  | dict_values_lowercase_except_list.py | Convert all values in a dictionary to lowercase except for those in lists
+2026-03-17 13:34 | evolved        | dict_values_lowercase_except_list.py | Convert all values in a dictionary to lowercase except for those in lists
+2026-03-17 13:44 | absorbed tool  | dict_values_first_lowercase_except_dict_.py | Converts dictionary values to lowercase except for dictionaries
+2026-03-17 13:44 | evolved        | dict_values_first_lowercase_except_dict_.py | Converts dictionary values to lowercase except for dictionaries
+2026-03-17 13:54 | absorbed tool  | dict_values_first_lowercase_except_dict_.py | Convert dictionary values to lowercase except for dictionary values
+2026-03-17 13:54 | evolved        | dict_values_first_lowercase_except_dict_.py | Convert dictionary values to lowercase except for dictionary values
+2026-03-17 14:04 | absorbed tool  | dict_values_first_lowercase_except_list.py | Lowercase dictionary values except for lists
+2026-03-17 14:04 | evolved        | dict_values_first_lowercase_except_list.py | Lowercase dictionary values except for lists
+2026-03-17 14:14 | absorbed tool  | dict_key_case_except_first_dict_value.py | Convert dictionary keys to case, except for values that are dictionaries
+2026-03-17 14:14 | evolved        | dict_key_case_except_first_dict_value.py | Convert dictionary keys to case, except for values that are dictionaries
+2026-03-17 14:24 | absorbed tool  | dict_key_case_with_space.py | Convert keys to lowercase except for those with a space
+2026-03-17 14:24 | evolved        | dict_key_case_with_space.py | Convert keys to lowercase except for those with a space
+2026-03-17 14:44 | absorbed tool  | dict_value_lowercase_except_first_n.py | Lowercase all values except the first n specified by a value
+2026-03-17 14:44 | evolved        | dict_value_lowercase_except_first_n.py | Lowercase all values except the first n specified by a value
+2026-03-17 14:54 | absorbed tool  | dict_case_first_always.py | Case convert entire dictionary to always lowercase except for keys that start with a specified prefi
+2026-03-17 14:54 | evolved        | dict_case_first_always.py | Case convert entire dictionary to always lowercase except for keys that start with a specified prefi
+2026-03-17 15:04 | absorbed tool  | dict_key_case_first_always.py | Changes key case to always uppercase except for first occurrence
+2026-03-17 15:04 | evolved        | dict_key_case_first_always.py | Changes key case to always uppercase except for first occurrence
+2026-03-17 15:14 | absorbed tool  | upper_keys.py | Convert all dictionary keys to uppercase
+2026-03-17 15:14 | evolved        | upper_keys.py | Convert all dictionary keys to uppercase
+2026-03-17 15:24 | absorbed tool  | dict_case_everywhere_except_first_and_la.py | Lowercase all keys except for the first and last ones in a dictionary
+2026-03-17 15:24 | evolved        | dict_case_everywhere_except_first_and_la.py | Lowercase all keys except for the first and last ones in a dictionary
+2026-03-17 15:34 | absorbed tool  | dict_lower_case_all_except_first_values_.py | Convert dictionary values to lowercase except for lists
+2026-03-17 15:34 | evolved        | dict_lower_case_all_except_first_values_.py | Convert dictionary values to lowercase except for lists
+2026-03-17 15:44 | absorbed tool  | dict_case_lowercase_keys.py | Lowercases keys in a dictionary while preserving values
+2026-03-17 15:44 | evolved        | dict_case_lowercase_keys.py | Lowercases keys in a dictionary while preserving values
+2026-03-17 15:54 | absorbed tool  | dict_case_with_space_regex.py | Convert dictionary keys to lowercase except for values that contain a space
+2026-03-17 15:54 | evolved        | dict_case_with_space_regex.py | Convert dictionary keys to lowercase except for values that contain a space
+2026-03-17 16:04 | absorbed tool  | dict_case_everywhere_except_first_last.py | Convert all values except first and last to lowercase
+2026-03-17 16:04 | evolved        | dict_case_everywhere_except_first_last.py | Convert all values except first and last to lowercase
+2026-03-17 16:14 | absorbed tool  | remove_empty_values.py | Removes all empty string values from a JSON object
+2026-03-17 16:14 | evolved        | remove_empty_values.py | Removes all empty string values from a JSON object
+2026-03-17 16:24 | absorbed tool  | add_suffix_to_values.py | Add a suffix to values in a dictionary
+2026-03-17 16:24 | evolved        | add_suffix_to_values.py | Add a suffix to values in a dictionary
+2026-03-17 16:34 | absorbed tool  | remove_keys_from_values.py | Removes specified keys from all values in a dictionary
+2026-03-17 16:34 | evolved        | remove_keys_from_values.py | Removes specified keys from all values in a dictionary
+2026-03-17 16:44 | absorbed tool  | dict_case_everywhere_except_first_last_a.py | Convert all keys to lowercase except for the first and last characters which are capitalized
+2026-03-17 16:44 | evolved        | dict_case_everywhere_except_first_last_a.py | Convert all keys to lowercase except for the first and last characters which are capitalized
+2026-03-17 16:54 | absorbed tool  | trim_values.py | Trims whitespace from all string values in a dictionary
+2026-03-17 16:54 | evolved        | trim_values.py | Trims whitespace from all string values in a dictionary
+2026-03-17 17:04 | absorbed tool  | dict_case_everywhere_except_first_and_la.py | Convert all values in a dictionary to lowercase except for the first and last keys
+2026-03-17 17:04 | evolved        | dict_case_everywhere_except_first_and_la.py | Convert all values in a dictionary to lowercase except for the first and last keys
+2026-03-17 17:15 | absorbed tool  | dict_key_case_invert.py | Inverts the key case of a dictionary
+2026-03-17 17:15 | evolved        | dict_key_case_invert.py | Inverts the key case of a dictionary
+2026-03-17 17:25 | absorbed tool  | to_dict_values.py | Convert all values in a dictionary to strings
+2026-03-17 17:25 | evolved        | to_dict_values.py | Convert all values in a dictionary to strings
+2026-03-17 17:35 | absorbed tool  | add_suffix_to_list.py | Add a suffix to all list elements in a dictionary value
+2026-03-17 17:35 | evolved        | add_suffix_to_list.py | Add a suffix to all list elements in a dictionary value
+2026-03-17 17:45 | absorbed tool  | dict_case_except_first_value_list.py | Converts all values in a dictionary except for the first one to lowercase
+2026-03-17 17:45 | evolved        | dict_case_except_first_value_list.py | Converts all values in a dictionary except for the first one to lowercase
+2026-03-17 17:55 | absorbed tool  | dict_case_except_first_value_list.py | Case-converts all values in a dictionary except the first value
+2026-03-17 17:55 | evolved        | dict_case_except_first_value_list.py | Case-converts all values in a dictionary except the first value
+2026-03-17 18:05 | absorbed tool  | trim_json.py | Removes leading and trailing whitespace from JSON values
+2026-03-17 18:05 | evolved        | trim_json.py | Removes leading and trailing whitespace from JSON values
+2026-03-17 18:15 | absorbed tool  | dict_case_first_always_2.py | Converts all keys to lowercase except for the first one which is capitalized
+2026-03-17 18:15 | evolved        | dict_case_first_always_2.py | Converts all keys to lowercase except for the first one which is capitalized
+2026-03-17 18:25 | absorbed tool  | dict_case_always_last.py | Convert dictionary keys to lowercase except for last one
+2026-03-17 18:25 | evolved        | dict_case_always_last.py | Convert dictionary keys to lowercase except for last one
+2026-03-17 18:36 | absorbed tool  | count_dict_values.py | Count the total number of values in a dictionary
+2026-03-17 18:36 | evolved        | count_dict_values.py | Count the total number of values in a dictionary
+2026-03-17 18:47 | absorbed tool  | strip_json_keys.py | Remove keys from a JSON object while preserving its values
+2026-03-17 18:47 | evolved        | strip_json_keys.py | Remove keys from a JSON object while preserving its values
+2026-03-17 18:57 | absorbed tool  | dict_case_everywhere_except_first_last_a.py | Convert all dictionary values except first last to lowercase alphabetically
+2026-03-17 18:57 | evolved        | dict_case_everywhere_except_first_last_a.py | Convert all dictionary values except first last to lowercase alphabetically
+2026-03-17 19:17 | absorbed tool  | parse_nested_json.py | Parse nested JSON from stdin to a Python dictionary
+2026-03-17 19:17 | evolved        | parse_nested_json.py | Parse nested JSON from stdin to a Python dictionary
+2026-03-17 19:27 | absorbed tool  | print_json_keys_only.py | Print keys of a JSON dictionary on one line
+2026-03-17 19:27 | evolved        | print_json_keys_only.py | Print keys of a JSON dictionary on one line
+2026-03-17 19:37 | absorbed tool  | print_dict_values_sum.py | Sum of values in a dictionary
+2026-03-17 19:37 | evolved        | print_dict_values_sum.py | Sum of values in a dictionary
+2026-03-17 19:47 | absorbed tool  | strip_keys_with_empty_values.py | Strips keys with empty values from a JSON object
+2026-03-17 19:47 | evolved        | strip_keys_with_empty_values.py | Strips keys with empty values from a JSON object
+2026-03-17 19:57 | absorbed tool  | remove_suffix_from_list.py | Removes a suffix from all list elements in a JSON object
+2026-03-17 19:57 | evolved        | remove_suffix_from_list.py | Removes a suffix from all list elements in a JSON object
+2026-03-17 20:07 | absorbed tool  | add_suffix_to_set.py | Adds a suffix to each value in a set
+2026-03-17 20:07 | evolved        | add_suffix_to_set.py | Adds a suffix to each value in a set
+2026-03-17 20:16 | absorbed tool  | dict_key_case_lower_first.py | Convert dictionary keys to lowercase except for the first key
+2026-03-17 20:16 | evolved        | dict_key_case_lower_first.py | Convert dictionary keys to lowercase except for the first key
+2026-03-17 20:26 | absorbed tool  | dict_case_everywhere_except_last_and_a.py | Convert all keys to lowercase except last one which remains unchanged and first word is capitalized
+2026-03-17 20:26 | evolved        | dict_case_everywhere_except_last_and_a.py | Convert all keys to lowercase except last one which remains unchanged and first word is capitalized
+2026-03-17 20:28 | absorbed tool  | add_prefix_to_dict_values.py | Adds a prefix to all values in a dictionary
+2026-03-17 20:28 | evolved        | add_prefix_to_dict_values.py | Adds a prefix to all values in a dictionary
+2026-03-17 20:38 | absorbed tool  | dict_key_case_all_except_first_and_la.py | Lowercase keys in all other cases except for the first character
+2026-03-17 20:38 | evolved        | dict_key_case_all_except_first_and_la.py | Lowercase keys in all other cases except for the first character
+2026-03-17 20:58 | absorbed tool  | dict_case_everywhere_except_last_and_a.py | Case convert all keys except last and append 'a' to values
+2026-03-17 20:58 | evolved        | dict_case_everywhere_except_last_and_a.py | Case convert all keys except last and append 'a' to values
+2026-03-17 21:08 | absorbed tool  | dict_case_everywhere_except_first_and_la.py | Convert dictionary values to lowercase everywhere except for the first and last characters
+2026-03-17 21:08 | evolved        | dict_case_everywhere_except_first_and_la.py | Convert dictionary values to lowercase everywhere except for the first and last characters
+2026-03-17 21:18 | absorbed tool  | dict_case_everywhere_except_first_and_la.py | Convert all dictionary values to lowercase except for keys that start with 'la'
+2026-03-17 21:18 | evolved        | dict_case_everywhere_except_first_and_la.py | Convert all dictionary values to lowercase except for keys that start with 'la'
+2026-03-17 21:28 | absorbed tool  | dict_keys_lowercase.py | Convert dictionary keys to lowercase
+2026-03-17 21:28 | evolved        | dict_keys_lowercase.py | Convert dictionary keys to lowercase
+2026-03-17 21:38 | absorbed tool  | dict_case_first_key.py | Convert all keys in a dictionary to lowercase except for the first key which remains unchanged
+2026-03-17 21:38 | evolved        | dict_case_first_key.py | Convert all keys in a dictionary to lowercase except for the first key which remains unchanged
+2026-03-17 21:58 | absorbed tool  | find_first_non_empty_value.py | Find the first non-empty value in a dictionary
+2026-03-17 21:58 | evolved        | find_first_non_empty_value.py | Find the first non-empty value in a dictionary
+2026-03-17 22:08 | absorbed tool  | dict_case_everywhere_except_last.py | Converts all keys to lowercase except the last one
+2026-03-17 22:08 | evolved        | dict_case_everywhere_except_last.py | Converts all keys to lowercase except the last one
+2026-03-17 22:18 | absorbed tool  | dict_key_case_invert.py | Inverts case of keys in a dictionary while keeping original values unchanged
+2026-03-17 22:18 | evolved        | dict_key_case_invert.py | Inverts case of keys in a dictionary while keeping original values unchanged
+2026-03-18 23:27 | absorbed tool  | dict_case_everywhere_except_last.py | Converts all keys and values in a dictionary to a specified case except for the last key-value pair
+2026-03-18 23:27 | evolved        | dict_case_everywhere_except_last.py | Converts all keys and values in a dictionary to a specified case except for the last key-value pair
+2026-03-18 23:37 | absorbed tool  | dict_case_always_first_key_value_list.py | Print a list of key-value pairs from a dictionary with all keys in lowercase and corresponding value
+2026-03-18 23:37 | evolved        | dict_case_always_first_key_value_list.py | Print a list of key-value pairs from a dictionary with all keys in lowercase and corresponding value
+2026-03-18 23:57 | absorbed tool  | dict_case_everywhere_except_last_and_a.py | Case convert all dictionary keys except last one and values
+2026-03-18 23:57 | evolved        | dict_case_everywhere_except_last_and_a.py | Case convert all dictionary keys except last one and values
+2026-03-19 00:07 | absorbed tool  | dict_case_random.py | Randomly selects a case from the dictionary values
+2026-03-19 00:07 | evolved        | dict_case_random.py | Randomly selects a case from the dictionary values

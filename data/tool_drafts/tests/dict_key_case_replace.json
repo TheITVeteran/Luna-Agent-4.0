@@ -1,0 +1,6 @@
+{
+  "returncode": 1,
+  "stdout": "Enter the new key case (lower, upper, title):",
+  "stderr": "Traceback (most recent call last):\r\n  File \"C:\\Users\\User\\AppData\\Local\\Temp\\tmpem0o6pwq.py\", line 25, in <module>\r\n    new_case = input(\"Enter the new key case (lower, upper, title): \")\r\nEOFError: EOF when reading a line",
+  "ts": 1773724161.7093349
+}

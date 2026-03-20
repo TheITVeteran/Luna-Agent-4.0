@@ -1,0 +1,6 @@
+{
+  "returncode": 1,
+  "stdout": "",
+  "stderr": "Traceback (most recent call last):\r\n  File \"C:\\Users\\User\\AppData\\Local\\Temp\\tmpszo2geqx.py\", line 26, in <module>\r\n    print(intToRoman(params))\r\n          ~~~~~~~~~~^^^^^^^^\r\n  File \"C:\\Users\\User\\AppData\\Local\\Temp\\tmpszo2geqx.py\", line 18, in intToRoman\r\n    while num > 0:\r\n          ^^^^^^^\r\nTypeError: '>' not supported between instances of 'dict' and 'int'",
+  "ts": 1773758080.8226492
+}

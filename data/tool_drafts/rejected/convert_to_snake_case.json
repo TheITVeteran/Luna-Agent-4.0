@@ -1,0 +1,5 @@
+{
+  "name": "convert_to_snake_case",
+  "description": "Converts all keys in a dictionary to snake case",
+  "script": "import re, sys\nparams = json.load(sys.stdin)\nresult = {re.sub(r'(\\w)([A-Z])', r'\\1_\\2', k): v for k, v in params.items()}\nprint(result)"
+}

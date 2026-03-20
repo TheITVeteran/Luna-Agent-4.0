@@ -1,0 +1,5 @@
+{
+  "name": "remove_duplicates",
+  "description": "Remove duplicate values from a JSON list",
+  "script": "import json, sys\nparams = json.loads(sys.stdin)\nresult = [x for x in set(params) if params.count(x) == 1]\nprint(result)"
+}

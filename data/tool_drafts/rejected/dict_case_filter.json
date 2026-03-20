@@ -1,0 +1,5 @@
+{
+  "name": "dict_case_filter",
+  "description": "Filter dictionary keys based on case",
+  "script": "import json, sys\nparams = json.loads(sys.stdin)\nresult = {k.lower(): v for k, v in params.items() if k.isalpha()}\nprint(result)"
+}

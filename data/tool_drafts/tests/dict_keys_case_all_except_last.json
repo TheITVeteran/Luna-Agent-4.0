@@ -1,0 +1,6 @@
+{
+  "returncode": 1,
+  "stdout": "",
+  "stderr": "Traceback (most recent call last):\r\n  File \"C:\\Users\\User\\AppData\\Local\\Temp\\tmpq0a5rg9z.py\", line 12, in <module>\r\n    result = dict_case_all_except_first(case_keys_except_last(params))\r\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^\r\nNameError: name 'dict_case_all_except_first' is not defined",
+  "ts": 1773875834.7937555
+}

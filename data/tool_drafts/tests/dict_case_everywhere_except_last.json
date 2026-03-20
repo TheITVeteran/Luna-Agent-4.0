@@ -1,0 +1,6 @@
+{
+  "returncode": 1,
+  "stdout": "",
+  "stderr": "Traceback (most recent call last):\r\n  File \"C:\\Users\\User\\AppData\\Local\\Temp\\tmp761aahug.py\", line 4, in <module>\r\n    result = {k: v.casefold() for k, v in params.items()[:-1]}\r\n                                          ~~~~~~~~~~~~~~^^^^^\r\nTypeError: 'dict_items' object is not subscriptable",
+  "ts": 1773880647.6607907
+}

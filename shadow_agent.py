@@ -42,7 +42,7 @@ def strip_shadow_prefix(text: str) -> str | None:
     if not text or not isinstance(text, str):
         return None
     t = text.strip()
-    for prefix in ("shadow", "!", "agent"):
+    for prefix in ("shadow", "agent"):
         if t.lower().startswith(prefix):
             rest = t[len(prefix):].strip().lstrip(":,.")
             return rest if rest else None

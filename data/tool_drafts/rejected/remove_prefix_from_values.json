@@ -1,0 +1,5 @@
+{
+  "name": "remove_prefix_from_values",
+  "description": "Remove prefix from dictionary values",
+  "script": "import json, sys\nparams = json.load(sys.stdin)\nresult = {k: v[len(prefix) :] for k, v, prefix in ((k, value.split(':')[0], '') if ':' in value else (k, value, '')) for key, value in params.items()}\nprint(result)"
+}

@@ -1,0 +1,6 @@
+{
+  "returncode": 1,
+  "stdout": "",
+  "stderr": "Traceback (most recent call last):\r\n  File \"C:\\Users\\User\\AppData\\Local\\Temp\\tmpy_32595e.py\", line 3, in <module>\r\n    result = {k: v[len(prefix) :] for k, v, prefix in ((k, value.split(':')[0], '') if ':' in value else (k, value, '')) for key, value in params.items()}\r\n                                                                                              ^^^^^\r\nNameError: name 'value' is not defined. Did you mean: 'False'?",
+  "ts": 1773879444.8529577
+}

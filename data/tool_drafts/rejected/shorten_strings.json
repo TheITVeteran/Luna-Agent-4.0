@@ -1,0 +1,5 @@
+{
+  "name": "shorten_strings",
+  "description": "Shorten strings by replacing multiple whitespace characters with a single space",
+  "script": "import re, sys\nparams = json.load(sys.stdin)\nresult = ' '.join(re.sub(r'\\s+', ' ', param).strip() for param in params)\nprint(result)"
+}

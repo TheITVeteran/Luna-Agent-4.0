@@ -1,0 +1,5 @@
+{
+  "name": "dict_key_case_replace",
+  "description": "Replaces a given key case with another",
+  "script": "import json, sys\nparams = json.load(sys.stdin)\nfrom collections import OrderedDict\n\ndef replace_dict_key_case(params, new_case):\n    result = {}\n    for k, v in params.items():\n        if isinstance(v, dict):\n            v = replace_dict_key_case(v, new_case)\n        elif callable(v) and hasattr(v, '__dict__'):\n            v = v()\n        else:\n            if k == new_case:\n                continue\n            if new_case == 'lower':\n                k = k.lower()\n            elif new_case == 'upper':\n                k = k.upper()\n            elif new_case == 'title':\n                k = k.title()\n\n        result[k] = v\n    return OrderedDict(result)\n\nnew_case = input(\"Enter the new key case (lower, upper, title): \")\nresult = replace_dict_key_case(params, new_case)\nprint(json.dumps(result, indent=4))"
+}

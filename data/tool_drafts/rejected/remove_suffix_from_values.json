@@ -1,0 +1,5 @@
+{
+  "name": "remove_suffix_from_values",
+  "description": "Removes a specified suffix from all values in a dictionary",
+  "script": "import json, sys\nparams = json.load(sys.stdin)\nsuffix = params['suffix']\nresult = {key: value.rstrip(suffix) for key, value in params.items()}\nprint(result)"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "first_key_lowercase",
+  "description": "Lowercase all keys except the first key in a dictionary",
+  "script": "import json, sys\nparams = json.load(sys.stdin)\nresult = {k.lower(): v for k, v in params.items()[1:]}\nprint(json.dumps(result))"
+}

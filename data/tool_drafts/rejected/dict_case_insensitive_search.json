@@ -1,0 +1,5 @@
+{
+  "name": "dict_case_insensitive_search",
+  "description": "Search for a value in a dictionary without case sensitivity",
+  "script": "import json, sys\nparams = json.load(sys.stdin)\nkey = params['key']\nvalue = params.get('value', None)\nresult = 'Found' if key.lower() == value else 'Not found'\nprint(result)"
+}
