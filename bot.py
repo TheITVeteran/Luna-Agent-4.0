@@ -355,6 +355,9 @@ HELP_TEXT = (
     "• Luna says (UI) — she may speak unprompted when idle; use **Got it** to dismiss\n"
     "• Reflection — Luna writes a daily summary of what she did into her knowledge base\n"
     "• !search <query> — open Google search in your browser\n"
+    "• !scrape <url> <what to extract> [post:#channel] — scrape a website, extract info, optionally post to Discord\n"
+    "• !genimg <description> — generate an AI image (local Stable Diffusion XL)\n"
+    "• !genvid <description> [duration:30] — generate an AI video (image sequence + Ken Burns effects)\n"
 )
 
 COMMAND_ONLY = "I'm **Luna**. Chat with me normally, or say **Shadow, [command]** for actions. Use **!help** for the list."
@@ -2793,6 +2796,293 @@ def _search(query: str) -> tuple[bool, str]:
         return True, f"Opened Google: **{query[:80]}**"
     except Exception as e:
         return False, str(e)
+
+def _scrape_website(url: str, instruction: str = "", post_to_discord: str = "") -> tuple[bool, str]:
+    """Scrape a website, use LLM to extract specific info, optionally post to a Discord channel."""
+    url = (url or "").strip()
+    if not url:
+        return False, "Usage: !scrape <url> <what to extract> [post:#channel-name]"
+    if not url.startswith(("http://", "https://")):
+        url = "https://" + url
+
+    # Fetch the page
+    try:
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/125.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,*/*",
+        })
+        with urllib.request.urlopen(req, timeout=30) as r:
+            raw_html = r.read().decode("utf-8", errors="replace")
+    except Exception as e:
+        return False, f"Failed to fetch **{url}**: {e}"
+
+    # Strip HTML tags to get plain text
+    text = re.sub(r"<script[^>]*>.*?</script>", " ", raw_html, flags=re.I | re.S)
+    text = re.sub(r"<style[^>]*>.*?</style>", " ", text, flags=re.I | re.S)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = html.unescape(text)
+    text = re.sub(r"\s+", " ", text).strip()
+
+    if not text or len(text) < 30:
+        return False, f"Page at **{url}** returned no readable content."
+
+    # Truncate for LLM context window
+    page_text = text[:12000]
+
+    if not instruction.strip():
+        instruction = "Summarize the key information from this page."
+
+    system = (
+        "You are Luna, a helpful assistant. The user scraped a website and wants specific information extracted. "
+        "Below is the raw text content of the page. Follow the user's instruction to extract exactly what they asked for. "
+        "Be concise, well-formatted (use bullet points or numbered lists where appropriate), and accurate. "
+        "Only include information that is actually on the page. Output ONLY the extracted information."
+    )
+    result = ollama_chat(
+        f"Website: {url}\n\nPage content:\n{page_text}\n\nInstruction: {instruction}",
+        system=system,
+    )
+    if not result or result.startswith("Error:") or "Ollama" in result:
+        return False, f"LLM failed to process the page content: {result}"
+
+    # Post to Discord channel if requested
+    discord_msg = ""
+    if post_to_discord and bot.is_ready():
+        ch_name = post_to_discord.strip().lstrip("#")
+        posted = False
+        for guild in bot.guilds:
+            for ch in guild.text_channels:
+                if ch.name == ch_name:
+                    header = f"**Scraped from** <{url}>\n**Query:** {instruction[:200]}\n\n"
+                    full_msg = header + result
+                    # Discord 2000 char limit — split if needed
+                    async def _post():
+                        chunks = [full_msg[i:i+1990] for i in range(0, len(full_msg), 1990)]
+                        for chunk in chunks:
+                            await ch.send(chunk)
+                    import asyncio as _aio
+                    try:
+                        _aio.run_coroutine_threadsafe(_post(), bot.loop).result(timeout=15)
+                        posted = True
+                        discord_msg = f"\n\n📤 Posted to **#{ch_name}**"
+                    except Exception as e:
+                        discord_msg = f"\n\n⚠️ Could not post to #{ch_name}: {e}"
+                    break
+            if posted:
+                break
+        if not posted and not discord_msg:
+            discord_msg = f"\n\n⚠️ Channel **#{ch_name}** not found."
+
+    return True, result + discord_msg
+
+
+# ── Image & Video Generation ─────────────────────────────────────────────────
+
+_MEDIA_TMPDIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_tmp_vid")
+_sd_pipe = None
+_sd_pipe_lock = threading.Lock()
+
+
+def _get_sd_pipe():
+    """Lazy-load Stable Diffusion XL pipeline (cached after first call)."""
+    global _sd_pipe
+    if _sd_pipe is not None:
+        return _sd_pipe
+    with _sd_pipe_lock:
+        if _sd_pipe is not None:
+            return _sd_pipe
+        try:
+            import torch
+            from diffusers import StableDiffusionXLPipeline
+            print("[Luna] Loading SDXL pipeline (first run downloads ~6GB)...")
+            pipe = StableDiffusionXLPipeline.from_pretrained(
+                "stabilityai/stable-diffusion-xl-base-1.0",
+                torch_dtype=torch.float16,
+                variant="fp16",
+                use_safetensors=True,
+            )
+            pipe = pipe.to("cuda")
+            pipe.enable_attention_slicing()
+            _sd_pipe = pipe
+            print("[Luna] SDXL pipeline loaded.")
+            return _sd_pipe
+        except Exception as e:
+            print(f"[Luna] Failed to load SDXL pipeline: {e}")
+            return None
+
+
+def _generate_image(prompt: str, save_path: str = "", width: int = 1024, height: int = 1024) -> tuple[bool, str, str]:
+    """Generate an image using local Stable Diffusion XL (GPU).
+    Falls back to Pollinations.ai API if local generation fails.
+    Returns (success, message, file_path)."""
+    prompt = (prompt or "").strip()
+    if not prompt:
+        return False, "Describe the image you want. Example: `!genimg a sunset over mountains`", ""
+
+    os.makedirs(_MEDIA_TMPDIR, exist_ok=True)
+    out_path = save_path or os.path.join(_MEDIA_TMPDIR, f"genimg_{int(time.time())}_{random.randint(0,999):03d}.png")
+
+    # Local SDXL generation (primary)
+    pipe = _get_sd_pipe()
+    if pipe is not None:
+        try:
+            import torch
+            with torch.inference_mode():
+                image = pipe(
+                    prompt,
+                    width=min(width, 1024), height=min(height, 1024),
+                    num_inference_steps=25,
+                    guidance_scale=7.5,
+                ).images[0]
+            image.save(out_path)
+            return True, f"Generated: **{prompt[:100]}**", out_path
+        except Exception as e:
+            print(f"[Luna] Local SDXL failed: {e}, trying API fallback...")
+
+    # Fallback: Pollinations.ai API (requires POLLINATIONS_API_KEY in .env)
+    api_key = os.getenv("POLLINATIONS_API_KEY", "")
+    if api_key:
+        try:
+            encoded = urllib.parse.quote(prompt)
+            url = f"https://gen.pollinations.ai/image/{encoded}?width={width}&height={height}&nologo=true"
+            req = urllib.request.Request(url, headers={
+                "User-Agent": "Mozilla/5.0",
+                "Authorization": f"Bearer {api_key}",
+            })
+            with urllib.request.urlopen(req, timeout=120) as r:
+                data = r.read()
+            if len(data) > 1000:
+                with open(out_path, "wb") as f:
+                    f.write(data)
+                return True, f"Generated (API): **{prompt[:100]}**", out_path
+        except Exception as e:
+            print(f"[Luna] Pollinations API fallback failed: {e}")
+
+    return False, "Image generation failed. Check GPU availability or set `POLLINATIONS_API_KEY` in .env.", ""
+
+
+def _generate_video(prompt: str, duration: int = 30) -> tuple[bool, str, str]:
+    """Generate a video by creating AI images and stitching them with Ken Burns
+    zoom/pan effects and crossfade transitions using cv2 + imageio.
+    Returns (success, message, file_path)."""
+    import cv2
+    import numpy as np
+
+    prompt = (prompt or "").strip()
+    if not prompt:
+        return False, "Describe the video you want. Example: `!genvid a journey through space`", ""
+
+    duration = max(5, min(duration, 60))
+    fps = 24
+    num_scenes = max(3, min(duration // 5, 8))
+
+    system = (
+        "You are a visual scene director. Given a video concept, generate exactly "
+        f"{num_scenes} individual scene descriptions for AI image generation. "
+        "Each scene should be a vivid, detailed one-sentence description of a still image. "
+        "Together they should tell a visual story or progression. "
+        "Output ONLY the scenes, one per line, numbered 1 through N. No other text."
+    )
+    scenes_raw = ollama_chat(
+        f"Video concept: {prompt}\n\nGenerate {num_scenes} scene descriptions:",
+        system=system,
+    )
+    if not scenes_raw or scenes_raw.startswith("Error:") or "Ollama" in scenes_raw:
+        scenes = [f"{prompt}, angle {i+1}, cinematic lighting, 4k" for i in range(num_scenes)]
+    else:
+        scenes = []
+        for line in scenes_raw.strip().split("\n"):
+            line = re.sub(r"^\d+[\.\)\-]\s*", "", line.strip())
+            if line and len(line) > 5:
+                scenes.append(line)
+        while len(scenes) < num_scenes:
+            scenes.append(f"{prompt}, variation {len(scenes)+1}, cinematic")
+    scenes = scenes[:num_scenes]
+
+    os.makedirs(_MEDIA_TMPDIR, exist_ok=True)
+
+    image_paths = []
+    for i, scene_desc in enumerate(scenes):
+        img_path = os.path.join(_MEDIA_TMPDIR, f"frame_{i:03d}.jpg")
+        ok, _msg, path = _generate_image(scene_desc, save_path=img_path)
+        if ok:
+            image_paths.append(path)
+
+    if len(image_paths) < 2:
+        return False, "Could not generate enough images for a video.", ""
+
+    target_w, target_h = 1280, 720
+    frames_per_scene = (duration * fps) // len(image_paths)
+    crossfade_len = min(fps, frames_per_scene // 4)
+
+    images = []
+    for img_path in image_paths:
+        img = cv2.imread(img_path)
+        if img is None:
+            continue
+        h, w = img.shape[:2]
+        scale = max(target_w / w, target_h / h) * 1.25
+        img = cv2.resize(img, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_LANCZOS4)
+        images.append(img)
+
+    if len(images) < 2:
+        return False, "Could not load generated images.", ""
+
+    def _ken_burns_frames(img, n_frames, zoom_in=True):
+        h, w = img.shape[:2]
+        frames = []
+        for f in range(n_frames):
+            t = f / max(n_frames - 1, 1)
+            zoom = (1.0 + t * 0.18) if zoom_in else (1.18 - t * 0.18)
+            crop_w = int(target_w / zoom)
+            crop_h = int(target_h / zoom)
+            cx = w // 2 + int((t - 0.5) * crop_w * 0.06)
+            cy = h // 2 + int((t - 0.5) * crop_h * 0.04)
+            x1 = max(0, min(cx - crop_w // 2, w - crop_w))
+            y1 = max(0, min(cy - crop_h // 2, h - crop_h))
+            cropped = img[y1:y1 + crop_h, x1:x1 + crop_w]
+            frame = cv2.resize(cropped, (target_w, target_h), interpolation=cv2.INTER_LANCZOS4)
+            frames.append(frame)
+        return frames
+
+    scene_frames = []
+    for idx, img in enumerate(images):
+        sf = _ken_burns_frames(img, frames_per_scene, zoom_in=(idx % 2 == 0))
+        scene_frames.append(sf)
+
+    final_frames = list(scene_frames[0])
+    for idx in range(1, len(scene_frames)):
+        prev = scene_frames[idx - 1]
+        curr = scene_frames[idx]
+        n_cf = min(crossfade_len, len(prev), len(curr))
+        for c in range(n_cf):
+            final_frames.pop()
+        for c in range(n_cf):
+            alpha = c / n_cf
+            blended = cv2.addWeighted(prev[len(prev) - n_cf + c], 1 - alpha,
+                                      curr[c], alpha, 0)
+            final_frames.append(blended)
+        final_frames.extend(curr[n_cf:])
+
+    out_path = os.path.join(_MEDIA_TMPDIR, f"genvid_{int(time.time())}.mp4")
+    try:
+        import imageio
+        writer = imageio.get_writer(out_path, fps=fps, codec="libx264",
+                                    macro_block_size=1, quality=7,
+                                    output_params=["-pix_fmt", "yuv420p"])
+        for frame in final_frames:
+            writer.append_data(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+        writer.close()
+    except Exception as e:
+        return False, f"Video encoding failed: {e}", ""
+
+    if not os.path.exists(out_path) or os.path.getsize(out_path) < 1000:
+        return False, "Video file was not created.", ""
+
+    size_mb = os.path.getsize(out_path) / (1024 * 1024)
+    return True, (f"Generated **{duration}s** video ({len(images)} scenes, {size_mb:.1f}MB): "
+                  f"**{prompt[:80]}**"), out_path
+
 
 def _research_content(topic: str) -> tuple[bool, str]:
     """Research a topic and return a brief optimized for audiobook/eBook creation."""
@@ -5373,6 +5663,7 @@ def _run_cmd_impl(cmd: str, p: dict, scope: str | None, user_message: str) -> st
         "msg":            lambda: _run_wa_msg((p.get("feedback_answer") or p.get("contact","")).strip(), p.get("description",None)),
         "call":           lambda: _run_discord_call(p.get("contact","").strip()),
         "dm":            lambda: _run_discord_dm(p.get("target","").strip(), p.get("message","").strip()),
+        "scrape":         lambda: _scrape_website(p.get("url","").strip(), p.get("instruction","").strip(), p.get("post_channel","").strip()),
         "pc_vitals":      lambda: (True, _pc_vitals()),
         "luna_vitals":    lambda: (True, _luna_vitals()),
         "camera_see":     lambda: (True, _get_camera_see_result()),
@@ -5397,6 +5688,14 @@ def _run_cmd_impl(cmd: str, p: dict, scope: str | None, user_message: str) -> st
         ok, result = _run_create_code(req)
         if not ok: _record_failure(cmd, result, p); return f"❌ {result}"
         return f"✅ {result}"
+    if cmd == "genimg":
+        ok, msg, path = _generate_image(p.get("prompt", "").strip())
+        if not ok: return f"❌ {msg}"
+        return f"✅ {msg}\nFile: `{path}`"
+    if cmd == "genvid":
+        ok, msg, path = _generate_video(p.get("prompt", "").strip(), int(p.get("duration", 30)))
+        if not ok: return f"❌ {msg}"
+        return f"✅ {msg}\nFile: `{path}`"
     if cmd in dispatch:
         if cmd == "news":
             ok, result = _fetch_news()
@@ -5682,6 +5981,32 @@ def _parse_command(text: str) -> tuple[str, dict] | None:
         if low.startswith(pfx):
             rest = raw[len(pfx):].strip()
             return "audiobook", {"action": "create", "topic": rest}
+    # Scrape
+    m = re.search(r"\b(?:scrape|extract from|grab from|get from|pull from)\b\s+(https?://\S+)\s*(.*)", raw, re.I)
+    if m:
+        scrape_url = m.group(1).rstrip(".,!?")
+        rest = m.group(2).strip()
+        post_ch = ""
+        post_m = re.search(r"(?:post(?:\s+to)?|send(?:\s+to)?)\s*#?([\w-]+)", rest, re.I)
+        if post_m:
+            post_ch = post_m.group(1)
+            rest = rest[:post_m.start()].strip() + " " + rest[post_m.end():].strip()
+        return "scrape", {"url": scrape_url, "instruction": rest.strip(), "post_channel": post_ch}
+    # Image generation
+    m = re.match(r"^(?:generate|create|make|draw)\s+(?:an?\s+)?(?:image|picture|photo|art)\s+(?:of\s+)?(.+)$", raw, re.I)
+    if m: return "genimg", {"prompt": m.group(1).strip()}
+    if low.startswith("genimg "):
+        return "genimg", {"prompt": raw[7:].strip()}
+    # Video generation
+    m = re.match(r"^(?:generate|create|make)\s+(?:an?\s+)?(?:video|clip|animation)\s+(?:of\s+|about\s+)?(.+)$", raw, re.I)
+    if m:
+        rest = m.group(1).strip()
+        dur_m = re.search(r"\bduration[:\s]*(\d+)", rest, re.I)
+        dur = int(dur_m.group(1)) if dur_m else 30
+        desc = re.sub(r"\s*duration[:\s]*\d+\s*", " ", rest, flags=re.I).strip()
+        return "genvid", {"prompt": desc, "duration": dur}
+    if low.startswith("genvid "):
+        return "genvid", {"prompt": raw[7:].strip(), "duration": 30}
     # Summarize
     for pfx in ("summarize ","summary of ","summarise "):
         if low.startswith(pfx):
@@ -5812,7 +6137,7 @@ def _likely_command(text: str) -> bool:
     low = (text or "").strip().lower()
     if not low: return False
     if _CONV_START.match(low): return False
-    starters = ("play ","podcast ","podcast create ","create podcast ","audiobook ","audiobook create ","search ","research ","research_story ","research story ","story_script ","story script ","send ","create ","call ","dm ","tell ","inform ","msg ","share ","post ","remind ","suno ","yt_comment ","comment ","ig_dm ","fb_msg ","google ","news","!help","how's ","pc status","luna status","ram ","what do you see","what can you see","ask me ","summarize ","summary of ","todo ","calendar ","join me ","join my ","luna join ")
+    starters = ("play ","podcast ","podcast create ","create podcast ","audiobook ","audiobook create ","search ","research ","research_story ","research story ","story_script ","story script ","send ","create ","call ","dm ","tell ","inform ","msg ","share ","post ","remind ","suno ","yt_comment ","comment ","ig_dm ","fb_msg ","google ","news","!help","how's ","pc status","luna status","ram ","what do you see","what can you see","ask me ","summarize ","summary of ","todo ","calendar ","join me ","join my ","luna join ","genimg ","genvid ","generate ","draw ","make a video ","make an image ")
     return any(low.startswith(s) for s in starters) or low in ("play","news","help","skip","stop","ask me","digest","daily digest","todo","todo list","calendar","calendar list","calendar today","calendar week") or "luna status" in low or "pc status" in low or bool(re.search(r"\b(what do you see|what can you see|do you see me|describe what you see)\b", low))
 
 def _is_retry(msg: str) -> bool:
@@ -7667,6 +7992,32 @@ def _handle_bang(msg: str, scope: str) -> str:
     if cmd == "!search":
         if not args: return "Usage: !search <query>"
         ok, r = _search(args); return f"✅ {r}" if ok else f"❌ {r}"
+    if cmd == "!scrape":
+        if not args: return "Usage: !scrape <url> <what to extract> [post:#channel-name]"
+        # Parse: first token is URL, optional post:#channel at the end, rest is instruction
+        tokens = args.split()
+        scrape_url = tokens[0]
+        post_ch = ""
+        rest_tokens = tokens[1:]
+        for i, t in enumerate(rest_tokens):
+            if t.lower().startswith("post:#") or t.lower().startswith("post:"):
+                post_ch = t.split(":", 1)[1].lstrip("#")
+                rest_tokens = rest_tokens[:i] + rest_tokens[i+1:]
+                break
+        instruction = " ".join(rest_tokens).strip()
+        ok, r = _scrape_website(scrape_url, instruction, post_ch)
+        return f"✅ {r}" if ok else f"❌ {r}"
+    if cmd in ("!genimg", "!gen_img", "!image"):
+        if not args: return "Usage: !genimg <description of the image>"
+        ok, r, path = _generate_image(args)
+        return f"✅ {r}\nFile: `{path}`" if ok else f"❌ {r}"
+    if cmd in ("!genvid", "!gen_vid", "!video"):
+        if not args: return "Usage: !genvid <description> [duration:30]"
+        dur_m = re.search(r"\bduration[:\s]*(\d+)", args, re.I)
+        dur = int(dur_m.group(1)) if dur_m else 30
+        desc = re.sub(r"\s*duration[:\s]*\d+\s*", " ", args, flags=re.I).strip()
+        ok, r, path = _generate_video(desc, dur)
+        return f"✅ {r}\nFile: `{path}`" if ok else f"❌ {r}"
     if cmd == "!research":
         if not args: return "Usage: !research <topic>"
         ok, r = _research_content(args)
@@ -7941,7 +8292,7 @@ async def on_message(message: discord.Message):
             cmd, params = parsed
             if cmd == "help":
                 await message.reply(f"{mention} {HELP_TEXT}"); return
-            if _is_privileged(message.author.id) or cmd not in ("suno","suno_ready","create_code","msg","dm","call","share_x","share_facebook","yt_comment","ig_dm","fb_msg","remind"):
+            if _is_privileged(message.author.id) or cmd not in ("suno","suno_ready","create_code","msg","dm","call","share_x","share_facebook","yt_comment","ig_dm","fb_msg","remind","genimg","genvid"):
                 reply = await asyncio.to_thread(_run_cmd, cmd, params, scope, text)
                 if isinstance(reply, dict) and reply.get("need_feedback"):
                     await message.reply(f"{mention} {reply.get('message', '?')} — answer in the **web UI** (popup).")
@@ -8139,6 +8490,61 @@ async def cmd_help(ctx): await ctx.reply(HELP_TEXT)
 async def cmd_news(ctx):
     ok, r = await asyncio.to_thread(_fetch_news)
     await ctx.reply(r if ok else f"❌ {r}")
+
+@bot.command(name="scrape")
+async def cmd_scrape(ctx, *, args: str = ""):
+    if not _is_privileged(ctx.author.id): await ctx.reply("Linked user/admin only."); return
+    if not args: await ctx.reply("Usage: !scrape <url> <what to extract> [post:#channel-name]"); return
+    tokens = args.split()
+    scrape_url = tokens[0]
+    post_ch = ""
+    rest_tokens = tokens[1:]
+    for i, t in enumerate(rest_tokens):
+        if t.lower().startswith("post:#") or t.lower().startswith("post:"):
+            post_ch = t.split(":", 1)[1].lstrip("#")
+            rest_tokens = rest_tokens[:i] + rest_tokens[i+1:]
+            break
+    instruction = " ".join(rest_tokens).strip()
+    await ctx.reply("Scraping... this may take a moment.")
+    ok, r = await asyncio.to_thread(_scrape_website, scrape_url, instruction, post_ch)
+    chunks = [r[i:i+1990] for i in range(0, len(r), 1990)]
+    for chunk in chunks:
+        await ctx.reply(f"{'✅' if ok else '❌'} {chunk}" if chunk == chunks[0] else chunk)
+
+@bot.command(name="genimg", aliases=["gen_img", "image"])
+async def cmd_genimg(ctx, *, prompt: str = ""):
+    if not _is_privileged(ctx.author.id): await ctx.reply("Linked user/admin only."); return
+    if not prompt: await ctx.reply("Usage: !genimg <description of the image>"); return
+    await ctx.reply("Generating your image... this may take a moment.")
+    ok, msg, path = await asyncio.to_thread(_generate_image, prompt)
+    if not ok:
+        await ctx.reply(f"❌ {msg}"); return
+    try:
+        await ctx.reply(f"✅ {msg}", file=discord.File(path))
+    except Exception as e:
+        await ctx.reply(f"✅ {msg}\n⚠️ Could not upload file: {e}")
+
+
+@bot.command(name="genvid", aliases=["gen_vid", "video"])
+async def cmd_genvid(ctx, *, args: str = ""):
+    if not _is_privileged(ctx.author.id): await ctx.reply("Linked user/admin only."); return
+    if not args: await ctx.reply("Usage: !genvid <description> [duration:30]"); return
+    dur_m = re.search(r"\bduration[:\s]*(\d+)", args, re.I)
+    dur = int(dur_m.group(1)) if dur_m else 30
+    desc = re.sub(r"\s*duration[:\s]*\d+\s*", " ", args, flags=re.I).strip()
+    await ctx.reply(f"Generating a {dur}s video... this may take 1-2 minutes (creating scenes + stitching).")
+    ok, msg, path = await asyncio.to_thread(_generate_video, desc, dur)
+    if not ok:
+        await ctx.reply(f"❌ {msg}"); return
+    try:
+        size_mb = os.path.getsize(path) / (1024 * 1024)
+        if size_mb > 25:
+            await ctx.reply(f"✅ {msg}\n⚠️ File too large for Discord ({size_mb:.1f}MB). Saved at: `{path}`")
+        else:
+            await ctx.reply(f"✅ {msg}", file=discord.File(path))
+    except Exception as e:
+        await ctx.reply(f"✅ {msg}\n⚠️ Could not upload file: {e}")
+
 
 @bot.command(name="suno_ready", aliases=["suno_logged_in"])
 async def cmd_suno_ready(ctx):
