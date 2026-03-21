@@ -1,13 +1,102 @@
-# Luna 5.0 — keep secrets and generated data out of git
+# ── Secrets & credentials ────────────────────────────────────────────────────
 .env
 .env.local
-*.pyc
+.env.*
+*.env
+
+# ── Python ───────────────────────────────────────────────────────────────────
 __pycache__/
-.Playwright/
-node_modules/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
 .venv/
 venv/
-*.log
-data/*_profile/
-data/*.json
+env/
+pip-wheel-metadata/
+*.egg-info/
+dist/
+build/
+
+# ── Browser session profiles (contain login tokens / cookies) ────────────────
+data/suno_profile/
+data/instagram_profile/
+data/facebook_profile/
+data/youtube_profile/
+data/x_profile/
+data/whatsapp_web_profile/
+data/discord_web_profile/
+data/messenger_profile/
+data/search_profile/
+
+# ── Runtime data (personal, generated, or sensitive) ─────────────────────────
+data/action_log.jsonl
+data/evolution.jsonl
+data/biology_state.json
+data/calendar.json
+data/reminders.json
+data/inbox.json
+data/last_proactive.json
+data/last_reflection_date.json
+data/recent_social.json
+data/shared_songs.json
+data/ig_last_seen.json
+data/fb_last_seen.json
+data/evolution_enabled.json
+data/clipboard_history.json
+data/pc_context.json
+data/screenshot_desc.json
+data/ml_learned.json
+data/knowledge_embeddings.json
+data/last_screenshot.png
+
+# ── Personal memory & profile (keep private) ─────────────────────────────────
+# Comment these two lines out if you WANT to commit your memories and profile
+data/memories.json
+data/profiles.json
+
+# ── Knowledge base & tool artifacts ──────────────────────────────────────────
+data/knowledge/
+data/tool_drafts/
+data/absorbed_tools/
+data/ml_models/
+"Luna's creations"/
+
+# ── SOUL.md: commit this — it defines Luna's identity (no secrets inside) ────
+# data/SOUL.md   ← intentionally NOT ignored
+
+# Keep .md identity files
+!data/SOUL.md
+!data/TOOLS.md
+!data/OBJECTIVES.md
+
+# Keep skills folder structure
+data/skills/
 !data/skills/
+!data/skills/**
+
+# ── Generated media ───────────────────────────────────────────────────────────
+_tmp_vid/
+*.mp4
+*.mp3
+*.wav
+# (keep audio in audiobook_scripts if you want them — otherwise add below)
+data/audiobook_scripts/
+
+# ── Logs & temp ───────────────────────────────────────────────────────────────
+*.log
+*.tmp
+*.bak
+
+# ── IDE & OS ──────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── Playwright ────────────────────────────────────────────────────────────────
+.playwright/
+node_modules/
