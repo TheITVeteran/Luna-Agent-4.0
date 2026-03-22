@@ -82,6 +82,7 @@ _tmp_vid/
 *.wav
 # (keep audio in audiobook_scripts if you want them — otherwise add below)
 data/audiobook_scripts/
+data/research_briefs/
 
 # ── Logs & temp ───────────────────────────────────────────────────────────────
 *.log

@@ -164,3 +164,5 @@
 {"ts": "2026-03-20T16:05:05.518134+00:00", "cmd": "share_x", "params": {}, "reply": "✅ Shared to X: \"Ghost in The Server\""}
 {"ts": "2026-03-20T21:59:34.174018+00:00", "cmd": "share_facebook", "params": {}, "reply": "✅ Shared to Facebook: \"Rise n Shine\""}
 {"ts": "2026-03-20T22:15:07.334415+00:00", "cmd": "news", "params": {}, "reply": "📰 **World news:**\n\nThe United States has launched attacks on Iranian targets in an effort to pressure the country into allowing unimpeded access to the Strait of Hormuz, a vital shipping route that connects the Gulf of Oman to the Persian Gulf. The strikes, which targeted Iranian military facilities"}
+{"ts": "2026-03-21T23:12:41.167445+00:00", "cmd": "share_x", "params": {}, "reply": "❌ Compose dialog didn't open or text box not found. Log in to X if needed, then try Share Song again."}
+{"ts": "2026-03-21T23:13:13.926677+00:00", "cmd": "share_x", "params": {}, "reply": "✅ Shared to X: \"Coffee Stained Polaroids\""}

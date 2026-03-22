@@ -269,3 +269,5 @@
 2026-03-18 23:57 | evolved        | dict_case_everywhere_except_last_and_a.py | Case convert all dictionary keys except last one and values
 2026-03-19 00:07 | absorbed tool  | dict_case_random.py | Randomly selects a case from the dictionary values
 2026-03-19 00:07 | evolved        | dict_case_random.py | Randomly selects a case from the dictionary values
+2026-03-21 23:08 | absorbed tool  | remove_duplicates_from_list.py | Remove duplicate elements from a list in a dictionary value
+2026-03-21 23:08 | evolved        | remove_duplicates_from_list.py | Remove duplicate elements from a list in a dictionary value

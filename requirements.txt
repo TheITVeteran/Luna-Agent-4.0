@@ -10,6 +10,10 @@ flask>=2.0
 
 # TTS
 gTTS>=2.3
+# Microsoft Edge TTS (free) — podcast/audiobook default voice: Ava Multilingual
+edge-tts>=6.0
+# Optional Fish Audio cloud TTS (S2) — used if Edge fails and API key set
+fish-audio-sdk>=1.0
 
 # System monitoring
 psutil>=5.9

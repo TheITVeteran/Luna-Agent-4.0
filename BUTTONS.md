@@ -13,6 +13,44 @@ Configure URLs in **`.env`**. Steps are what Luna does when you use each button 
 | **Facebook** | `Shadow, share facebook` | Facebook profile URL | See [Facebook steps](#facebook) below. |
 | **Commands** | (opens help)           | — | Show `!help` list. |
 
+### Media (side panel — `index.html`)
+
+| Button | Sends / fills |
+|--------|----------------|
+| Translate | Opens `/translate/` |
+| Upload voice | File picker → translate pipeline |
+| TranscribeMe | Opens `/transcribeme/` |
+| Play | `!play ` |
+| Custom podcast | `!podcast` |
+| Create podcast | `!podcast create ` |
+| **Create audiobook** | Popup (brief / story / both / auto). Multi-chapter text → **chapter 1 MP3 first**, then say **`!audiobook continue`** for each next file, or **`!audiobook cancel`** to stop. |
+| **Research brief** | `!research ` |
+| **Story script** | `!research_story ` |
+| Skip | `!skip` |
+| Stop | `!stop` |
+
+---
+
+### ⋯ More commands (popups)
+
+Each of **Social**, **Media**, **System**, and **Tools** has a **⋯** control on the **right of the section header**. It opens a popup with **extra commands** for that category (so they stay grouped with the main strip). **Escape** or click outside closes it.
+
+| Section | Examples in ⋯ menu |
+|---------|---------------------|
+| **Social** | `!suno_ready`, `!share_song`, `!share_facebook` |
+| **Media** | `!join`, `!leave`, `!pause`, `!queue`, `!joinme` |
+| **System** | `!todo`, `!summarize`, `!digest`, remind me, `!scrape`, `retry`, `!pc_vitals`, `!luna_vitals` |
+| **Tools** | `!remember`, `!always_remember`, `!profile`, **ask me**, note about reflection |
+
+---
+
+## Still not a top-strip button (by design)
+
+| Command / feature | Notes |
+|-------------------|--------|
+| **Reflection** | Runs automatically daily — see Tools ⋯ hint |
+| **Nudge**, **Luna says**, **View action log**, **Tool drafts**, **Knowledge**, **Memory**, **Security scan**, **IG replies**, etc. | **Lower** panel sections only |
+
 ---
 
 ## Links (set in `.env`)

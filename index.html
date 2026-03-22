@@ -566,6 +566,114 @@
   /* Calendar popup */
   .calendar-popup-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.65); display: none; align-items: center; justify-content: center; z-index: 10010; }
   .calendar-popup-overlay.open { display: flex; }
+
+  /* More commands (per main section) */
+  .more-cmd-overlay {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.65);
+    display: none; align-items: center; justify-content: center; z-index: 10011;
+  }
+  .more-cmd-overlay.open { display: flex; }
+  .more-cmd-popup {
+    background: rgba(5,15,30,0.98);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    max-width: 360px;
+    width: 92vw;
+    max-height: min(82vh, 560px);
+    display: flex;
+    flex-direction: column;
+    box-shadow: 0 8px 40px rgba(0,0,0,0.5);
+  }
+  .more-cmd-popup-head {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 12px 14px;
+    border-bottom: 1px solid rgba(0,212,255,0.15);
+    font-size: 12px;
+    letter-spacing: 0.08em;
+    color: var(--cyan);
+    font-family: var(--font-data);
+  }
+  .more-cmd-body {
+    padding: 10px 12px 14px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .more-cmd-row { display: flex; flex-direction: column; gap: 2px; }
+  .more-cmd-item { width: 100%; }
+  .more-cmd-desc {
+    font-size: 10px;
+    color: rgba(168,216,234,0.45);
+    padding: 0 4px 4px 28px;
+    line-height: 1.35;
+    font-family: var(--font-data);
+  }
+  .more-cmd-hint {
+    font-size: 11px;
+    color: rgba(168,216,234,0.55);
+    line-height: 1.45;
+    padding: 8px 8px;
+    border-left: 2px solid rgba(0,212,255,0.25);
+    margin: 4px 0;
+    background: rgba(0,212,255,0.04);
+  }
+  .audiobook-popup-overlay {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.65);
+    display: none; align-items: center; justify-content: center; z-index: 10012;
+  }
+  .audiobook-popup-overlay.open { display: flex; }
+  .audiobook-popup {
+    width: min(400px, 94vw);
+    max-height: 90vh;
+    overflow: auto;
+    background: rgba(5,15,30,0.98);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px 16px;
+    box-shadow: 0 8px 40px rgba(0,0,0,0.5);
+  }
+  .audiobook-popup-hint {
+    font-size: 11px;
+    color: rgba(168,216,234,0.65);
+    line-height: 1.45;
+    margin: 0 0 12px;
+  }
+  .audiobook-popup label.field-label {
+    display: block;
+    font-size: 10px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: rgba(0,212,255,0.45);
+    margin: 10px 0 4px;
+  }
+  .audiobook-popup input[type="text"] {
+    width: 100%;
+    box-sizing: border-box;
+    background: rgba(0,20,40,0.6);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 6px;
+    padding: 8px 10px;
+    font-size: 13px;
+  }
+  .audiobook-source-options {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin: 12px 0 14px;
+  }
+  .audiobook-source-options label {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    font-size: 12px;
+    color: rgba(168,216,234,0.9);
+    cursor: pointer;
+    line-height: 1.35;
+  }
+  .audiobook-source-options input { margin-top: 3px; flex-shrink: 0; }
+  .audiobook-popup-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 8px; }
   .calendar-popup { width: min(700px, 94vw); max-height: 85vh; overflow: auto; background: rgba(0,12,24,0.96); border: 1px solid var(--border); border-radius: 12px; padding: 14px; box-shadow: 0 0 24px rgba(0,212,255,0.22); }
   .calendar-popup-title { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; color: var(--text-bright); font-size: 18px; }
   .calendar-popup-grid { display: grid; grid-template-columns: 1fr 130px 1fr; gap: 8px; margin-bottom: 8px; }
@@ -1153,12 +1261,32 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    cursor: pointer;
+    gap: 4px;
     padding: 6px 0 4px;
     border-bottom: 1px solid rgba(0,212,255,0.1);
     user-select: none;
   }
+  .panel-group-header-main {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex: 1;
+    min-width: 0;
+    cursor: pointer;
+  }
   .panel-group-header:hover .panel-title { color: var(--cyan); }
+  .panel-more-btn {
+    background: transparent;
+    border: none;
+    color: rgba(0,212,255,0.35);
+    cursor: pointer;
+    font-size: 18px;
+    line-height: 1;
+    padding: 2px 4px;
+    border-radius: 4px;
+    flex-shrink: 0;
+  }
+  .panel-more-btn:hover { color: var(--cyan); background: rgba(0,212,255,0.08); }
   .panel-group-arrow {
     font-size: 9px;
     color: rgba(0,212,255,0.35);
@@ -1497,9 +1625,12 @@
     <div class="side-toggle" id="side-toggle" title="Collapse panel">◂</div>
     <div class="panel-section">
       <div class="panel-group" id="pg-social">
-        <div class="panel-group-header" onclick="toggleGroup('pg-social')">
-          <div class="panel-title">Social</div>
-          <span class="panel-group-arrow">▼</span>
+        <div class="panel-group-header">
+          <div class="panel-group-header-main" onclick="toggleGroup('pg-social')">
+            <div class="panel-title">Social</div>
+            <span class="panel-group-arrow">▼</span>
+          </div>
+          <button type="button" class="panel-more-btn" onclick="event.stopPropagation(); openMoreCommands('social');" title="More Social commands">⋯</button>
         </div>
         <div class="panel-group-body">
       <button class="cmd-btn" onclick="sendQuick('Shadow, share song')" title="Share to X (Twitter)">
@@ -1530,9 +1661,12 @@
       </div>
 
       <div class="panel-group" id="pg-media">
-        <div class="panel-group-header" onclick="toggleGroup('pg-media')">
-          <div class="panel-title">Media</div>
-          <span class="panel-group-arrow">▼</span>
+        <div class="panel-group-header">
+          <div class="panel-group-header-main" onclick="toggleGroup('pg-media')">
+            <div class="panel-title">Media</div>
+            <span class="panel-group-arrow">▼</span>
+          </div>
+          <button type="button" class="panel-more-btn" onclick="event.stopPropagation(); openMoreCommands('media');" title="More Media commands">⋯</button>
         </div>
         <div class="panel-group-body">
       <a class="cmd-btn" href="/translate/" style="text-decoration:none;color:inherit;display:inline-flex;align-items:center;gap:6px;" title="Open Luna's translate module for text or voice clips">
@@ -1554,6 +1688,15 @@
       <button class="cmd-btn" onclick="insertCommand('!podcast create ', 'topic, e.g. morning routines or productivity')" title="Luna generates a short podcast about your topic and saves it to the podcast folder">
         <span class="cmd-icon">✨</span> Create podcast
       </button>
+      <button type="button" class="cmd-btn" onclick="openAudiobookCreateDialog()" title="Choose research brief, story script, both, or auto — then create MP3">
+        <span class="cmd-icon">📚</span> Create audiobook
+      </button>
+      <button class="cmd-btn" onclick="insertCommand('!research ', 'topic — source brief for audiobook/eBook')" title="Source-driven research brief (not MP3)">
+        <span class="cmd-icon">🔬</span> Research brief
+      </button>
+      <button class="cmd-btn" onclick="insertCommand('!research_story ', 'topic — saves a .txt story script for narration')" title="Writes a story-style script file under data/audiobook_scripts">
+        <span class="cmd-icon">📜</span> Story script
+      </button>
       <button class="cmd-btn" onclick="sendQuick('!skip')" title="Skip current track in Discord">
         <span class="cmd-icon">⏭</span> Skip
       </button>
@@ -1564,9 +1707,12 @@
       </div>
 
       <div class="panel-group" id="pg-system">
-        <div class="panel-group-header" onclick="toggleGroup('pg-system')">
-          <div class="panel-title">System</div>
-          <span class="panel-group-arrow">▼</span>
+        <div class="panel-group-header">
+          <div class="panel-group-header-main" onclick="toggleGroup('pg-system')">
+            <div class="panel-title">System</div>
+            <span class="panel-group-arrow">▼</span>
+          </div>
+          <button type="button" class="panel-more-btn" onclick="event.stopPropagation(); openMoreCommands('system');" title="More System commands">⋯</button>
         </div>
         <div class="panel-group-body">
       <button class="cmd-btn" onclick="sendQuick('Shadow, news')" title="World headlines">
@@ -1597,9 +1743,12 @@
       </div>
 
       <div class="panel-group" id="pg-tools">
-        <div class="panel-group-header" onclick="toggleGroup('pg-tools')">
-          <div class="panel-title">Tools</div>
-          <span class="panel-group-arrow">▼</span>
+        <div class="panel-group-header">
+          <div class="panel-group-header-main" onclick="toggleGroup('pg-tools')">
+            <div class="panel-title">Tools</div>
+            <span class="panel-group-arrow">▼</span>
+          </div>
+          <button type="button" class="panel-more-btn" onclick="event.stopPropagation(); openMoreCommands('tools');" title="More Tools commands">⋯</button>
         </div>
         <div class="panel-group-body">
       <button class="cmd-btn" onclick="showHelp()" title="Full command list">
@@ -1812,6 +1961,42 @@
     <div class="feedback-popup-options" id="feedback-popup-options"></div>
     <div class="feedback-popup-actions">
       <button type="button" class="feedback-popup-cancel" id="feedback-popup-cancel">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- More commands (grouped by Social / Media / System / Tools) -->
+<div class="more-cmd-overlay" id="more-cmd-overlay" onclick="closeMoreCommands()">
+  <div class="more-cmd-popup" id="more-cmd-popup" onclick="event.stopPropagation()">
+    <div class="more-cmd-popup-head">
+      <span id="more-cmd-title">More commands</span>
+      <button type="button" class="close-dm-popup" id="close-more-cmd" onclick="closeMoreCommands()" aria-label="Close">×</button>
+    </div>
+    <div class="more-cmd-body" id="more-cmd-body"></div>
+  </div>
+</div>
+
+<!-- Create audiobook: pick saved research brief / story / both / auto -->
+<div class="audiobook-popup-overlay" id="audiobook-popup-overlay" onclick="closeAudiobookCreateDialog()">
+  <div class="audiobook-popup" onclick="event.stopPropagation()">
+    <div class="more-cmd-popup-head" style="margin:-4px -4px 8px;padding-bottom:8px;border-bottom:1px solid rgba(0,212,255,0.15);">
+      <span>📚 Create audiobook</span>
+      <button type="button" class="close-dm-popup" onclick="closeAudiobookCreateDialog()" aria-label="Close">×</button>
+    </div>
+    <p class="audiobook-popup-hint">Use the <strong>same topic</strong> as <code>!research</code> / <code>!research_story</code> so Luna finds your saved files (same filename slug). Long stories become <strong>one MP3 per chapter</strong>; Luna asks you to run <code>!audiobook continue</code> for each next chapter.</p>
+    <label class="field-label" for="audiobook-topic-input">Topic</label>
+    <input type="text" id="audiobook-topic-input" placeholder="e.g. morning routines" autocomplete="off" onkeydown="if(event.key==='Enter'){event.preventDefault();submitAudiobookCreate();}" />
+    <label class="field-label" for="audiobook-duration-input">Optional: duration for generated long form</label>
+    <input type="text" id="audiobook-duration-input" placeholder="30, 45, 60, or 90 (only if Luna generates text)" autocomplete="off" onkeydown="if(event.key==='Enter'){event.preventDefault();submitAudiobookCreate();}" />
+    <div class="audiobook-source-options" role="radiogroup" aria-label="Source">
+      <label><input type="radio" name="audiobook-src" value="brief" /> <strong>Research brief only</strong> — saved <code>!research</code> file</label>
+      <label><input type="radio" name="audiobook-src" value="story" /> <strong>Story script only</strong> — saved <code>!research_story</code> file</label>
+      <label><input type="radio" name="audiobook-src" value="both" /> <strong>Both</strong> — brief + script (requires both files)</label>
+      <label><input type="radio" name="audiobook-src" value="auto" checked /> <strong>Auto</strong> — use whatever is saved (merge if both), or generate if none</label>
+    </div>
+    <div class="audiobook-popup-actions">
+      <button type="button" class="cmd-btn" onclick="closeAudiobookCreateDialog()">Cancel</button>
+      <button type="button" class="cmd-btn" id="audiobook-create-submit" onclick="submitAudiobookCreate()">Create</button>
     </div>
   </div>
 </div>
@@ -2370,6 +2555,151 @@ function showHelp() {
   inputEl.value = '!help';
   sendMessage();
 }
+
+function openAudiobookCreateDialog() {
+  var o = document.getElementById('audiobook-popup-overlay');
+  if (!o) return;
+  o.classList.add('open');
+  var topic = document.getElementById('audiobook-topic-input');
+  var dur = document.getElementById('audiobook-duration-input');
+  if (topic) topic.value = '';
+  if (dur) dur.value = '';
+  var auto = document.querySelector('input[name="audiobook-src"][value="auto"]');
+  if (auto) auto.checked = true;
+  setTimeout(function() { if (topic) topic.focus(); }, 50);
+}
+
+function closeAudiobookCreateDialog() {
+  var o = document.getElementById('audiobook-popup-overlay');
+  if (o) o.classList.remove('open');
+}
+
+function submitAudiobookCreate() {
+  var topicEl = document.getElementById('audiobook-topic-input');
+  var topic = (topicEl && topicEl.value || '').trim();
+  if (!topic) {
+    showToast('Enter a topic (same wording as your research / story).', true);
+    return;
+  }
+  var durEl = document.getElementById('audiobook-duration-input');
+  var dur = (durEl && durEl.value || '').trim().replace(/\D/g, '');
+  if (dur) topic = topic + ' duration:' + dur;
+  var mode = 'auto';
+  var radios = document.querySelectorAll('input[name="audiobook-src"]');
+  for (var i = 0; i < radios.length; i++) {
+    if (radios[i].checked) { mode = radios[i].value; break; }
+  }
+  var flag = '';
+  if (mode === 'brief') flag = ' --brief';
+  else if (mode === 'story') flag = ' --story';
+  else if (mode === 'both') flag = ' --both';
+  closeAudiobookCreateDialog();
+  inputEl.value = '!audiobook create ' + topic + flag;
+  sendMessage();
+}
+
+// ── More commands popups (one per main section: Social / Media / System / Tools) ──
+const MORE_COMMANDS = {
+  social: {
+    title: 'Social — more',
+    items: [
+      { label: 'Suno ready', icon: '✓', desc: "Tell Luna you're logged into Suno (!suno_ready)", run: function() { sendQuick('!suno_ready'); } },
+      { label: 'Share song (cmd)', icon: '𝕏', desc: 'Same as the Share Song button (!share_song)', run: function() { sendQuick('!share_song'); } },
+      { label: 'Share Facebook (cmd)', icon: '📘', desc: 'Same as Share Facebook (!share_facebook)', run: function() { sendQuick('!share_facebook'); } },
+    ]
+  },
+  media: {
+    title: 'Media — more',
+    items: [
+      { label: 'Join voice', icon: '🔗', desc: 'Join your voice channel for playback (!join)', run: function() { sendQuick('!join'); } },
+      { label: 'Leave voice', icon: '🚪', desc: 'Disconnect from voice (!leave)', run: function() { sendQuick('!leave'); } },
+      { label: 'Pause', icon: '⏸', desc: 'Pause playback (!pause)', run: function() { sendQuick('!pause'); } },
+      { label: 'Show queue', icon: '📋', desc: 'List queued tracks (!queue)', run: function() { sendQuick('!queue'); } },
+      { label: 'Join me (VC + TTS)', icon: '🎙', desc: 'Join your VC and speak a line (!joinme)', run: function() { insertCommand('!joinme ', 'optional message'); } },
+    ]
+  },
+  system: {
+    title: 'System — more',
+    items: [
+      { label: 'Todo list', icon: '✅', desc: 'add | list | done (!todo)', run: function() { insertCommand('!todo ', 'list'); } },
+      { label: 'Summarize', icon: '📝', desc: 'URL or pasted text (!summarize)', run: function() { insertCommand('!summarize ', ''); } },
+      { label: "Today's digest", icon: '📰', desc: 'Quick recap (!digest)', run: function() { sendQuick('!digest'); } },
+      { label: 'Remind me', icon: '⏰', desc: 'Natural language (remind me at 7pm to …)', run: function() { insertCommand('remind me at 7pm to ', 'your task'); } },
+      { label: 'Scrape URL', icon: '🌐', desc: 'Extract info; optional Discord post (!scrape)', run: function() { insertCommand('!scrape ', 'url what to extract'); } },
+      { label: 'Retry last action', icon: '🔁', desc: 'Retry with different strategies', run: function() { sendQuick('retry'); } },
+      { label: 'PC vitals (cmd)', icon: '🖥', desc: 'Same as PC vitals button (!pc_vitals)', run: function() { sendQuick('!pc_vitals'); } },
+      { label: 'Luna vitals (cmd)', icon: '✨', desc: 'Same as Luna vitals button (!luna_vitals)', run: function() { sendQuick('!luna_vitals'); } },
+    ]
+  },
+  tools: {
+    title: 'Tools — more',
+    items: [
+      { label: 'Remember', icon: '🧠', desc: 'Store a memory (!remember)', run: function() { insertCommand('!remember ', 'fact to remember'); } },
+      { label: 'Always remember', icon: '⭐', desc: 'Core memory (!always_remember)', run: function() { insertCommand('!always_remember ', 'fact'); } },
+      { label: 'Profile', icon: '👤', desc: 'View or set profile (!profile)', run: function() { sendQuick('!profile'); } },
+      { label: 'Ask me', icon: '❓', desc: 'Luna asks you a question (popup demo)', run: function() { sendQuick('ask me'); } },
+      { hint: 'Reflection runs automatically once per day and writes to the knowledge base — there is no command for it.' },
+    ]
+  }
+};
+
+function closeMoreCommands() {
+  var o = document.getElementById('more-cmd-overlay');
+  if (o) o.classList.remove('open');
+}
+
+function openMoreCommands(section) {
+  var cfg = MORE_COMMANDS[section];
+  if (!cfg) return;
+  var titleEl = document.getElementById('more-cmd-title');
+  var bodyEl = document.getElementById('more-cmd-body');
+  if (!titleEl || !bodyEl) return;
+  titleEl.textContent = cfg.title;
+  bodyEl.innerHTML = '';
+  cfg.items.forEach(function(item) {
+    if (item.hint) {
+      var p = document.createElement('p');
+      p.className = 'more-cmd-hint';
+      p.textContent = item.hint;
+      bodyEl.appendChild(p);
+      return;
+    }
+    var row = document.createElement('div');
+    row.className = 'more-cmd-row';
+    var btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'cmd-btn more-cmd-item';
+    var ic = document.createElement('span');
+    ic.className = 'cmd-icon';
+    ic.textContent = item.icon || '›';
+    btn.appendChild(ic);
+    btn.appendChild(document.createTextNode(' ' + item.label));
+    var run = item.run;
+    btn.onclick = function() {
+      closeMoreCommands();
+      if (typeof run === 'function') run();
+    };
+    row.appendChild(btn);
+    if (item.desc) {
+      var d = document.createElement('div');
+      d.className = 'more-cmd-desc';
+      d.textContent = item.desc;
+      row.appendChild(d);
+    }
+    bodyEl.appendChild(row);
+  });
+  var overlay = document.getElementById('more-cmd-overlay');
+  if (overlay) overlay.classList.add('open');
+}
+
+document.addEventListener('keydown', function(e) {
+  if (e.key === 'Escape') {
+    var o = document.getElementById('more-cmd-overlay');
+    if (o && o.classList.contains('open')) closeMoreCommands();
+    var a = document.getElementById('audiobook-popup-overlay');
+    if (a && a.classList.contains('open')) closeAudiobookCreateDialog();
+  }
+});
 
 // ── Camera (object + face recognition) ──
 let cameraStream = null;

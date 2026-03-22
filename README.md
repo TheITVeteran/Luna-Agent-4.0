@@ -117,7 +117,7 @@ Every chat query is semantically matched against the knowledge base (`data/knowl
 | `!summarize <url or text>` | Concise summary + key points |
 | `!research <topic>` | Source-driven research brief (for writing) |
 | `!research_story <topic>` | Story-style script for audiobook narration |
-| `!audiobook create <topic>` | Full story script + MP3 narration file |
+| `!audiobook create <topic> [duration:30]` | MP3 narration: default ~15–20 min; use `duration:30`, `45`, `60`, or `90` for long multi-chapter listens (YouTube-style length) |
 | `!suno <description>` | Create a Suno song via browser automation |
 | `!share_song` / `!share_facebook` | Share latest Suno song to X or Facebook |
 | `!yt_comment <url>` | Transcribe YouTube video + post AI comment with real context |
@@ -126,8 +126,6 @@ Every chat query is semantically matched against the knowledge base (`data/knowl
 | `!msg <contact> [description]` | WhatsApp message (browser automation, Luna rephrases) |
 | `!dm <user> [message]` | Discord DM (Luna rephrases in her own words) |
 | `!call <user>` | Discord voice call automation |
-| `!genimg <description>` | Generate an AI image (local Stable Diffusion XL, no API key needed) |
-| `!genvid <description> [duration:30]` | Generate a video: AI images + Ken Burns effects + crossfade transitions |
 | `!play <song/url>` | Play music in Discord voice channel (yt-dlp) |
 | `!podcast [choice]` | Play custom podcast from folder |
 | `!podcast create <topic>` | Luna generates a podcast episode (script + TTS MP3) |

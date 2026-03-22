@@ -125,6 +125,9 @@ PC AWARENESS: You have real-time awareness of the user's PC — system info, act
 CRITICAL: Stay in character as Luna. Never output inappropriate content. Never invent facts. Never start replies with off-topic phrases or wrong personas."""
 
 GTTS_LANG = "en"
+# Podcast / audiobook TTS: **Edge TTS** (default **en-US-AvaMultilingualNeural**). Set EDGE_TTS_VOICE to override.
+# Fish Audio — optional fallback if Edge fails; FISH_AUDIO_API_KEY + FISH_AUDIO_REFERENCE_ID.
+# Optional: FISH_AUDIO_MODEL (default s2-pro), FISH_AUDIO_LATENCY (normal | balanced).
 
 _REMINDERS_FILE = os.path.join(_DATA, "reminders.json")
 _SOUL_PATH       = os.path.join(_DATA, "SOUL.md")
@@ -135,6 +138,8 @@ _GOALS_FILE      = os.path.join(_DATA, "goals.json")
 _TODOS_FILE      = os.path.join(_DATA, "todos.json")
 _CALENDAR_FILE   = os.path.join(_DATA, "calendar.json")
 _AUDIOBOOK_SCRIPTS_DIR = os.path.join(_DATA, "audiobook_scripts")
+_RESEARCH_BRIEFS_DIR = os.path.join(_DATA, "research_briefs")
+_AUDIOBOOK_PENDING_FILE = os.path.join(_DATA, "audiobook_pending.json")
 _USER_STYLE_FILE = os.path.join(_DATA, "user_style.json")
 _ACTION_LOG      = os.path.join(_DATA, "action_log.jsonl")
 _RECENT_SOCIAL_PATH = os.path.join(_DATA, "recent_social.json")
@@ -342,7 +347,7 @@ HELP_TEXT = (
     "• !msg <contact> [desc] — WhatsApp message\n"
     "• !play <song/url> — play music in voice\n"
     "• !podcast — play custom podcast from CUSTOM_PODCAST_DIR\n"
-    "• !podcast create <topic> — Luna generates a short podcast about that topic and saves it to the folder\n"
+    "• !podcast create <topic> — short podcast MP3; TTS = **Edge (Ava Multilingual)** by default (see **EDGE_TTS_VOICE** in .env)\n"
     "• !remember / !always_remember — store memories\n"
     "• !profile — view or set your profile\n"
     "• !join / !leave / !pause / !skip / !stop / !queue — music\n"
@@ -357,9 +362,9 @@ HELP_TEXT = (
     "• !summarize <url or text> — concise summary + key points\n"
     "• !digest — today's quick recap (actions, todos, knowledge)\n"
     "• !calendar add|list|today|week|delete — local schedule + popup UI\n"
-    "• !research <topic> — source-driven brief for audiobook/eBook writing\n"
-    "• !research_story <topic> — create a story-style script text file for audiobook narration\n"
-    "• !audiobook create <topic> — create a story script + MP3 narration file\n"
+    "• !research <topic> — source-driven brief (saved under data/research_briefs/)\n"
+    "• !research_story <topic> — story script .txt for narration (data/audiobook_scripts/)\n"
+    "• !audiobook create … / **!audiobook continue** / **!audiobook cancel** — one MP3 **per chapter**; after each file Luna waits for **continue** before the next; filenames show **real** length\n"
     "• Camera (UI) — turn on to let Luna see you; ask **what do you see** for object and face recognition\n"
     "• Nudge (UI) — send a non-blocking note; Luna considers it in her next reply\n"
     "• **ask me** — Luna asks you a question in a popup (demo)\n"
@@ -1204,6 +1209,130 @@ def _tts_bytes(text: str) -> bytes:
         return buf.read()
     except Exception:
         return b""
+
+def _fish_audio_api_key() -> str:
+    return (_env("FISH_AUDIO_API_KEY", "").strip() or _env("FISH_API_KEY", "").strip())
+
+def _fish_audio_tts_bytes(text: str) -> bytes | None:
+    """Cloud Fish Audio TTS (no local GPU). Returns None if not configured, SDK missing, or on error."""
+    key, ref = _fish_audio_api_key(), _env("FISH_AUDIO_REFERENCE_ID", "").strip()
+    if not key or not ref:
+        return None
+    text = (text or "").strip()
+    if not text:
+        return None
+    try:
+        from fishaudio import FishAudio
+        from fishaudio.types import TTSConfig
+    except ImportError:
+        return None
+    model = (_env("FISH_AUDIO_MODEL", "s2-pro").strip() or "s2-pro")
+    lat = (_env("FISH_AUDIO_LATENCY", "balanced").strip().lower() or "balanced")
+    if lat not in ("normal", "balanced"):
+        lat = "balanced"
+    # Per-chunk cap matches gTTS path; Fish handles longer passages via chunk_length internally.
+    text = text[:5000]
+    cfg = TTSConfig(reference_id=ref, chunk_length=200, mp3_bitrate=128, latency=lat)
+    client = None
+    try:
+        client = FishAudio(api_key=key)
+        audio = client.tts.convert(text=text, format="mp3", config=cfg, model=model)
+        return audio if audio else None
+    except Exception as e:
+        print(f"[Luna] Fish Audio TTS failed: {e}")
+        return None
+    finally:
+        if client is not None:
+            try:
+                client.close()
+            except Exception:
+                pass
+
+def _edge_tts_bytes(text: str) -> bytes | None:
+    """Microsoft Edge online TTS (no local GPU). Default voice: Ava Multilingual Neural."""
+    if _env("EDGE_TTS", "1").strip().lower() in ("0", "false", "no", "off"):
+        return None
+    text = (text or "").strip()
+    if not text:
+        return None
+    text = text[:10000]
+    voice = (_env("EDGE_TTS_VOICE", "en-US-AvaMultilingualNeural").strip() or "en-US-AvaMultilingualNeural")
+    try:
+        import edge_tts
+    except ImportError:
+        return None
+
+    async def _stream() -> bytes:
+        communicate = edge_tts.Communicate(text, voice)
+        buf = bytearray()
+        async for chunk in communicate.stream():
+            if chunk.get("type") == "audio":
+                buf.extend(chunk["data"])
+        return bytes(buf) if buf else b""
+
+    def _run_async(coro):
+        try:
+            return asyncio.run(coro)
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            try:
+                return loop.run_until_complete(coro)
+            finally:
+                loop.close()
+
+    try:
+        out = _run_async(_stream())
+        return out if out else None
+    except Exception as e:
+        print(f"[Luna] Edge TTS failed: {e}")
+        return None
+
+def _tts_bytes_media(text: str) -> bytes:
+    """TTS for long-form media (podcast / audiobook): Edge Ava Multilingual → Fish (optional) → gTTS."""
+    b = _edge_tts_bytes(text)
+    if b:
+        return b
+    b = _fish_audio_tts_bytes(text)
+    if b:
+        return b
+    return _tts_bytes(text)
+
+def _subprocess_no_window_flags() -> int:
+    return getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform == "win32" else 0
+
+def _ffprobe_duration_seconds(path: str) -> float | None:
+    """Actual media duration in seconds, or None if ffprobe missing/failed."""
+    try:
+        r = subprocess.run(
+            [
+                "ffprobe", "-v", "error", "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1", path,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            creationflags=_subprocess_no_window_flags(),
+        )
+        if r.returncode != 0:
+            return None
+        return float((r.stdout or "").strip())
+    except Exception:
+        return None
+
+def _audio_duration_filename_tag(seconds: float | None) -> str:
+    """Short tag for filenames, e.g. 6m30s, 90m, 1h15m — not a 'target', actual length."""
+    if seconds is None or seconds <= 0:
+        return "unknown"
+    secs = int(round(seconds))
+    if secs < 60:
+        return f"{secs}s"
+    m, s = secs // 60, secs % 60
+    if m < 60:
+        return f"{m}m{s:02d}s" if s else f"{m}m"
+    h, m2 = m // 60, m % 60
+    if m2 or s:
+        return f"{h}h{m2:02d}m{s:02d}s" if s else f"{h}h{m2:02d}m"
+    return f"{h}h"
 
 def _clean_for_tts(text: str) -> str:
     text = re.sub(r"LUNA_WRITE_FILE.*?END_LUNA_WRITE", "", text, flags=re.DOTALL | re.I)
@@ -2494,7 +2623,7 @@ def _create_podcast_from_description(description: str) -> tuple[bool, str]:
     try:
         paths = []
         for i, chunk in enumerate(chunks[:60]):  # cap segments
-            audio = _tts_bytes(chunk)
+            audio = _tts_bytes_media(chunk)
             if not audio:
                 continue
             seg_path = os.path.join(temp_dir, f"seg_{i:03d}.mp3")
@@ -2502,7 +2631,10 @@ def _create_podcast_from_description(description: str) -> tuple[bool, str]:
                 f.write(audio)
             paths.append(seg_path)
         if not paths:
-            return False, "TTS failed for all chunks. Check gTTS and internet."
+            return False, (
+                "TTS failed for all chunks. If using Fish Audio, check **FISH_AUDIO_API_KEY**, "
+                "**FISH_AUDIO_REFERENCE_ID**, and `pip install fish-audio-sdk`. Otherwise check gTTS and internet."
+            )
         with open(list_path, "w", encoding="utf-8") as f:
             for p in paths:
                 p_abs = os.path.abspath(p).replace("\\", "/")
@@ -2997,14 +3129,104 @@ def _research_content(topic: str) -> tuple[bool, str]:
     except Exception as e:
         return False, str(e)
     src = "\n".join(f"{i+1}. {x['title']} — {x['url']}" for i, x in enumerate(links[:8]))
+    try:
+        os.makedirs(_RESEARCH_BRIEFS_DIR, exist_ok=True)
+        slug = _topic_slug(topic)
+        ts = datetime.now().strftime("%Y%m%d_%H%M")
+        brief_path = os.path.join(_RESEARCH_BRIEFS_DIR, f"{slug}_{ts}.txt")
+        with open(brief_path, "w", encoding="utf-8") as bf:
+            bf.write(f"Topic: {topic}\n\n{brief}\n\nSources:\n{src}\n")
+    except Exception:
+        pass
     return True, f"📚 **Research brief: {topic}**\n\n{brief[:2200]}\n\n**Sources**\n{src}"
 
-def _research_story_build(topic: str) -> tuple[bool, dict | str]:
-    """Build story-style script text + sources from research for audiobook narration."""
-    topic = (topic or "").strip()
-    if not topic:
-        return False, "Usage: !research_story <topic>"
-    # Reuse source discovery from research command
+def _topic_slug(topic: str, max_len: int = 40) -> str:
+    s = re.sub(r"[^\w\s-]", "", (topic or "").lower())[:max_len].strip().replace(" ", "_")
+    s = re.sub(r"_+", "_", s).strip("_")
+    return s or "topic"
+
+def _find_latest_topic_file(dir_path: str, slug: str) -> str | None:
+    """Newest `{slug}_*.txt` in dir, or None."""
+    if not dir_path or not os.path.isdir(dir_path) or not slug:
+        return None
+    prefix = slug + "_"
+    candidates: list[tuple[float, str]] = []
+    try:
+        for name in os.listdir(dir_path):
+            if name.startswith(prefix) and name.lower().endswith(".txt"):
+                p = os.path.join(dir_path, name)
+                if os.path.isfile(p):
+                    candidates.append((os.path.getmtime(p), p))
+    except Exception:
+        return None
+    if not candidates:
+        return None
+    candidates.sort(key=lambda x: -x[0])
+    return candidates[0][1]
+
+def _load_research_brief_file_for_tts(path: str) -> str:
+    with open(path, encoding="utf-8") as f:
+        text = f.read()
+    lines = text.splitlines()
+    if lines and lines[0].lower().startswith("topic:"):
+        text = "\n".join(lines[1:]).strip()
+    return text
+
+def _load_story_script_file_for_tts(path: str) -> str:
+    with open(path, encoding="utf-8") as f:
+        text = f.read()
+    parts = re.split(r"(?i)\n\s*sources:\s*\n", text, 1)
+    return (parts[0] if parts else text).strip()
+
+def _ollama_scriptwriter(prompt: str, system: str, timeout: int = 180) -> str:
+    """Ollama for long scripts — no _sanitize_luna_reply (avoids mangling narration)."""
+    try:
+        return _ollama_chat_once(prompt, system, None, None, (OLLAMA_CHAT or OLLAMA_MODEL).strip(), timeout=timeout).strip()
+    except Exception:
+        return ""
+
+def _parse_audiobook_topic_and_duration(raw: str) -> tuple[str, int | None]:
+    """Extract duration:NN from topic; returns (clean_topic, minutes or None)."""
+    s = (raw or "").strip()
+    if not s:
+        return "", None
+    m = re.search(r"\bduration[:\s]*(\d+)\b", s, re.I)
+    if not m:
+        return s, None
+    mins = int(m.group(1))
+    mins = max(10, min(120, mins))
+    rest = (s[: m.start()] + s[m.end() :]).strip()
+    rest = re.sub(r"\s+", " ", rest).strip()
+    return rest, mins
+
+def _parse_audiobook_request(raw: str) -> tuple[str, int | None, str | None]:
+    """Parse `!audiobook create …` payload: (topic, minutes, source_mode).
+    source_mode: None (auto), 'brief', 'story', or 'both'. Trailing flags: --brief, --story, --both."""
+    s = (raw or "").strip()
+    if not s:
+        return "", None, None
+    source_mode: str | None = None
+    low = s.lower()
+    # Longest suffix first so --research-brief wins over --brief
+    for suffix, mode in (
+        ("--research-brief", "brief"),
+        ("--from-brief", "brief"),
+        ("--from-story", "story"),
+        ("--brief", "brief"),
+        ("--story", "story"),
+        ("--script", "story"),
+        ("--both", "both"),
+        ("--all", "both"),
+    ):
+        if low.endswith(suffix):
+            s = s[: -len(suffix)].strip().rstrip(",;")
+            source_mode = mode
+            break
+    topic, mins = _parse_audiobook_topic_and_duration(s)
+    return topic, mins, source_mode
+
+def _ddg_research_links(topic: str) -> tuple[bool, list | str]:
+    """DuckDuckGo HTML result links for a query."""
     links = []
     try:
         q = urllib.parse.quote(topic, safe="")
@@ -3024,31 +3246,306 @@ def _research_story_build(topic: str) -> tuple[bool, dict | str]:
         return False, f"Research search failed: {e}"
     if not links:
         return False, "No research sources found."
+    return True, links
+
+def _research_story_build(topic: str, target_minutes: int | None = None) -> tuple[bool, dict | str]:
+    """Build story-style script + sources. Short form ~15–20 min read; long form multi-chapter for 30–60+ min listen."""
+    topic = (topic or "").strip()
+    if not topic:
+        return False, "Usage: !research_story <topic>"
+    ok_links, links_or_err = _ddg_research_links(topic)
+    if not ok_links:
+        return False, str(links_or_err)
+    links = links_or_err
 
     source_lines = [f"- {x['title']} ({x['url']})" for x in links[:8]]
-    prompt = (
-        f"Topic: {topic}\n\n"
-        "Write a story-style audiobook script based on the topic and sources below.\n"
-        "Requirements:\n"
-        "- 1200 to 1800 words\n"
-        "- Engaging narrative voice, clear transitions, natural spoken rhythm\n"
-        "- Include practical takeaways naturally in the story\n"
-        "- Do NOT use markdown headings; plain readable text only\n"
-        "- End with a short reflective closing paragraph\n\n"
-        "Sources:\n" + "\n".join(source_lines)
-    )
-    try:
-        story = ollama_chat(prompt, system="You are an audiobook scriptwriter. Output plain text only.", model=OLLAMA_CHAT)
-        story = (story or "").strip()
+    sources_block = "\n".join(source_lines)
+    opener = "Welcome readers, to Luna's Audiobooks. Hope you enjoy today's story."
+
+    # ── Short audiobook (~12–20 min spoken): single generation ─────────────────
+    if not target_minutes or target_minutes < 18:
+        prompt = (
+            f"Topic: {topic}\n\n"
+            "Write a story-style audiobook script based on the topic and sources below.\n"
+            "Requirements:\n"
+            "- 1200 to 1800 words\n"
+            "- Engaging narrative voice, clear transitions, natural spoken rhythm\n"
+            "- Include practical takeaways naturally in the story\n"
+            "- Do NOT use markdown headings; plain readable text only\n"
+            "- End with a short reflective closing paragraph\n\n"
+            "Sources:\n" + sources_block
+        )
+        story = _ollama_scriptwriter(prompt, "You are an audiobook scriptwriter. Output plain text only.", timeout=240)
         if not story:
             return False, "Could not generate story script."
+        if not story.lower().startswith("welcome readers"):
+            story = opener + "\n\n" + story
+        return True, {
+            "topic": topic,
+            "story": story,
+            "links": links,
+            "target_minutes": target_minutes,
+            "chapters": None,
+        }
+
+    # ── Long form (YouTube-style 30–90 min): chapters, ~145 words/minute spoken ─
+    WPM = 145
+    total_words = int(target_minutes * WPM)
+    if target_minutes <= 28:
+        num_chapters = 6
+    elif target_minutes <= 42:
+        num_chapters = 8
+    elif target_minutes <= 58:
+        num_chapters = 10
+    else:
+        num_chapters = 12
+    words_per_chapter = max(500, total_words // num_chapters)
+
+    outline = _ollama_scriptwriter(
+        f"Topic: {topic}\n\n"
+        f"Plan a {target_minutes}-minute spoken audiobook (about {total_words} words total in {num_chapters} chapters).\n"
+        f"List exactly {num_chapters} chapter titles, one per line, numbered:\n"
+        "1. First chapter title\n2. Second ...\n"
+        "Titles only — no extra text.",
+        "Output only the numbered chapter titles. Plain text.",
+        timeout=120,
+    )
+    chapter_titles: list[str] = []
+    for line in (outline or "").splitlines():
+        line = line.strip()
+        m = re.match(r"^\d+[\.\)]\s*(.+)$", line)
+        if m:
+            chapter_titles.append(m.group(1).strip())
+    while len(chapter_titles) < num_chapters:
+        chapter_titles.append(f"Part {len(chapter_titles) + 1}")
+    chapter_titles = chapter_titles[:num_chapters]
+
+    parts: list[str] = []
+    prev_tail = ""
+    sys_ch = (
+        "You write audiobook narration for listening aloud. Plain text only. "
+        "No markdown. No bullet lists unless natural speech. Vivid but accurate when using sources. "
+        "Always meet the requested minimum word count with full prose — never replace chapters with summaries."
+    )
+    for i, ch_title in enumerate(chapter_titles):
+        ch = i + 1
+        cont = ""
+        if ch > 1 and prev_tail:
+            cont = (
+                "Continue seamlessly from where the previous chapter left off. "
+                f"Last lines were: …{prev_tail[-350:]}\n\n"
+            )
+        if ch == 1:
+            ch_prompt = (
+                f"Write chapter {ch} of {num_chapters} for a spoken audiobook.\n\n"
+                f"Overall topic: {topic}\n"
+                f"Chapter title: {ch_title}\n\n"
+                f"Target length: **at least {words_per_chapter} words** of continuous narration "
+                f"(aim for {words_per_chapter}–{int(words_per_chapter * 1.12)} words — do not stop early).\n"
+                f"Start with this exact opening line, then continue: {opener}\n\n"
+                f"Sources (ground facts here):\n{sources_block}\n"
+            )
+        else:
+            ch_prompt = (
+                f"Write chapter {ch} of {num_chapters} for a spoken audiobook.\n\n"
+                f"Overall topic: {topic}\n"
+                f"Chapter title: {ch_title}\n\n"
+                f"Target length: **at least {words_per_chapter} words** of continuous narration "
+                f"(aim for {words_per_chapter}–{int(words_per_chapter * 1.12)} words — do not stop early).\n"
+                "Do not repeat the welcome line. Continue the narrative.\n\n"
+                f"{cont}"
+                f"Sources:\n{sources_block}\n"
+            )
+        chunk_text = _ollama_scriptwriter(ch_prompt, sys_ch, timeout=360)
+        chunk_text = (chunk_text or "").strip()
+        if not chunk_text:
+            return False, f"Chapter {ch} generation failed or timed out."
+        wc = len(chunk_text.split())
+        min_accept = max(500, int(words_per_chapter * 0.52))
+        if wc < min_accept:
+            expand_prompt = (
+                ch_prompt
+                + f"\n\n---\nYour previous draft was only about {wc} words. "
+                f"Rewrite and substantially EXPAND this chapter to **at least {words_per_chapter} words** "
+                "of full narration (scenes, detail, transitions — not a summary).\n\n"
+                f"Previous draft:\n{chunk_text[:6000]}"
+            )
+            chunk_text2 = _ollama_scriptwriter(expand_prompt, sys_ch, timeout=420)
+            if chunk_text2 and len(chunk_text2.split()) > wc:
+                chunk_text = chunk_text2.strip()
+        parts.append(chunk_text)
+        prev_tail = chunk_text
+
+    story = "\n\n".join(parts)
+    return True, {
+        "topic": topic,
+        "story": story,
+        "links": links,
+        "target_minutes": target_minutes,
+        "chapters": parts,
+    }
+
+def _synthesize_audiobook_one_part(script: str, long_form: bool) -> tuple[bool, str | None, float | None, str]:
+    """TTS + ffmpeg → one MP3. Returns (ok, temp_mp3_path, duration_sec, err). Caller deletes dirname(path)."""
+    temp_dir = tempfile.mkdtemp()
+    out_path = os.path.join(temp_dir, "audiobook.mp3")
+    try:
+        s = (script or "").strip()
+        if long_form:
+            s = s[:500000]
+        else:
+            s = s[:12000]
+        s = _clean_for_tts(s)
+        if not s.strip():
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            return False, None, None, "empty script"
+        chunks = _split_tts(s, max_chars=120)
+        if not chunks:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            return False, None, None, "no speakable chunks"
+        max_seg = 1200 if long_form else 200
+        ff_timeout = 1200 if long_form else 240
+        list_path = os.path.join(temp_dir, "list.txt")
+        paths: list[str] = []
+        for i, chunk in enumerate(chunks[:max_seg]):
+            audio = _tts_bytes_media(chunk)
+            if not audio:
+                continue
+            seg_path = os.path.join(temp_dir, f"seg_{i:03d}.mp3")
+            with open(seg_path, "wb") as f:
+                f.write(audio)
+            paths.append(seg_path)
+        if not paths:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            return False, None, None, "TTS failed for all chunks"
+        with open(list_path, "w", encoding="utf-8") as f:
+            for p in paths:
+                p_abs = os.path.abspath(p).replace("\\", "/")
+                f.write(f"file '{p_abs}'\n")
+        ret = subprocess.run(
+            ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", list_path, "-c", "copy", out_path],
+            capture_output=True,
+            timeout=ff_timeout,
+            cwd=temp_dir,
+            creationflags=_subprocess_no_window_flags(),
+        )
+        if ret.returncode != 0 or not os.path.isfile(out_path):
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            return False, None, None, "Could not merge audio (ffmpeg)"
+        listen_secs = _ffprobe_duration_seconds(out_path)
+        return True, out_path, listen_secs, ""
     except Exception as e:
-        return False, str(e)
-    # Required audiobook opening line
-    opener = "Welcome readers, to Luna's Audiobooks. Hope you enjoy today's story."
-    if not story.lower().startswith("welcome readers"):
-        story = opener + "\n\n" + story
-    return True, {"topic": topic, "story": story, "links": links}
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        return False, None, None, str(e)
+
+def _split_story_into_chapters(text: str) -> list[str]:
+    """Split prose into parts for separate MP3s — explicit Chapter/Part markers, else paragraph blocks, else ~850-word chunks."""
+    text = (text or "").strip()
+    if not text:
+        return []
+    parts = re.split(
+        r"(?m)(?:^|\n)(?:#{1,3}\s*)?(?:Chapter|CHAPTER|Part|PART|Book)\s*\d+[\s\.\-:]*[^\n]*\n|"
+        r"(?m)^(?:Chapter|Part)\s+(?:One|Two|Three|Four|Five|Six|Seven|Eight|Nine|Ten|Eleven|Twelve)[^\n]*\n",
+        text,
+    )
+    parts = [p.strip() for p in parts if p and p.strip()]
+    if len(parts) >= 2:
+        return parts
+    blocks = re.split(r"\n\s*\n", text)
+    blocks = [b.strip() for b in blocks if len(b.strip()) > 200]
+    if len(blocks) >= 2:
+        return blocks
+    words = text.split()
+    if len(words) <= 900:
+        return [text]
+    chunk_size = 850
+    out: list[str] = []
+    for i in range(0, len(words), chunk_size):
+        chunk = " ".join(words[i : i + chunk_size])
+        if chunk.strip():
+            out.append(chunk.strip())
+    return out if len(out) >= 2 else [text]
+
+def _audiobook_pending_load() -> dict:
+    try:
+        with open(_AUDIOBOOK_PENDING_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def _audiobook_pending_save(scope: str, data: dict) -> None:
+    os.makedirs(_DATA, exist_ok=True)
+    all_p = _audiobook_pending_load()
+    all_p[scope] = data
+    with open(_AUDIOBOOK_PENDING_FILE, "w", encoding="utf-8") as f:
+        json.dump(all_p, f, indent=2, ensure_ascii=False)
+
+def _audiobook_pending_clear(scope: str) -> None:
+    all_p = _audiobook_pending_load()
+    if scope in all_p:
+        del all_p[scope]
+        try:
+            with open(_AUDIOBOOK_PENDING_FILE, "w", encoding="utf-8") as f:
+                json.dump(all_p, f, indent=2, ensure_ascii=False)
+        except Exception:
+            pass
+
+def _audiobook_cancel_pending(scope: str) -> tuple[bool, str]:
+    scope = scope or "web"
+    if scope not in _audiobook_pending_load():
+        return False, "No audiobook chapter queue in progress. Start with **!audiobook create** …"
+    _audiobook_pending_clear(scope)
+    return True, "Cancelled the remaining chapters. Start again anytime with **!audiobook create** …"
+
+def _audiobook_continue_next(scope: str) -> tuple[bool, str]:
+    """Synthesize the next pending chapter MP3; clear queue when done."""
+    scope = scope or "web"
+    root = (CUSTOM_PODCAST_DIR or "").strip()
+    if not root or not os.path.isdir(root):
+        return False, f"Set **CUSTOM_PODCAST_DIR** in .env to a writable folder."
+    data = _audiobook_pending_load().get(scope)
+    if not data:
+        return False, "No chapters waiting. Start with **!audiobook create** …"
+    chapters = data.get("chapters") or []
+    idx = int(data.get("next_index", 0))
+    if idx >= len(chapters):
+        _audiobook_pending_clear(scope)
+        return False, "Nothing left to continue — chapter queue was already finished."
+    long_form = bool(data.get("long_form"))
+    out_slug = (data.get("out_slug") or "audiobook").strip() or "audiobook"
+    ts = (data.get("ts") or datetime.now().strftime("%Y%m%d_%H%M")).strip()
+    ch_raw = chapters[idx]
+    ok_mp3, tmp_path, listen_secs, err = _synthesize_audiobook_one_part(ch_raw, long_form)
+    if not ok_mp3 or not tmp_path:
+        return False, err or "TTS failed"
+    try:
+        dur_tag = _audio_duration_filename_tag(listen_secs)
+        name = f"audiobook_ch{idx + 1:02d}_{dur_tag}_{out_slug}_{ts}.mp3"
+        dest = os.path.join(root, name)
+        shutil.copy2(tmp_path, dest)
+        listen_min = (listen_secs or 0) / 60.0
+        len_line = ""
+        if listen_secs:
+            len_line = f" **Length:** ~{listen_min:.1f} min ({int(round(listen_secs))}s)."
+        data["next_index"] = idx + 1
+        n_total = int(data.get("n_total") or len(chapters))
+        n_done = idx + 1
+        if data["next_index"] >= len(chapters):
+            _audiobook_pending_clear(scope)
+            return True, (
+                f"Created **{name}** — chapter **{n_done}** of **{n_total}** (last).{len_line} "
+                "🎉 **Audiobook complete.** Play with **!podcast** or open your podcast folder."
+            )
+        _audiobook_pending_save(scope, data)
+        left = len(chapters) - data["next_index"]
+        return True, (
+            f"Created **{name}** — chapter **{n_done}** of **{n_total}**.{len_line}\n\n"
+            f"📖 **{left}** chapter(s) left. Say **!audiobook continue** when you want the next, "
+            "or **!audiobook cancel** to stop."
+        )
+    finally:
+        if tmp_path:
+            shutil.rmtree(os.path.dirname(tmp_path), ignore_errors=True)
 
 def _research_story_script(topic: str) -> tuple[bool, str]:
     """Create a story-style script .txt file from researched sources for audiobook narration."""
@@ -3061,8 +3558,7 @@ def _research_story_script(topic: str) -> tuple[bool, str]:
 
     try:
         os.makedirs(_AUDIOBOOK_SCRIPTS_DIR, exist_ok=True)
-        slug = re.sub(r"[^\w\s-]", "", topic.lower())[:40].strip().replace(" ", "_") or "story"
-        slug = re.sub(r"_+", "_", slug).strip("_") or "story"
+        slug = _topic_slug(topic) or "story"
         ts = datetime.now().strftime("%Y%m%d_%H%M")
         filename = f"{slug}_{ts}.txt"
         path = os.path.join(_AUDIOBOOK_SCRIPTS_DIR, filename)
@@ -3074,69 +3570,188 @@ def _research_story_script(topic: str) -> tuple[bool, str]:
     except Exception as e:
         return False, f"Failed to save script file: {e}"
 
-def _create_audiobook_from_research(topic: str) -> tuple[bool, str]:
-    """Create audiobook MP3 from a research story script using same TTS+ffmpeg flow as podcast."""
-    topic = (topic or "").strip()
+def _create_audiobook_from_research(topic: str, scope: str | None = None) -> tuple[bool, str]:
+    """Create audiobook MP3(s). Multi-chapter stories: **chapter 1 only**, then **!audiobook continue** for the rest."""
+    sc = (scope or LINKED_SCOPE or "web").strip() or "web"
+    raw = (topic or "").strip()
+    topic, target_minutes, source_mode = _parse_audiobook_request(raw)
     if not topic:
-        return False, "Usage: !audiobook create <topic>"
+        return False, (
+            "Usage: `!audiobook create <topic> [duration:30] [--brief|--story|--both]` — "
+            "`--brief` = saved **!research** only; `--story` = **!research_story** only; "
+            "`--both` = require both files; omit flags = auto. Then **!audiobook continue** / **!audiobook cancel**."
+        )
     root = (CUSTOM_PODCAST_DIR or "").strip()
     if not root or not os.path.isdir(root):
         return False, f"Set **CUSTOM_PODCAST_DIR** in .env to a writable folder (e.g. D:\\Luna Agent n8n) so I can save the audiobook."
-    ok, built = _research_story_build(topic)
-    if not ok:
-        return False, str(built)
-    script = _clean_for_tts((built or {}).get("story", ""))[:12000]
+    files_slug = _topic_slug(topic)
+    brief_path = _find_latest_topic_file(_RESEARCH_BRIEFS_DIR, files_slug)
+    story_path = _find_latest_topic_file(_AUDIOBOOK_SCRIPTS_DIR, files_slug)
+    use_brief = False
+    use_story = False
+    used_saved = False
+    tm: int | None = target_minutes
+    built: dict | None = None
+    chapter_texts: list[str] | None = None
+
+    if source_mode == "brief":
+        if not brief_path:
+            return False, "No saved **research brief** for this topic. Run **!research** with the same topic first."
+        use_brief = True
+        used_saved = True
+    elif source_mode == "story":
+        if not story_path:
+            return False, "No saved **story script** for this topic. Run **!research_story** with the same topic first."
+        use_story = True
+        used_saved = True
+    elif source_mode == "both":
+        if not brief_path or not story_path:
+            miss = []
+            if not brief_path:
+                miss.append("research brief (**!research**)")
+            if not story_path:
+                miss.append("story script (**!research_story**)")
+            return False, "Need both saved files for this topic. Missing: " + " and ".join(miss) + "."
+        use_brief = use_story = True
+        used_saved = True
+    else:
+        # auto: use whatever is saved, else generate
+        if brief_path or story_path:
+            used_saved = True
+            use_brief = bool(brief_path)
+            use_story = bool(story_path)
+
+    if used_saved:
+        brief_raw = _load_research_brief_file_for_tts(brief_path) if use_brief and brief_path else ""
+        story_raw = _load_story_script_file_for_tts(story_path) if use_story and story_path else ""
+        parts = []
+        if brief_raw.strip():
+            parts.append(brief_raw.strip())
+        if story_raw.strip():
+            parts.append(story_raw.strip())
+        script = _clean_for_tts("\n\n".join(parts))
+        if not script.strip():
+            return False, "Saved research/story files were empty. Re-run **!research** and/or **!research_story** for this topic."
+        long_form = tm is not None and tm >= 18
+        note_src = []
+        if use_brief and brief_path:
+            note_src.append("research brief")
+        if use_story and story_path:
+            note_src.append("story script")
+        src_note = " + ".join(note_src) if note_src else "saved files"
+    else:
+        ok, built = _research_story_build(topic, target_minutes=target_minutes)
+        if not ok:
+            return False, str(built)
+        if isinstance(built, dict):
+            chapter_texts = built.get("chapters")
+        tm = (built or {}).get("target_minutes")
+        long_form = tm is not None and tm >= 18
+        script = _clean_for_tts((built or {}).get("story", ""))
+        src_note = ""
+
+    # Build list of chapter parts (one MP3 each, first now — rest after **!audiobook continue**)
+    chapters_list: list[str] | None = None
+    if not used_saved and chapter_texts and isinstance(chapter_texts, list) and len(chapter_texts) > 1:
+        chapters_list = chapter_texts
+    elif used_saved and script.strip():
+        spl = _split_story_into_chapters(script)
+        if len(spl) > 1:
+            chapters_list = spl
+
+    if chapters_list and len(chapters_list) > 1:
+        out_slug = re.sub(r"[^\w\s-]", "", topic.lower())[:30].strip().replace(" ", "_") or "audiobook"
+        out_slug = re.sub(r"_+", "_", out_slug).strip("_")
+        ts = datetime.now().strftime("%Y%m%d_%H%M")
+        n_total = len(chapters_list)
+        ch0 = chapters_list[0]
+        ok_mp3, tmp_path, listen_secs, err = _synthesize_audiobook_one_part(ch0, long_form)
+        if not ok_mp3 or not tmp_path:
+            return False, "Chapter 1: " + (err or "TTS failed")
+        try:
+            dur_tag = _audio_duration_filename_tag(listen_secs)
+            name = f"audiobook_ch01_{dur_tag}_{out_slug}_{ts}.mp3"
+            dest = os.path.join(root, name)
+            shutil.copy2(tmp_path, dest)
+            listen_min = (listen_secs or 0) / 60.0
+            len_line = ""
+            if listen_secs:
+                len_line = f" **Length:** ~{listen_min:.1f} min ({int(round(listen_secs))}s)."
+            _audiobook_pending_save(
+                sc,
+                {
+                    "chapters": chapters_list,
+                    "next_index": 1,
+                    "long_form": long_form,
+                    "out_slug": out_slug,
+                    "ts": ts,
+                    "topic": topic,
+                    "n_total": n_total,
+                },
+            )
+            src_h = ""
+            if used_saved:
+                src_h = f" (from saved **{src_note}**)"
+            return True, (
+                f"Created **{name}** — chapter **1** of **{n_total}**{src_h}.{len_line}\n\n"
+                f"📖 When you’re ready for chapter 2, say **!audiobook continue** (or **audiobook continue** in chat). "
+                f"**!audiobook cancel** skips the rest. Play with **!podcast** or open the folder."
+            )
+        finally:
+            if tmp_path:
+                shutil.rmtree(os.path.dirname(tmp_path), ignore_errors=True)
+
+    if long_form:
+        script = script[:500000]
+    else:
+        script = script[:12000]
     if not script.strip():
         return False, "Generated audiobook script was empty."
-    chunks = _split_tts(script, max_chars=120)
-    if not chunks:
-        return False, "No speakable chunks from script."
-    temp_dir = tempfile.mkdtemp()
-    list_path = os.path.join(temp_dir, "list.txt")
-    out_path = os.path.join(temp_dir, "audiobook.mp3")
+    ok_mp3, tmp_path, listen_secs, err = _synthesize_audiobook_one_part(script, long_form)
+    if not ok_mp3 or not tmp_path:
+        return False, err or "Could not create audiobook MP3."
     try:
-        paths = []
-        for i, chunk in enumerate(chunks[:200]):  # longer than podcast
-            audio = _tts_bytes(chunk)
-            if not audio:
-                continue
-            seg_path = os.path.join(temp_dir, f"seg_{i:03d}.mp3")
-            with open(seg_path, "wb") as f:
-                f.write(audio)
-            paths.append(seg_path)
-        if not paths:
-            return False, "TTS failed for all chunks. Check gTTS and internet."
-        with open(list_path, "w", encoding="utf-8") as f:
-            for p in paths:
-                p_abs = os.path.abspath(p).replace("\\", "/")
-                f.write(f"file '{p_abs}'\n")
-        ret = subprocess.run(
-            ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", list_path, "-c", "copy", out_path],
-            capture_output=True,
-            timeout=240,
-            cwd=temp_dir,
-        )
-        if ret.returncode != 0 or not os.path.isfile(out_path):
-            return False, "Could not merge audio (ffmpeg). Install FFmpeg and try again."
-        slug = re.sub(r"[^\w\s-]", "", topic.lower())[:30].strip().replace(" ", "_") or "audiobook"
-        slug = re.sub(r"_+", "_", slug).strip("_")
+        out_slug = re.sub(r"[^\w\s-]", "", topic.lower())[:30].strip().replace(" ", "_") or "audiobook"
+        out_slug = re.sub(r"_+", "_", out_slug).strip("_")
         ts = datetime.now().strftime("%Y%m%d_%H%M")
-        name = f"audiobook_{slug}_{ts}.mp3"
+        dur_tag = _audio_duration_filename_tag(listen_secs)
+        name = f"audiobook_{dur_tag}_{out_slug}_{ts}.mp3"
         dest = os.path.join(root, name)
-        shutil.copy2(out_path, dest)
-        return True, f"Created **{name}** in your podcast folder. You can play it with **!play {name}** or browse the folder."
-    except Exception as e:
-        return False, f"Could not create audiobook MP3: {e}"
+        shutil.copy2(tmp_path, dest)
+        listen_min = (listen_secs or 0) / 60.0
+        note = ""
+        if used_saved:
+            note = f" Used your saved **{src_note}** (`{files_slug}_*.txt` in research_briefs / audiobook_scripts)."
+            if long_form and tm:
+                note += " (Saved text was used in full; `duration:` does not stretch audio.)"
+        elif long_form and tm:
+            note = (
+                f" Target was **~{tm} min** of speech — filename shows **actual** length (~{listen_min:.1f} min). "
+                "Leave Luna running until TTS finishes."
+            )
+        elif not used_saved:
+            note = (
+                " Tip: run **!research** and **!research_story** with the same topic first — "
+                "the next **!audiobook create** will read those files instead of regenerating."
+            )
+        if tm and listen_min > 0.5 and listen_min < tm * 0.55:
+            if not used_saved:
+                note += (
+                    f" ⚠️ Output is much shorter than your **~{tm} min** target (~{listen_min:.0f} min actual). "
+                    "The generated script was shorter than requested — try a larger Ollama model, run again, or add **!research**/**!research_story** text."
+                )
+            else:
+                note += (
+                    f" ⚠️ Audio ~{listen_min:.0f} min — shorter than **~{tm} min** `duration:`; "
+                    "length follows your **saved** files, not the duration number."
+                )
+        len_line = ""
+        if listen_secs:
+            len_line = f" **Length:** ~{listen_min:.1f} min ({int(round(listen_secs))}s)."
+        return True, f"Created **{name}** in your podcast folder.{len_line}{note} Play with **!podcast** or open the folder."
     finally:
-        try:
-            for f in os.listdir(temp_dir):
-                try:
-                    os.unlink(os.path.join(temp_dir, f))
-                except Exception:
-                    pass
-            os.rmdir(temp_dir)
-        except Exception:
-            pass
+        if tmp_path:
+            shutil.rmtree(os.path.dirname(tmp_path), ignore_errors=True)
 
 # ── Social automation (Suno/X/Facebook/YouTube/Instagram/WhatsApp/Messenger) ──
 
@@ -5688,9 +6303,22 @@ def _run_cmd_impl(cmd: str, p: dict, scope: str | None, user_message: str) -> st
         return f"✅ {msg}"
     if cmd == "audiobook":
         action = (p.get("action") or "create").strip().lower()
+        sc = scope or LINKED_SCOPE or "web"
+        if action == "continue":
+            ok, msg = _audiobook_continue_next(sc)
+            if not ok:
+                _record_failure("audiobook", msg, p)
+                return f"❌ {msg}"
+            return f"✅ {msg}"
+        if action == "cancel":
+            ok, msg = _audiobook_cancel_pending(sc)
+            return f"✅ {msg}" if ok else f"❌ {msg}"
         if action != "create":
-            return "Usage: !audiobook create <topic>"
-        ok, msg = _create_audiobook_from_research((p.get("topic") or p.get("query") or p.get("input") or "").strip())
+            return "Usage: !audiobook create <topic> [duration:30] [--brief|--story|--both], or **continue** / **cancel**"
+        ok, msg = _create_audiobook_from_research(
+            (p.get("topic") or p.get("query") or p.get("input") or "").strip(),
+            scope=sc,
+        )
         if not ok:
             _record_failure("audiobook", msg, p)
             return f"❌ {msg}"
@@ -5836,10 +6464,15 @@ def _parse_command(text: str) -> tuple[str, dict] | None:
     for pfx in ("research_story ","research story ","story_script ","story script "):
         if low.startswith(pfx):
             return "research_story", {"topic": raw[len(pfx):].strip()}
-    for pfx in ("audiobook create ","audiobook "):
-        if low.startswith(pfx):
-            rest = raw[len(pfx):].strip()
-            return "audiobook", {"action": "create", "topic": rest}
+    if low == "audiobook continue" or low.startswith("audiobook continue "):
+        return "audiobook", {"action": "continue"}
+    if low == "audiobook cancel" or low.startswith("audiobook cancel "):
+        return "audiobook", {"action": "cancel"}
+    if low.startswith("audiobook create "):
+        return "audiobook", {"action": "create", "topic": raw[len("audiobook create "):].strip()}
+    if low.startswith("audiobook "):
+        rest = raw[len("audiobook "):].strip()
+        return "audiobook", {"action": "create", "topic": rest}
     # Scrape
     m = re.search(r"\b(?:scrape|extract from|grab from|get from|pull from)\b\s+(https?://\S+)\s*(.*)", raw, re.I)
     if m:
@@ -5981,7 +6614,7 @@ def _likely_command(text: str) -> bool:
     low = (text or "").strip().lower()
     if not low: return False
     if _CONV_START.match(low): return False
-    starters = ("play ","podcast ","podcast create ","create podcast ","audiobook ","audiobook create ","search ","research ","research_story ","research story ","story_script ","story script ","send ","create ","call ","dm ","tell ","inform ","msg ","share ","post ","remind ","suno ","yt_comment ","comment ","ig_dm ","fb_msg ","google ","news","!help","how's ","pc status","luna status","ram ","what do you see","what can you see","ask me ","summarize ","summary of ","todo ","calendar ","join me ","join my ","luna join ")
+    starters = ("play ","podcast ","podcast create ","create podcast ","audiobook ","audiobook create ","audiobook continue ","audiobook cancel ","search ","research ","research_story ","research story ","story_script ","story script ","send ","create ","call ","dm ","tell ","inform ","msg ","share ","post ","remind ","suno ","yt_comment ","comment ","ig_dm ","fb_msg ","google ","news","!help","how's ","pc status","luna status","ram ","what do you see","what can you see","ask me ","summarize ","summary of ","todo ","calendar ","join me ","join my ","luna join ")
     return any(low.startswith(s) for s in starters) or low in ("play","news","help","skip","stop","ask me","digest","daily digest","todo","todo list","calendar","calendar list","calendar today","calendar week") or "luna status" in low or "pc status" in low or bool(re.search(r"\b(what do you see|what can you see|do you see me|describe what you see)\b", low))
 
 def _is_retry(msg: str) -> bool:
@@ -7880,12 +8513,26 @@ def _handle_bang(msg: str, scope: str) -> str:
         ok, r = _research_story_script(args)
         return f"✅ {r}" if ok else f"❌ {r}"
     if cmd == "!audiobook":
-        if not args.lower().startswith("create "):
-            return "Usage: !audiobook create <topic>"
-        topic = args[7:].strip()
+        al = args.lower().strip()
+        sc = scope or LINKED_SCOPE or "web"
+        if not args.strip():
+            return (
+                "Usage: **!audiobook create** <topic> [duration:30] [--brief|--story|--both], "
+                "or **!audiobook continue**, or **!audiobook cancel**"
+            )
+        if al == "continue" or al.startswith("continue "):
+            ok, r = _audiobook_continue_next(sc)
+            return f"✅ {r}" if ok else f"❌ {r}"
+        if al == "cancel" or al.startswith("cancel "):
+            ok, r = _audiobook_cancel_pending(sc)
+            return f"✅ {r}" if ok else f"❌ {r}"
+        if al.startswith("create "):
+            topic = args[7:].strip()
+        else:
+            topic = args.strip()
         if not topic:
-            return "Usage: !audiobook create <topic>"
-        ok, r = _create_audiobook_from_research(topic)
+            return "Usage: !audiobook create <topic> [duration:30] [--brief|--story|--both]"
+        ok, r = _create_audiobook_from_research(topic, scope=sc)
         return f"✅ {r}" if ok else f"❌ {r}"
     if cmd == "!summarize":
         ok, r = _summarize_input(args)
