@@ -362,7 +362,7 @@ HELP_TEXT = (
     "• !suno_ready — tell Luna you're already logged in to Suno (or say **I'm logged in to Suno**)\n"
     "• !share_song / !share_facebook — share to X or Facebook\n"
     "• !yt_comment <url> — transcribe video + AI comment with real context\n"
-    "• !yt_analytics [days] [limit] — top traction videos from your channel (requires YOUTUBE_API_KEY)\n"
+    "• !yt_analytics [days] [limit] — top traction videos from your channel (API key optional; fallback uses scrape metadata)\n"
     "• !status <text> / !status clear — change Luna's Discord status (linked/admin)\n"
     "• !ig_dm <user> [msg] — Instagram DM\n"
     "• !fb_msg <name> [msg] — Messenger message\n"
@@ -3159,21 +3159,12 @@ def _search(query: str) -> tuple[bool, str]:
         return False, str(e)
 
 def _yt_channel_analytics(days: int = 30, limit: int = 5) -> tuple[bool, str]:
-    """Return top videos by traction for configured channel using YouTube Data API."""
-    if not YOUTUBE_API_KEY:
-        return False, "Set **YOUTUBE_API_KEY** in `.env` (YouTube Data API v3) to use `!yt_analytics`."
+    """Return top videos by traction (API mode if key exists; scrape-style fallback via yt-dlp)."""
     if not YT_CHANNEL_ID:
         return False, "Set **YOUTUBE_CHANNEL_ID** in `.env`."
 
     days = max(1, min(int(days or 30), 365))
     limit = max(1, min(int(limit or 5), 10))
-
-    def _api_json(base: str, params: dict, timeout: int = 25) -> dict:
-        qs = urllib.parse.urlencode(params)
-        url = f"{base}?{qs}"
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            return json.loads(r.read().decode("utf-8", errors="replace") or "{}")
 
     def _to_int(v) -> int:
         try:
@@ -3183,94 +3174,168 @@ def _yt_channel_analytics(days: int = 30, limit: int = 5) -> tuple[bool, str]:
 
     now = datetime.now(timezone.utc)
     published_after = (now - timedelta(days=days)).isoformat().replace("+00:00", "Z")
-    try:
-        search_data = _api_json(
-            "https://www.googleapis.com/youtube/v3/search",
-            {
-                "part": "snippet",
-                "channelId": YT_CHANNEL_ID,
-                "type": "video",
-                "order": "date",
-                "maxResults": min(50, max(10, limit * 8)),
-                "publishedAfter": published_after,
-                "key": YOUTUBE_API_KEY,
-            },
-        )
-        items = search_data.get("items") or []
-        video_ids = []
-        for it in items:
-            vid = (((it or {}).get("id") or {}).get("videoId") or "").strip()
-            if vid and vid not in video_ids:
-                video_ids.append(vid)
-        if not video_ids:
-            return False, f"No videos found in the last **{days}** days for channel `{YT_CHANNEL_ID}`."
 
-        videos_data = _api_json(
-            "https://www.googleapis.com/youtube/v3/videos",
-            {
-                "part": "snippet,statistics",
-                "id": ",".join(video_ids[:50]),
-                "maxResults": 50,
-                "key": YOUTUBE_API_KEY,
-            },
-        )
-        videos = videos_data.get("items") or []
+    def _rank_rows(rows: list[dict], mode: str) -> tuple[bool, str]:
         ranked = []
-        for v in videos:
-            sn = v.get("snippet") or {}
-            st = v.get("statistics") or {}
-            title = (sn.get("title") or "Untitled").strip()
-            vid = (v.get("id") or "").strip()
-            pub_s = (sn.get("publishedAt") or "").strip()
-            try:
-                pub_dt = datetime.fromisoformat(pub_s.replace("Z", "+00:00"))
-            except Exception:
-                pub_dt = now
+        for r in rows:
+            title = (r.get("title") or "Untitled").strip()
+            vid = (r.get("id") or "").strip()
+            pub_dt = r.get("published_dt") or now
             age_days = max(1.0, (now - pub_dt).total_seconds() / 86400.0)
-            views = _to_int(st.get("viewCount"))
-            likes = _to_int(st.get("likeCount"))
-            comments = _to_int(st.get("commentCount"))
+            views = _to_int(r.get("views"))
+            likes = _to_int(r.get("likes"))
+            comments = _to_int(r.get("comments"))
             engagement = likes + comments
             views_per_day = views / age_days
-            # Simple traction heuristic: velocity + weighted engagement.
             traction = views_per_day + (likes * 8.0) + (comments * 20.0)
-            ranked.append(
-                {
-                    "title": title,
-                    "id": vid,
-                    "views": views,
-                    "likes": likes,
-                    "comments": comments,
-                    "engagement": engagement,
-                    "age_days": age_days,
-                    "views_per_day": views_per_day,
-                    "traction": traction,
-                }
-            )
+            ranked.append({
+                "title": title, "id": vid, "views": views, "likes": likes, "comments": comments,
+                "engagement": engagement, "views_per_day": views_per_day, "traction": traction
+            })
         if not ranked:
-            return False, "Could not compute YouTube analytics."
+            return False, "No usable YouTube video data found."
         ranked.sort(key=lambda x: x["traction"], reverse=True)
         top = ranked[:limit]
-        lines = [f"📊 **YouTube traction** (last {days} days, top {len(top)}):"]
+        lines = [f"📊 **YouTube traction** (last {days} days, top {len(top)}) — source: {mode}"]
         for i, it in enumerate(top, 1):
             er = (it["engagement"] / it["views"] * 100.0) if it["views"] > 0 else 0.0
-            url = f"https://www.youtube.com/watch?v={it['id']}"
+            url = f"https://www.youtube.com/watch?v={it['id']}" if it["id"] else ""
             lines.append(
                 f"{i}. **{it['title'][:88]}**\n"
                 f"   Views: {it['views']:,} | Likes: {it['likes']:,} | Comments: {it['comments']:,} | "
                 f"Engagement: {er:.2f}% | Views/day: {it['views_per_day']:.1f}\n"
-                f"   {url}"
+                f"   {url}".rstrip()
             )
         return True, "\n".join(lines)
-    except urllib.error.HTTPError as e:
+
+    # Mode A: YouTube Data API (more reliable metrics)
+    if YOUTUBE_API_KEY:
+        def _api_json(base: str, params: dict, timeout: int = 25) -> dict:
+            qs = urllib.parse.urlencode(params)
+            url = f"{base}?{qs}"
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return json.loads(r.read().decode("utf-8", errors="replace") or "{}")
         try:
-            body = e.read().decode("utf-8", errors="replace")
-            msg = (json.loads(body).get("error") or {}).get("message") or str(e)
-        except Exception:
-            msg = str(e)
-        return False, f"YouTube API error: {msg}"
+            search_data = _api_json(
+                "https://www.googleapis.com/youtube/v3/search",
+                {
+                    "part": "snippet",
+                    "channelId": YT_CHANNEL_ID,
+                    "type": "video",
+                    "order": "date",
+                    "maxResults": min(50, max(10, limit * 8)),
+                    "publishedAfter": published_after,
+                    "key": YOUTUBE_API_KEY,
+                },
+            )
+            items = search_data.get("items") or []
+            video_ids = []
+            for it in items:
+                vid = (((it or {}).get("id") or {}).get("videoId") or "").strip()
+                if vid and vid not in video_ids:
+                    video_ids.append(vid)
+            if video_ids:
+                videos_data = _api_json(
+                    "https://www.googleapis.com/youtube/v3/videos",
+                    {
+                        "part": "snippet,statistics",
+                        "id": ",".join(video_ids[:50]),
+                        "maxResults": 50,
+                        "key": YOUTUBE_API_KEY,
+                    },
+                )
+                videos = videos_data.get("items") or []
+                rows = []
+                for v in videos:
+                    sn = v.get("snippet") or {}
+                    st = v.get("statistics") or {}
+                    pub_s = (sn.get("publishedAt") or "").strip()
+                    try:
+                        pub_dt = datetime.fromisoformat(pub_s.replace("Z", "+00:00"))
+                    except Exception:
+                        pub_dt = now
+                    rows.append({
+                        "title": sn.get("title"),
+                        "id": v.get("id"),
+                        "published_dt": pub_dt,
+                        "views": st.get("viewCount"),
+                        "likes": st.get("likeCount"),
+                        "comments": st.get("commentCount"),
+                    })
+                ok, out = _rank_rows(rows, "YouTube Data API")
+                if ok:
+                    return True, out
+        except urllib.error.HTTPError as e:
+            try:
+                body = e.read().decode("utf-8", errors="replace")
+                msg = (json.loads(body).get("error") or {}).get("message") or str(e)
+            except Exception:
+                msg = str(e)
+            # fall through to scrape-style fallback
+            api_err = f"YouTube API error ({msg}); trying scrape fallback."
+        except Exception as e:
+            api_err = f"YouTube API failed ({e}); trying scrape fallback."
+        else:
+            api_err = ""
+    else:
+        api_err = ""
+
+    # Mode B: scrape-style fallback via yt-dlp channel metadata (no API key needed)
+    try:
+        import yt_dlp
+    except Exception:
+        hint = " Install `yt-dlp` or set `YOUTUBE_API_KEY`."
+        return False, ((api_err + " ") if api_err else "") + "Scrape fallback unavailable." + hint
+    try:
+        channel_url = (YT_CHANNEL_URL or "").strip()
+        if not channel_url:
+            channel_url = f"https://www.youtube.com/channel/{YT_CHANNEL_ID}/videos"
+        opts = {
+            "quiet": True,
+            "skip_download": True,
+            "extract_flat": False,
+            "playlistend": min(80, max(20, limit * 12)),
+            "extractor_args": {"youtube": {"player_client": "android,web,mweb"}},
+        }
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(channel_url, download=False)
+        entries = (info or {}).get("entries") or []
+        rows = []
+        cutoff = now - timedelta(days=days)
+        for e in entries:
+            if not isinstance(e, dict):
+                continue
+            vid = (e.get("id") or "").strip()
+            title = (e.get("title") or "").strip()
+            ts = e.get("timestamp")
+            if ts:
+                pub_dt = datetime.fromtimestamp(float(ts), tz=timezone.utc)
+            else:
+                up = (e.get("upload_date") or "").strip()
+                try:
+                    pub_dt = datetime.strptime(up, "%Y%m%d").replace(tzinfo=timezone.utc) if up else now
+                except Exception:
+                    pub_dt = now
+            if pub_dt < cutoff:
+                continue
+            rows.append({
+                "title": title,
+                "id": vid,
+                "published_dt": pub_dt,
+                "views": e.get("view_count") or 0,
+                "likes": e.get("like_count") or 0,
+                "comments": e.get("comment_count") or 0,
+            })
+        if not rows:
+            return False, ((api_err + " ") if api_err else "") + f"No recent videos found in the last **{days}** days."
+        ok, out = _rank_rows(rows, "yt-dlp scrape fallback")
+        if ok and api_err:
+            out = f"ℹ️ {api_err}\n\n" + out
+        return ok, out
     except Exception as e:
-        return False, f"YouTube analytics failed: {e}"
+        prefix = (api_err + " ") if api_err else ""
+        return False, prefix + f"YouTube scrape fallback failed: {e}"
 
 def _scrape_website(url: str, instruction: str = "", post_to_discord: str = "") -> tuple[bool, str]:
     """Scrape a website, use LLM to extract specific info, optionally post to a Discord channel."""

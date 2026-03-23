@@ -1,6 +1,6 @@
 # Luna 5.0
 
-**A personal AI companion that lives on your PC** — Discord bot, web UI, voice, automation, memory, and a genuine inner life. One assistant for conversation, commands, and control of your digital world.
+**A personal AI companion that actually lives on your PC** — Discord bot, web UI, voice, automation, memory, and a genuine inner life. One assistant for conversation, execution, and daily workflow.
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
@@ -12,6 +12,19 @@
 Luna runs as a **Discord bot** and a **local web UI** (Flask) on your machine. She uses **Ollama** (local LLMs — no cloud API required) for all chat, reasoning, and generation. She has persistent memory that survives restarts, a deep identity defined in `data/SOUL.md`, internal drives and an existential layer, and a private inner monologue she runs before every reply.
 
 She is not a chatbot wrapper. She is a continuous presence that learns from what you tell her, reflects daily on what she did, notices patterns in her own thinking, and speaks unprompted when she has something worth saying.
+
+### Why Luna Feels Different
+- She keeps **persistent memory** and profile context across sessions.
+- She has **private inner monologue** before answering, so replies stay grounded.
+- She supports **real actions** (Discord voice, reminders, research, media, browser automations).
+- She can run with **local models** (Ollama and optional GGUF).
+- She has a tunable speaking style (`LUNA_STYLE`) and avoids generic assistant tone.
+
+### New / Notable
+- **YouTube traction analytics**: `!yt_analytics [days] [limit]` (API key optional; scrape fallback available).
+- **Live Discord status control**: `!status <text>` / `!status clear` / `!status <type> <text>`.
+- **LISA GGUF chat default** for Luna conversation.
+- **Claude-like communication tuning** in system prompt (less robotic / less canned assistant phrasing).
 
 | Interface | What you do there |
 |-----------|-------------------|
@@ -121,6 +134,8 @@ Every chat query is semantically matched against the knowledge base (`data/knowl
 | `!suno <description>` | Create a Suno song via browser automation |
 | `!share_song` / `!share_facebook` | Share latest Suno song to X or Facebook |
 | `!yt_comment <url>` | Transcribe YouTube video + post AI comment with real context |
+| `!yt_analytics [days] [limit]` | Rank top channel videos by traction (views velocity + engagement); uses API if key exists, otherwise scrape fallback |
+| `!status <text>` / `!status clear` | Change Luna's live Discord bot status (linked/admin) |
 | `!ig_dm <user> [message]` | Instagram DM (browser automation, Luna rephrases) |
 | `!fb_msg <name> [message]` | Facebook Messenger DM (browser automation, Luna rephrases) |
 | `!msg <contact> [description]` | WhatsApp message (browser automation, Luna rephrases) |
@@ -165,7 +180,7 @@ Every chat query is semantically matched against the knowledge base (`data/knowl
 - Natural language: `create a video about a journey through space`
 
 ### Voice & Audio
-- **TTS** — gTTS for all responses; optional auto-play on server
+- **TTS** — gTTS for inline chat replies; Edge TTS (Ava Multilingual) default for podcast/audiobook generation, with Fish fallback
 - **Discord voice** — join/leave, play music, speak via TTS
 - **Voice input** (STT) — Whisper transcription in Discord voice messages
 - **TranscribeMe** — `/transcribeme/` web page for transcribing audio, translating WhatsApp voice notes, Q&A, reminders
@@ -227,7 +242,7 @@ ollama pull granite3.2-vision            # vision (optional, for camera)
 pip install llama-cpp-python
 ```
 
-In `.env` set **`LUNA_CHAT_GGUF`** to the full path of that file. Keep **`OLLAMA_CHAT_MODEL`** in sync with the chat label Luna uses (default in `bot.py` is `lisa-llama3-8b-gguf`); routing to GGUF requires the **same string** as `OLLAMA_CHAT_MODEL` and a valid file path.
+In `.env` set **`LUNA_CHAT_GGUF`** to the full path of that file. Keep **`OLLAMA_CHAT_MODEL`** in sync with the chat label Luna uses (default in `bot.py` is `mradermacher/meta-llama-Meta-Llama-3-8B-Instruct-fine-tune-english-LISA-i1-GGUF`); routing to GGUF requires the **same string** as `OLLAMA_CHAT_MODEL` and a valid file path.
 
 GPU on Windows: you may need a CUDA build of `llama-cpp-python`; see the [project docs](https://github.com/abetlen/llama-cpp-python#installation). Tune **`LUNA_CHAT_GGUF_N_GPU`** (layers offloaded) and **`LUNA_CHAT_GGUF_N_CTX`** if needed.
 
@@ -258,9 +273,19 @@ LINKED_DISCORD_USER_ID=your_discord_user_id
 # Optional — defaults shown
 OLLAMA_BASE_URL=http://127.0.0.1:11434
 OLLAMA_MODEL=qwen2.5-coder:7b-instruct
-# OLLAMA_CHAT_MODEL defaults in bot.py to LISA Llama 3 8B if omitted
+# OLLAMA_CHAT_MODEL defaults in bot.py to:
+# mradermacher/meta-llama-Meta-Llama-3-8B-Instruct-fine-tune-english-LISA-i1-GGUF
 OLLAMA_FALLBACK_MODEL=qwen2.5:1.5b
 OLLAMA_VISION_MODEL=granite3.2-vision
+
+# Optional: YouTube traction analytics (improves !yt_analytics quality)
+YOUTUBE_API_KEY=your_youtube_data_api_key
+YOUTUBE_CHANNEL_ID=your_channel_id
+
+# Optional: speaking style + startup status
+LUNA_STYLE=grounded   # grounded | creative | intimate
+DISCORD_STATUS_TYPE=listening
+DISCORD_STATUS_TEXT=lisa vibes
 
 # Optional — Pollinations.ai fallback for image gen (if no GPU)
 POLLINATIONS_API_KEY=your_key
@@ -292,11 +317,15 @@ Web UI: **http://127.0.0.1:5050** · Discord bot connects automatically.
 | `DISCORD_ADMIN_ID` | optional | Admin override |
 | `OLLAMA_BASE_URL` | `http://127.0.0.1:11434` | Ollama API base |
 | `OLLAMA_MODEL` | `qwen2.5-coder:7b-instruct` | Code / Shadow / heavy tasks |
-| `OLLAMA_CHAT_MODEL` | `lisa-llama3-8b-gguf` (see `bot.py`) | **Luna conversation** label; must match for GGUF routing |
+| `OLLAMA_CHAT_MODEL` | `mradermacher/meta-llama-Meta-Llama-3-8B-Instruct-fine-tune-english-LISA-i1-GGUF` | **Luna conversation** label; must match for GGUF routing |
 | `LUNA_CHAT_GGUF` | — | Path to a local `.gguf` file for Luna chat (bypasses Ollama for chat) |
 | `LUNA_CHAT_GGUF_N_CTX` / `N_GPU` / `THREADS` | `8192` / `-1` / auto | llama-cpp load tuning |
 | `OLLAMA_SMALL` | `qwen2.5:1.5b` | Fast model for quick tasks |
 | `OLLAMA_VISION_MODEL` | `granite3.2-vision` | Vision / camera |
+| `YOUTUBE_API_KEY` | optional | Enables richer YouTube channel traction analytics |
+| `YOUTUBE_CHANNEL_ID` | existing default | Channel analyzed by `!yt_analytics` and channel-song workflows |
+| `LUNA_STYLE` | `grounded` | Speaking profile (`grounded`, `creative`, `intimate`) |
+| `DISCORD_STATUS_TYPE` / `DISCORD_STATUS_TEXT` | `listening` / empty | Bot presence type/text on startup |
 | `POLLINATIONS_API_KEY` | optional | Fallback for image gen without GPU |
 | `CUSTOM_PODCAST_DIR` | — | Folder scanned by `!podcast` |
 | `LINKED_DISCORD_USER_ID` | — | Discord user who is "linked" (gets proactive DMs, reminders, plays) |
