@@ -1,5 +1,5 @@
 {
   "name": "dict_case_everywhere_except_last",
-  "description": "Case convert dictionary values except last key-value pair",
-  "script": "import json, sys\nparams = json.load(sys.stdin)\n\nresult = {k: v.casefold() for k, v in params.items()[:-1]}\nif params:\n    result[params[-1][0]] = params[-1][1].casefold()\nprint(result)"
+  "description": "Convert all keys in a dictionary to case (except the last one)",
+  "script": "import json, sys\nparams = json.load(sys.stdin)\nresult = {k.upper(): v for k, v in params.items()[:-1]}\nprint(result)"
 }

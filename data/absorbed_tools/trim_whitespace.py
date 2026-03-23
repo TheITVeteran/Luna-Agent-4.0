@@ -1,4 +1,4 @@
 import json, sys
 params = json.load(sys.stdin)
-result = {k: v.strip() for k, v in params.items()}
-print(result)
+result = {key: value.strip() for key, value in params.items()}
+print(json.dumps(result))

@@ -1,5 +1,5 @@
 {
   "name": "dict_case_everywhere_except_first_last_a",
-  "description": "Convert a dictionary to lowercase except for the first last key-value pair's values",
-  "script": "import json, sys\n\ndef convert_to_lowercase(d):\n    keys, values = d.items()\n    if len(keys) > 1 and len(values) > 1:\n        new_values = [v.lower() if i != (len(keys)-1)) % 2 == 0 else v for i,v in enumerate(values)]\n        return dict(keys, new_values)\n    return dict(d)\n\nparams = json.load(sys.stdin)\nresult = convert_to_lowercase(params)\nprint(result)"
+  "description": "Prints a JSON object with all keys and values in title case, except for the first key-value pair which is in lowercase",
+  "script": "import json, sys\nparams = json.load(sys.stdin)\nresult = {k.lower(): v for k, v in params.items()[1:]}\nprint(result)"
 }

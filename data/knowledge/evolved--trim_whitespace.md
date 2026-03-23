@@ -1,3 +1,3 @@
 # Evolved: trim_whitespace
 
-Removes whitespace from each string in a JSON object
+Trims leading/trailing whitespace from all values in a dictionary

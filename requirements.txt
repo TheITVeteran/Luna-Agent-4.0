@@ -43,3 +43,6 @@ pyperclip>=1.8
 # Optional: ML tools (see also requirements-ml.txt)
 # scikit-learn>=1.0
 # numpy>=1.20
+
+# Optional: local GGUF for Luna chat (set LUNA_CHAT_GGUF in .env — see README)
+# llama-cpp-python>=0.2.0

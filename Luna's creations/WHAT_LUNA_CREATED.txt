@@ -271,3 +271,57 @@
 2026-03-19 00:07 | evolved        | dict_case_random.py | Randomly selects a case from the dictionary values
 2026-03-21 23:08 | absorbed tool  | remove_duplicates_from_list.py | Remove duplicate elements from a list in a dictionary value
 2026-03-21 23:08 | evolved        | remove_duplicates_from_list.py | Remove duplicate elements from a list in a dictionary value
+2026-03-22 01:10 | absorbed tool  | dict_case_everywhere_except_last_a.py | Capitalize all keys except for the last one in a dictionary, prefixing values with 'a_'
+2026-03-22 01:10 | evolved        | dict_case_everywhere_except_last_a.py | Capitalize all keys except for the last one in a dictionary, prefixing values with 'a_'
+2026-03-22 01:20 | absorbed tool  | trim_whitespace.py | Removes whitespace from dictionary values
+2026-03-22 01:20 | evolved        | trim_whitespace.py | Removes whitespace from dictionary values
+2026-03-22 01:51 | absorbed tool  | convert_case.py | Convert JSON key-value pairs to a different case
+2026-03-22 01:51 | evolved        | convert_case.py | Convert JSON key-value pairs to a different case
+2026-03-22 02:01 | absorbed tool  | strip_dict_keys.py | Remove specified keys from a dictionary
+2026-03-22 02:01 | evolved        | strip_dict_keys.py | Remove specified keys from a dictionary
+2026-03-22 02:11 | absorbed tool  | strip_values_from_dict.py | Remove leading/trailing whitespace from all values in a dictionary
+2026-03-22 02:11 | evolved        | strip_values_from_dict.py | Remove leading/trailing whitespace from all values in a dictionary
+2026-03-22 02:21 | absorbed tool  | find_values_in_dict.py | Find all values in a dictionary that have a specific key
+2026-03-22 02:21 | evolved        | find_values_in_dict.py | Find all values in a dictionary that have a specific key
+2026-03-22 02:31 | absorbed tool  | strip_non_ascii.py | Removes non-ASCII characters from JSON string values
+2026-03-22 02:31 | evolved        | strip_non_ascii.py | Removes non-ASCII characters from JSON string values
+2026-03-22 02:51 | absorbed tool  | remove_suffix_from_list.py | Remove a specified suffix from all values in a list of dictionary values
+2026-03-22 02:51 | evolved        | remove_suffix_from_list.py | Remove a specified suffix from all values in a list of dictionary values
+2026-03-22 03:01 | absorbed tool  | extract_values.py | Extracts values from a JSON object
+2026-03-22 03:01 | evolved        | extract_values.py | Extracts values from a JSON object
+2026-03-22 03:11 | absorbed tool  | get_dict_keys_first_n.py | Get the first n keys from a dictionary in lexicographical order
+2026-03-22 03:11 | evolved        | get_dict_keys_first_n.py | Get the first n keys from a dictionary in lexicographical order
+2026-03-22 03:21 | absorbed tool  | capitalize_last_word.py | Capitalize the last word in a JSON object's values
+2026-03-22 03:21 | evolved        | capitalize_last_word.py | Capitalize the last word in a JSON object's values
+2026-03-22 03:31 | absorbed tool  | truncate_dict_values.py | Truncates dictionary values to a specified length
+2026-03-22 03:31 | evolved        | truncate_dict_values.py | Truncates dictionary values to a specified length
+2026-03-22 03:52 | absorbed tool  | trim_whitespace.py | Trims leading/trailing whitespace from all values in a dictionary
+2026-03-22 03:52 | evolved        | trim_whitespace.py | Trims leading/trailing whitespace from all values in a dictionary
+2026-03-22 04:02 | absorbed tool  | remove_duplicates_list.py | Remove duplicate elements from a list
+2026-03-22 04:02 | evolved        | remove_duplicates_list.py | Remove duplicate elements from a list
+2026-03-22 04:12 | absorbed tool  | dict_case_everywhere_except_last_a.py | Converts all string values in a dictionary to lowercase except for the last one
+2026-03-22 04:12 | evolved        | dict_case_everywhere_except_last_a.py | Converts all string values in a dictionary to lowercase except for the last one
+2026-03-22 04:42 | absorbed tool  | extract_key_value_pairs.py | Extract key-value pairs from a JSON object
+2026-03-22 04:42 | evolved        | extract_key_value_pairs.py | Extract key-value pairs from a JSON object
+2026-03-22 04:52 | absorbed tool  | remove_duplicates_from_list.py | Removes duplicate values from a list in JSON input
+2026-03-22 04:52 | evolved        | remove_duplicates_from_list.py | Removes duplicate values from a list in JSON input
+2026-03-22 05:02 | absorbed tool  | to_lower_case.py | Convert all keys and values in a JSON object to lowercase
+2026-03-22 05:02 | evolved        | to_lower_case.py | Convert all keys and values in a JSON object to lowercase
+2026-03-22 05:12 | absorbed tool  | get_json_key_value_pairs.py | Print all key-value pairs from a JSON object
+2026-03-22 05:12 | evolved        | get_json_key_value_pairs.py | Print all key-value pairs from a JSON object
+2026-03-22 05:22 | absorbed tool  | convert_case_list.py | Convert case of all elements in a list to uppercase
+2026-03-22 05:22 | evolved        | convert_case_list.py | Convert case of all elements in a list to uppercase
+2026-03-22 05:43 | absorbed tool  | trim_values.py | Removes leading and trailing whitespace from dictionary values
+2026-03-22 05:43 | evolved        | trim_values.py | Removes leading and trailing whitespace from dictionary values
+2026-03-22 06:03 | absorbed tool  | remove_duplicates.py | Remove duplicates from a list in a case-insensitive manner
+2026-03-22 06:03 | evolved        | remove_duplicates.py | Remove duplicates from a list in a case-insensitive manner
+2026-03-22 06:13 | absorbed tool  | dict_case_invert_first_values.py | Inverts case of all values in a dictionary while keeping the first value unchanged
+2026-03-22 06:13 | evolved        | dict_case_invert_first_values.py | Inverts case of all values in a dictionary while keeping the first value unchanged
+2026-03-22 06:23 | absorbed tool  | remove_duplicates_from_list.py | Removes duplicate elements from a list while preserving order
+2026-03-22 06:23 | evolved        | remove_duplicates_from_list.py | Removes duplicate elements from a list while preserving order
+2026-03-22 06:33 | absorbed tool  | get_dict_keys_sorted.py | Get keys from a dictionary sorted alphabetically
+2026-03-22 06:33 | evolved        | get_dict_keys_sorted.py | Get keys from a dictionary sorted alphabetically
+2026-03-22 07:03 | absorbed tool  | to_dict_values.py | Convert a JSON list of values into a dictionary with default key
+2026-03-22 07:03 | evolved        | to_dict_values.py | Convert a JSON list of values into a dictionary with default key
+2026-03-22 07:14 | absorbed tool  | truncate_dict_values.py | Truncates dictionary values to a specified length
+2026-03-22 07:14 | evolved        | truncate_dict_values.py | Truncates dictionary values to a specified length

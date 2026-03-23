@@ -1,4 +1,4 @@
 import json, sys
 params = json.load(sys.stdin)
-result = {k: str(v) for k, v in params.items()}
+result = {f'item_{i}': value for i, value in enumerate(params)}
 print(result)

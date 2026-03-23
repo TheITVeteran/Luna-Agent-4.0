@@ -3,9 +3,27 @@
 from __future__ import annotations
 import json, os, urllib.request
 
+try:
+    from dotenv import load_dotenv
+    _env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    load_dotenv(_env_path)
+except Exception:
+    pass
+
 _BASE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
-_OLLAMA_BASE = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
-_OLLAMA_MODEL = os.environ.get("OLLAMA_CHAT_MODEL") or os.environ.get("OLLAMA_MODEL", "qwen2.5-coder:7b-instruct")
+
+
+def _ollama_base() -> str:
+    return os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
+
+
+def _brain_model() -> str:
+    # Prefer code/small model so memory JSON still works when Luna chat uses local GGUF (LUNA_CHAT_GGUF).
+    return (
+        os.environ.get("OLLAMA_MODEL")
+        or os.environ.get("OLLAMA_CHAT_MODEL")
+        or "qwen2.5-coder:7b-instruct"
+    ).strip()
 
 _REMEMBER_PROMPT = """\
 You are Luna's memory filter. Read this exchange and decide what to do.
@@ -48,7 +66,7 @@ Rules:
 
 
 def _ollama_json(prompt: str, model: str | None = None) -> dict:
-    use_model = (model or _OLLAMA_MODEL).strip()
+    use_model = (model or _brain_model()).strip()
     body = json.dumps({
         "model": use_model,
         "prompt": prompt,
@@ -57,7 +75,7 @@ def _ollama_json(prompt: str, model: str | None = None) -> dict:
         "options": {"temperature": 0.1, "num_predict": 200},
     }).encode()
     req = urllib.request.Request(
-        f"{_OLLAMA_BASE}/api/generate",
+        f"{_ollama_base()}/api/generate",
         data=body,
         headers={"Content-Type": "application/json"},
         method="POST",

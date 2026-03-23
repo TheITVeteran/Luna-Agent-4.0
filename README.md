@@ -210,13 +210,26 @@ Toggle with the Evolve switch in Luna's Mind UI.
 
 ## Setup
 
-### 1. Ollama (required)
+### 1. LLM backends
+
+**Ollama** (install from [ollama.ai](https://ollama.ai)) — used for code/Shadow (`OLLAMA_MODEL`), embeddings, vision, brain JSON, and fallbacks:
+
 ```bash
-# Install from https://ollama.ai then:
-ollama pull qwen2.5-coder:7b-instruct    # main chat model
-ollama pull qwen2.5:1.5b                 # small/fast model
+ollama pull qwen2.5-coder:7b-instruct    # code / Shadow (OLLAMA_MODEL default)
+ollama pull qwen2.5:1.5b                 # small/fast fallback
+ollama pull nomic-embed-text             # embeddings (default)
 ollama pull granite3.2-vision            # vision (optional, for camera)
 ```
+
+**Luna conversation (optional local GGUF)** — the LISA-tuned model [`mradermacher/meta-llama-Meta-Llama-3-8B-Instruct-fine-tune-english-LISA-i1-GGUF`](https://huggingface.co/mradermacher/meta-llama-Meta-Llama-3-8B-Instruct-fine-tune-english-LISA-i1-GGUF) is distributed as **GGUF on Hugging Face**, not as an Ollama library model. Download a `.gguf` file (pick a quantization you can run), then:
+
+```bash
+pip install llama-cpp-python
+```
+
+In `.env` set **`LUNA_CHAT_GGUF`** to the full path of that file. Keep **`OLLAMA_CHAT_MODEL`** in sync with the chat label Luna uses (default in `bot.py` is `lisa-llama3-8b-gguf`); routing to GGUF requires the **same string** as `OLLAMA_CHAT_MODEL` and a valid file path.
+
+GPU on Windows: you may need a CUDA build of `llama-cpp-python`; see the [project docs](https://github.com/abetlen/llama-cpp-python#installation). Tune **`LUNA_CHAT_GGUF_N_GPU`** (layers offloaded) and **`LUNA_CHAT_GGUF_N_CTX`** if needed.
 
 ### 2. Discord bot
 - [Discord Developer Portal](https://discord.com/developers/applications) → New Application → Bot
@@ -245,7 +258,7 @@ LINKED_DISCORD_USER_ID=your_discord_user_id
 # Optional — defaults shown
 OLLAMA_BASE_URL=http://127.0.0.1:11434
 OLLAMA_MODEL=qwen2.5-coder:7b-instruct
-OLLAMA_CHAT_MODEL=qwen2.5-coder:7b-instruct
+# OLLAMA_CHAT_MODEL defaults in bot.py to LISA Llama 3 8B if omitted
 OLLAMA_FALLBACK_MODEL=qwen2.5:1.5b
 OLLAMA_VISION_MODEL=granite3.2-vision
 
@@ -278,8 +291,10 @@ Web UI: **http://127.0.0.1:5050** · Discord bot connects automatically.
 | `LINKED_DISCORD_USER_ID` | required | User who gets reminders + DMs + UI-triggered actions |
 | `DISCORD_ADMIN_ID` | optional | Admin override |
 | `OLLAMA_BASE_URL` | `http://127.0.0.1:11434` | Ollama API base |
-| `OLLAMA_MODEL` | `qwen2.5-coder:7b-instruct` | Main model |
-| `OLLAMA_CHAT_MODEL` | same as OLLAMA_MODEL | Chat-specific model |
+| `OLLAMA_MODEL` | `qwen2.5-coder:7b-instruct` | Code / Shadow / heavy tasks |
+| `OLLAMA_CHAT_MODEL` | `lisa-llama3-8b-gguf` (see `bot.py`) | **Luna conversation** label; must match for GGUF routing |
+| `LUNA_CHAT_GGUF` | — | Path to a local `.gguf` file for Luna chat (bypasses Ollama for chat) |
+| `LUNA_CHAT_GGUF_N_CTX` / `N_GPU` / `THREADS` | `8192` / `-1` / auto | llama-cpp load tuning |
 | `OLLAMA_SMALL` | `qwen2.5:1.5b` | Fast model for quick tasks |
 | `OLLAMA_VISION_MODEL` | `granite3.2-vision` | Vision / camera |
 | `POLLINATIONS_API_KEY` | optional | Fallback for image gen without GPU |

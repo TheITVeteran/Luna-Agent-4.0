@@ -1,3 +1,3 @@
 # Evolved: to_dict_values
 
-Convert all values in a dictionary to strings
+Convert a JSON list of values into a dictionary with default key

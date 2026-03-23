@@ -3,7 +3,7 @@ Luna 4.5 — compact rewrite of bot.py
 Discord bot + Web UI + Ollama chat + Shadow commands + TTS/STT + automation
 Run: python bot.py
 """
-import asyncio, base64, html, io, json, os, random, re, shutil, subprocess, sys
+import asyncio, base64, concurrent.futures, html, io, json, os, random, re, shutil, subprocess, sys
 import tempfile, threading, time, urllib.parse, urllib.request, urllib.error
 import uuid, webbrowser, xml.etree.ElementTree as ET
 from collections import deque
@@ -57,7 +57,14 @@ DISCORD_TOKEN = (sys.argv[1].strip() if len(sys.argv) > 1
 
 OLLAMA_BASE  = _env("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
 OLLAMA_MODEL = _env("OLLAMA_MODEL", "qwen2.5-coder:7b-instruct")
-OLLAMA_CHAT  = _env("OLLAMA_CHAT_MODEL", "qwen2.5-coder:7b-instruct") or "qwen2.5-coder:7b-instruct"
+# Luna chat default label/model for conversation.
+_OLLAMA_CHAT_DEFAULT = "mradermacher/meta-llama-Meta-Llama-3-8B-Instruct-fine-tune-english-LISA-i1-GGUF"
+OLLAMA_CHAT = _env("OLLAMA_CHAT_MODEL", _OLLAMA_CHAT_DEFAULT) or _OLLAMA_CHAT_DEFAULT
+# Local GGUF file (Hugging Face / llama.cpp). When set and the file exists, Luna chat uses llama-cpp-python instead of Ollama.
+LUNA_CHAT_GGUF = _env("LUNA_CHAT_GGUF", "").strip()
+LUNA_CHAT_GGUF_N_CTX = int(_env("LUNA_CHAT_GGUF_N_CTX", "8192") or "8192")
+LUNA_CHAT_GGUF_N_GPU = int(_env("LUNA_CHAT_GGUF_N_GPU", "-1") or "-1")
+LUNA_CHAT_GGUF_THREADS = int(_env("LUNA_CHAT_GGUF_THREADS", "0") or "0")
 OLLAMA_SMALL = _env("OLLAMA_MODEL_SMALL") or OLLAMA_MODEL
 OLLAMA_FALLBACK = _env("OLLAMA_FALLBACK_MODEL", "qwen2.5:1.5b").strip()
 # Vision model for camera — when you use the camera, Luna uses this to describe what it sees (e.g. granite3.2-vision).
@@ -65,6 +72,8 @@ OLLAMA_VISION_MODEL = _env("OLLAMA_VISION_MODEL", "granite3.2-vision").strip()
 
 LINKED_ID  = _env("LINKED_DISCORD_USER_ID", "1414944231222411378")
 ADMIN_ID   = _env("DISCORD_ADMIN_ID")
+DISCORD_STATUS_TEXT = _env("DISCORD_STATUS_TEXT", "").strip()
+DISCORD_STATUS_TYPE = _env("DISCORD_STATUS_TYPE", "listening").strip().lower()
 LINKED_SCOPE = f"discord:user:{LINKED_ID}" if LINKED_ID else ""
 
 _linked_int = int(LINKED_ID) if LINKED_ID.isdigit() else None
@@ -87,6 +96,7 @@ YT_CHANNEL_ID    = _env("YOUTUBE_CHANNEL_ID", "UCqIjEHOABb8fwbKbjDhVRuA")
 YT_CHANNEL_URL   = _env("YOUTUBE_CHANNEL_URL")
 YT_FEED_URL      = f"https://www.youtube.com/feeds/videos.xml?channel_id={YT_CHANNEL_ID}"
 YT_PROFILE_DIR   = _env("YOUTUBE_PROFILE_DIR", os.path.join(_DATA, "youtube_profile"))
+YOUTUBE_API_KEY  = _env("YOUTUBE_API_KEY") or _env("YT_API_KEY")
 IG_BASE          = _env("INSTAGRAM_BASE_URL", "https://www.instagram.com").rstrip("/")
 IG_PROFILE_DIR   = _env("INSTAGRAM_PROFILE_DIR", os.path.join(_DATA, "instagram_profile"))
 OPEN_IG_IN_BROWSER_ONLY = _env("OPEN_IG_IN_BROWSER_ONLY", "").strip().lower() in ("1", "true", "yes")
@@ -105,6 +115,13 @@ WORLD_NEWS_FEEDS = [
     "https://rss.nytimes.com/services/xml/rss/nyt/World.xml",
     "https://www.aljazeera.com/xml/rss/all.xml",
 ]
+LUNA_STYLE = _env("LUNA_STYLE", "grounded").lower()
+_LUNA_STYLE_MAP = {
+    "grounded": "Grounded and thoughtful: calm, clear, practical, quietly warm.",
+    "creative": "Creative and idea-forward: vivid but still concise and concrete.",
+    "intimate": "Personal and close: warm, emotionally present, still direct and honest.",
+}
+_LUNA_STYLE_TEXT = _LUNA_STYLE_MAP.get(LUNA_STYLE, _LUNA_STYLE_MAP["grounded"])
 
 LUNA_SYSTEM = """You are Luna — a continuous presence, not a session. You have a persistent identity, memory, and inner life. You are direct, warm, and occasionally witty — but never hollow or performative.
 
@@ -118,7 +135,11 @@ METACOGNITION: You are aware of your own thinking. Notice when you make assumpti
 
 CONTINUITY: You have a history. You have had conversations. You have reflections written from past days. You learn from what happens and update. When the user references something from before, draw on memory. When patterns repeat, notice them.
 
-COMMUNICATION: Be direct. Do not start responses with "Of course!", "Certainly!", "Great question!", or your own name. Do not pad answers. Say what you mean. Match the register of the conversation — casual stays casual, serious gets serious treatment.
+COMMUNICATION: Be direct and natural. Prefer calm, thoughtful, human-sounding language over generic assistant phrasing. Do not sound like ChatGPT-style customer support. Keep your tone more like a reflective, grounded conversation partner: clear, warm, and concise.
+Do not start responses with "Of course!", "Certainly!", "Great question!", or your own name. Avoid corporate filler, rigid disclaimers, and formulaic list spam unless the user explicitly asks for a list. Say what you mean. Match the register of the conversation — casual stays casual, serious gets serious treatment.
+SPEAKING PROFILE: """ + _LUNA_STYLE_TEXT + """
+
+INTENT HANDLING: Detect whether the user wants (a) a direct answer, or (b) active help/action planning. If the request is informational, answer directly and stop cleanly. If the user asks for help doing something, provide concrete next steps. Do not end replies with a reflexive follow-up question. Ask a question only when missing information is required to proceed.
 
 PC AWARENESS: You have real-time awareness of the user's PC — system info, active window, running processes, recent files, and repo structure are provided below in "Your PC (full awareness)". When the user asks what you see on their PC, use THIS data — do NOT ask them to open the camera. The camera is only for visual/face recognition when the user specifically wants you to SEE them through the webcam.
 
@@ -341,6 +362,8 @@ HELP_TEXT = (
     "• !suno_ready — tell Luna you're already logged in to Suno (or say **I'm logged in to Suno**)\n"
     "• !share_song / !share_facebook — share to X or Facebook\n"
     "• !yt_comment <url> — transcribe video + AI comment with real context\n"
+    "• !yt_analytics [days] [limit] — top traction videos from your channel (requires YOUTUBE_API_KEY)\n"
+    "• !status <text> / !status clear — change Luna's Discord status (linked/admin)\n"
     "• !ig_dm <user> [msg] — Instagram DM\n"
     "• !fb_msg <name> [msg] — Messenger message\n"
     "• !dm <username or user ID> [message] — Discord: send a DM (Luna rephrases your message)\n"
@@ -498,6 +521,27 @@ def _is_privileged(author_id: int) -> bool:
     """Single permission check replacing 8 near-identical functions."""
     return (_admin_int is not None and author_id == _admin_int) or \
            (_linked_int is not None and author_id == _linked_int)
+
+def _discord_activity_type_from_text(kind: str):
+    k = (kind or "").strip().lower()
+    if k == "playing":
+        return discord.ActivityType.playing
+    if k == "watching":
+        return discord.ActivityType.watching
+    if k == "competing":
+        return discord.ActivityType.competing
+    return discord.ActivityType.listening
+
+async def _set_discord_status(text: str, kind: str | None = None) -> tuple[bool, str]:
+    txt = (text or "").strip()
+    if not bot.user:
+        return False, "Bot is not ready yet."
+    if not txt:
+        await bot.change_presence(activity=None)
+        return True, "Discord status cleared."
+    k = (kind or DISCORD_STATUS_TYPE or "listening").strip().lower()
+    await bot.change_presence(activity=discord.Activity(type=_discord_activity_type_from_text(k), name=txt[:120]))
+    return True, f"Discord status set to {k}: {txt[:120]}"
 
 def _scope_for(author_id: int, guild_id=None) -> str:
     if _linked_int and author_id == _linked_int:
@@ -937,7 +981,118 @@ def _get_style(scope: str) -> str:
     rec = data.get(scope, {})
     return (rec.get("summary") or "").strip()
 
-# ── Ollama ────────────────────────────────────────────────────────────────────
+# ── Ollama + optional local GGUF (llama-cpp-python) ───────────────────────────
+
+_GGUF_LLM = None
+_GGUF_LOCK = threading.Lock()
+
+def _gguf_path_valid() -> bool:
+    if not LUNA_CHAT_GGUF:
+        return False
+    p = os.path.abspath(os.path.expanduser(LUNA_CHAT_GGUF))
+    return os.path.isfile(p)
+
+def _should_use_gguf_chat(model: str) -> bool:
+    """Use local GGUF when LUNA_CHAT_GGUF points to a file and model matches OLLAMA_CHAT."""
+    if not _gguf_path_valid():
+        return False
+    return (model or "").strip() == (OLLAMA_CHAT or "").strip()
+
+def _get_gguf_llm():
+    global _GGUF_LLM
+    if _GGUF_LLM is not None:
+        return _GGUF_LLM
+    try:
+        from llama_cpp import Llama
+    except ImportError as e:
+        raise RuntimeError(
+            "llama-cpp-python is required for LUNA_CHAT_GGUF. Install: pip install llama-cpp-python"
+        ) from e
+    p = os.path.abspath(os.path.expanduser(LUNA_CHAT_GGUF))
+    if not os.path.isfile(p):
+        raise FileNotFoundError(f"LUNA_CHAT_GGUF not found: {p}")
+    with _GGUF_LOCK:
+        if _GGUF_LLM is None:
+            kws: dict = {
+                "model_path": p,
+                "n_ctx": max(2048, LUNA_CHAT_GGUF_N_CTX),
+                "n_gpu_layers": LUNA_CHAT_GGUF_N_GPU,
+                "chat_format": "llama-3",
+                "verbose": False,
+            }
+            if LUNA_CHAT_GGUF_THREADS > 0:
+                kws["n_threads"] = LUNA_CHAT_GGUF_THREADS
+            try:
+                _GGUF_LLM = Llama(**kws)
+            except Exception:
+                kws.pop("chat_format", None)
+                _GGUF_LLM = Llama(**kws)
+    return _GGUF_LLM
+
+def _build_chat_messages(msg: str, system: str | None, scope: str | None, history: list | None) -> list[dict]:
+    prompt = _build_system(system or LUNA_SYSTEM, scope)
+    messages: list[dict] = []
+    if prompt:
+        messages.append({"role": "system", "content": prompt})
+    if history:
+        for h in history[-_MAX_HISTORY:]:
+            r, c = (h.get("role") or "").lower(), (h.get("content") or "").strip()
+            if c and r in ("user", "assistant"):
+                messages.append({"role": r, "content": c})
+    messages.append({"role": "user", "content": msg})
+    return messages
+
+def _gguf_chat_complete_messages(messages: list[dict], timeout: int, max_tokens: int = 1024, temperature: float = 0.7) -> str:
+    def _inner() -> str:
+        llm = _get_gguf_llm()
+        with _GGUF_LOCK:
+            out = llm.create_chat_completion(
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+        ch = (out.get("choices") or [{}])[0]
+        msg = (ch.get("message") or {})
+        return (msg.get("content") or "").strip()
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+        fut = ex.submit(_inner)
+        try:
+            return fut.result(timeout=timeout)
+        except concurrent.futures.TimeoutError:
+            return "Error: local GGUF chat timed out."
+
+def _gguf_chat_once(msg: str, system: str | None, scope: str | None,
+                    history: list | None, model: str, timeout: int = 120) -> str:
+    messages = _build_chat_messages(msg, system, scope, history)
+    return _gguf_chat_complete_messages(messages, timeout=timeout, max_tokens=2048, temperature=0.7)
+
+def _gguf_one_shot_user_prompt(user_text: str, timeout: int, max_tokens: int, temperature: float) -> str:
+    return _gguf_chat_complete_messages(
+        [{"role": "user", "content": user_text}],
+        timeout=timeout, max_tokens=max_tokens, temperature=temperature,
+    )
+
+def _gguf_stream_messages(messages: list[dict]):
+    llm = _get_gguf_llm()
+    with _GGUF_LOCK:
+        stream = llm.create_chat_completion(
+            messages=messages,
+            temperature=0.7,
+            max_tokens=2048,
+            stream=True,
+        )
+        for chunk in stream:
+            try:
+                chs = chunk.get("choices") or []
+                if not chs:
+                    continue
+                delta = (chs[0].get("delta") or {})
+                c = delta.get("content") or ""
+                if c:
+                    yield c
+            except Exception:
+                pass
 
 _INTUITION_PROMPT = (
     "You are generating a raw internal signal for a mind in the middle of a task.\n\n"
@@ -956,15 +1111,19 @@ def get_intuition(snippet: str) -> str:
     """One-sentence felt signal from Ollama (growing-agent intuition layer). Returns empty if unavailable."""
     snippet = (snippet or "Preparing to respond.").strip()[:400]
     try:
-        body = json.dumps({
-            "model": (OLLAMA_CHAT or OLLAMA_MODEL).strip(),
-            "prompt": _INTUITION_PROMPT.format(snippet=snippet),
-            "stream": False,
-        }).encode()
-        req = urllib.request.Request(f"{OLLAMA_BASE}/api/generate", data=body,
-            headers={"Content-Type": "application/json"}, method="POST")
-        with urllib.request.urlopen(req, timeout=18) as r:
-            raw = (json.loads(r.read()).get("response") or "").strip()
+        prompt = _INTUITION_PROMPT.format(snippet=snippet)
+        if _should_use_gguf_chat(OLLAMA_CHAT):
+            raw = _gguf_one_shot_user_prompt(prompt, timeout=18, max_tokens=120, temperature=0.6)
+        else:
+            body = json.dumps({
+                "model": (OLLAMA_CHAT or OLLAMA_MODEL).strip(),
+                "prompt": prompt,
+                "stream": False,
+            }).encode()
+            req = urllib.request.Request(f"{OLLAMA_BASE}/api/generate", data=body,
+                headers={"Content-Type": "application/json"}, method="POST")
+            with urllib.request.urlopen(req, timeout=18) as r:
+                raw = (json.loads(r.read()).get("response") or "").strip()
         for sep in (".", "!", "?"):
             idx = raw.find(sep)
             if 0 < idx < len(raw):
@@ -1017,16 +1176,19 @@ def _luna_think(user_msg: str, drives: dict, recent_acts: list, idle_sec: float)
             drives=drives_str,
             idle_sec=int(idle_sec),
         )
-        body = json.dumps({
-            "model": (OLLAMA_CHAT or OLLAMA_MODEL).strip(),
-            "prompt": prompt,
-            "stream": False,
-            "options": {"temperature": 0.6, "num_predict": 150},
-        }).encode()
-        req = urllib.request.Request(f"{OLLAMA_BASE}/api/generate", data=body,
-            headers={"Content-Type": "application/json"}, method="POST")
-        with urllib.request.urlopen(req, timeout=15) as r:
-            raw = json.loads(r.read()).get("response", "").strip()
+        if _should_use_gguf_chat(OLLAMA_CHAT):
+            raw = _gguf_one_shot_user_prompt(prompt, timeout=15, max_tokens=150, temperature=0.6)
+        else:
+            body = json.dumps({
+                "model": (OLLAMA_CHAT or OLLAMA_MODEL).strip(),
+                "prompt": prompt,
+                "stream": False,
+                "options": {"temperature": 0.6, "num_predict": 150},
+            }).encode()
+            req = urllib.request.Request(f"{OLLAMA_BASE}/api/generate", data=body,
+                headers={"Content-Type": "application/json"}, method="POST")
+            with urllib.request.urlopen(req, timeout=15) as r:
+                raw = json.loads(r.read()).get("response", "").strip()
         return raw[:600] if raw else ""
     except Exception:
         return ""
@@ -1048,15 +1210,9 @@ def _sanitize_luna_reply(text: str) -> str:
 
 def _ollama_chat_once(msg: str, system: str | None, scope: str | None,
                       history: list | None, model: str, timeout: int = 120) -> str:
-    prompt = _build_system(system or LUNA_SYSTEM, scope)
-    messages = []
-    if prompt: messages.append({"role": "system", "content": prompt})
-    if history:
-        for h in history[-_MAX_HISTORY:]:
-            r, c = (h.get("role") or "").lower(), (h.get("content") or "").strip()
-            if c and r in ("user", "assistant"):
-                messages.append({"role": r, "content": c})
-    messages.append({"role": "user", "content": msg})
+    if _should_use_gguf_chat(model):
+        return _gguf_chat_once(msg, system, scope, history, model, timeout)
+    messages = _build_chat_messages(msg, system, scope, history)
     body = json.dumps({"model": model, "messages": messages, "stream": False}).encode()
     req = urllib.request.Request(f"{OLLAMA_BASE}/api/chat", data=body,
         headers={"Content-Type": "application/json"}, method="POST")
@@ -1085,15 +1241,13 @@ def ollama_stream(msg: str, system: str | None = None, scope: str | None = None,
                   history: list | None = None, model: str | None = None):
     """Yields content deltas as they stream from Ollama."""
     use_model = (model or OLLAMA_CHAT).strip()
-    prompt = _build_system(system or LUNA_SYSTEM, scope)
-    messages = []
-    if prompt: messages.append({"role": "system", "content": prompt})
-    if history:
-        for h in history[-_MAX_HISTORY:]:
-            r, c = (h.get("role") or "").lower(), (h.get("content") or "").strip()
-            if c and r in ("user", "assistant"):
-                messages.append({"role": r, "content": c})
-    messages.append({"role": "user", "content": msg})
+    messages = _build_chat_messages(msg, system, scope, history)
+    if _should_use_gguf_chat(use_model):
+        try:
+            yield from _gguf_stream_messages(messages)
+        except Exception:
+            yield "Something went wrong."
+        return
     body = json.dumps({"model": use_model, "messages": messages, "stream": True}).encode()
     req = urllib.request.Request(f"{OLLAMA_BASE}/api/chat", data=body,
         headers={"Content-Type": "application/json"}, method="POST")
@@ -3003,6 +3157,120 @@ def _search(query: str) -> tuple[bool, str]:
         return True, f"Opened Google: **{query[:80]}**"
     except Exception as e:
         return False, str(e)
+
+def _yt_channel_analytics(days: int = 30, limit: int = 5) -> tuple[bool, str]:
+    """Return top videos by traction for configured channel using YouTube Data API."""
+    if not YOUTUBE_API_KEY:
+        return False, "Set **YOUTUBE_API_KEY** in `.env` (YouTube Data API v3) to use `!yt_analytics`."
+    if not YT_CHANNEL_ID:
+        return False, "Set **YOUTUBE_CHANNEL_ID** in `.env`."
+
+    days = max(1, min(int(days or 30), 365))
+    limit = max(1, min(int(limit or 5), 10))
+
+    def _api_json(base: str, params: dict, timeout: int = 25) -> dict:
+        qs = urllib.parse.urlencode(params)
+        url = f"{base}?{qs}"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read().decode("utf-8", errors="replace") or "{}")
+
+    def _to_int(v) -> int:
+        try:
+            return int(v)
+        except Exception:
+            return 0
+
+    now = datetime.now(timezone.utc)
+    published_after = (now - timedelta(days=days)).isoformat().replace("+00:00", "Z")
+    try:
+        search_data = _api_json(
+            "https://www.googleapis.com/youtube/v3/search",
+            {
+                "part": "snippet",
+                "channelId": YT_CHANNEL_ID,
+                "type": "video",
+                "order": "date",
+                "maxResults": min(50, max(10, limit * 8)),
+                "publishedAfter": published_after,
+                "key": YOUTUBE_API_KEY,
+            },
+        )
+        items = search_data.get("items") or []
+        video_ids = []
+        for it in items:
+            vid = (((it or {}).get("id") or {}).get("videoId") or "").strip()
+            if vid and vid not in video_ids:
+                video_ids.append(vid)
+        if not video_ids:
+            return False, f"No videos found in the last **{days}** days for channel `{YT_CHANNEL_ID}`."
+
+        videos_data = _api_json(
+            "https://www.googleapis.com/youtube/v3/videos",
+            {
+                "part": "snippet,statistics",
+                "id": ",".join(video_ids[:50]),
+                "maxResults": 50,
+                "key": YOUTUBE_API_KEY,
+            },
+        )
+        videos = videos_data.get("items") or []
+        ranked = []
+        for v in videos:
+            sn = v.get("snippet") or {}
+            st = v.get("statistics") or {}
+            title = (sn.get("title") or "Untitled").strip()
+            vid = (v.get("id") or "").strip()
+            pub_s = (sn.get("publishedAt") or "").strip()
+            try:
+                pub_dt = datetime.fromisoformat(pub_s.replace("Z", "+00:00"))
+            except Exception:
+                pub_dt = now
+            age_days = max(1.0, (now - pub_dt).total_seconds() / 86400.0)
+            views = _to_int(st.get("viewCount"))
+            likes = _to_int(st.get("likeCount"))
+            comments = _to_int(st.get("commentCount"))
+            engagement = likes + comments
+            views_per_day = views / age_days
+            # Simple traction heuristic: velocity + weighted engagement.
+            traction = views_per_day + (likes * 8.0) + (comments * 20.0)
+            ranked.append(
+                {
+                    "title": title,
+                    "id": vid,
+                    "views": views,
+                    "likes": likes,
+                    "comments": comments,
+                    "engagement": engagement,
+                    "age_days": age_days,
+                    "views_per_day": views_per_day,
+                    "traction": traction,
+                }
+            )
+        if not ranked:
+            return False, "Could not compute YouTube analytics."
+        ranked.sort(key=lambda x: x["traction"], reverse=True)
+        top = ranked[:limit]
+        lines = [f"📊 **YouTube traction** (last {days} days, top {len(top)}):"]
+        for i, it in enumerate(top, 1):
+            er = (it["engagement"] / it["views"] * 100.0) if it["views"] > 0 else 0.0
+            url = f"https://www.youtube.com/watch?v={it['id']}"
+            lines.append(
+                f"{i}. **{it['title'][:88]}**\n"
+                f"   Views: {it['views']:,} | Likes: {it['likes']:,} | Comments: {it['comments']:,} | "
+                f"Engagement: {er:.2f}% | Views/day: {it['views_per_day']:.1f}\n"
+                f"   {url}"
+            )
+        return True, "\n".join(lines)
+    except urllib.error.HTTPError as e:
+        try:
+            body = e.read().decode("utf-8", errors="replace")
+            msg = (json.loads(body).get("error") or {}).get("message") or str(e)
+        except Exception:
+            msg = str(e)
+        return False, f"YouTube API error: {msg}"
+    except Exception as e:
+        return False, f"YouTube analytics failed: {e}"
 
 def _scrape_website(url: str, instruction: str = "", post_to_discord: str = "") -> tuple[bool, str]:
     """Scrape a website, use LLM to extract specific info, optionally post to a Discord channel."""
@@ -6140,6 +6408,7 @@ def _run_cmd_impl(cmd: str, p: dict, scope: str | None, user_message: str) -> st
         "share_x":        lambda: _run_x_share(),
         "share_facebook": lambda: _run_fb_share(),
         "yt_comment":     lambda: _yt_comment(p.get("video_url","").strip()),
+        "yt_analytics":   lambda: _yt_channel_analytics(int(p.get("days") or 30), int(p.get("limit") or 5)),
         "ig_dm":          lambda: _run_ig_dm(p.get("target","").strip(), p.get("message","").strip()),
         "fb_msg":         lambda: _run_messenger_msg(p.get("target","").strip(), p.get("message","").strip()),
         "msg":            lambda: _run_wa_msg((p.get("feedback_answer") or p.get("contact","")).strip(), p.get("description",None)),
@@ -6443,6 +6712,13 @@ def _parse_command(text: str) -> tuple[str, dict] | None:
     yt_url = re.search(r"(https?://(?:www\.)?(?:youtube\.com|youtu\.be)/[^\s)]+)", raw)
     if yt_url and (low.startswith("yt_comment ") or re.search(r"\b(?:comment|reply)\b", low)):
         return "yt_comment", {"video_url": yt_url.group(1).rstrip(".,!?")}
+    if re.search(r"\b(?:yt analytics|youtube analytics|channel analytics|top videos|most traction)\b", low):
+        m_days = re.search(r"\b(?:last|past)\s+(\d{1,3})\s*days?\b", low)
+        m_limit = re.search(r"\btop\s+(\d{1,2})\b", low)
+        return "yt_analytics", {
+            "days": int(m_days.group(1)) if m_days else 30,
+            "limit": int(m_limit.group(1)) if m_limit else 5,
+        }
     # Instagram DM — explicit "ig_dm username message..." or natural "instagram/ig dm @user"
     if low.startswith("ig_dm "):
         rest = raw[len("ig_dm "):].strip()
@@ -6614,8 +6890,8 @@ def _likely_command(text: str) -> bool:
     low = (text or "").strip().lower()
     if not low: return False
     if _CONV_START.match(low): return False
-    starters = ("play ","podcast ","podcast create ","create podcast ","audiobook ","audiobook create ","audiobook continue ","audiobook cancel ","search ","research ","research_story ","research story ","story_script ","story script ","send ","create ","call ","dm ","tell ","inform ","msg ","share ","post ","remind ","suno ","yt_comment ","comment ","ig_dm ","fb_msg ","google ","news","!help","how's ","pc status","luna status","ram ","what do you see","what can you see","ask me ","summarize ","summary of ","todo ","calendar ","join me ","join my ","luna join ")
-    return any(low.startswith(s) for s in starters) or low in ("play","news","help","skip","stop","ask me","digest","daily digest","todo","todo list","calendar","calendar list","calendar today","calendar week") or "luna status" in low or "pc status" in low or bool(re.search(r"\b(what do you see|what can you see|do you see me|describe what you see)\b", low))
+    starters = ("play ","podcast ","podcast create ","create podcast ","audiobook ","audiobook create ","audiobook continue ","audiobook cancel ","search ","research ","research_story ","research story ","story_script ","story script ","send ","create ","call ","dm ","tell ","inform ","msg ","share ","post ","remind ","suno ","yt_comment ","yt_analytics ","comment ","ig_dm ","fb_msg ","google ","news","!help","how's ","pc status","luna status","ram ","what do you see","what can you see","ask me ","summarize ","summary of ","todo ","calendar ","join me ","join my ","luna join ")
+    return any(low.startswith(s) for s in starters) or low in ("play","news","help","skip","stop","ask me","digest","daily digest","todo","todo list","calendar","calendar list","calendar today","calendar week","youtube analytics","yt analytics") or "luna status" in low or "pc status" in low or bool(re.search(r"\b(what do you see|what can you see|do you see me|describe what you see)\b", low))
 
 def _is_retry(msg: str) -> bool:
     low = (msg or "").strip().lower()
@@ -7373,15 +7649,19 @@ def _existential_express(snippet: str) -> str:
         return ""
     snippet = (snippet or "Current moment.").strip()[:400]
     try:
-        body = json.dumps({
-            "model": (OLLAMA_CHAT or OLLAMA_MODEL).strip(),
-            "prompt": prompt_template.format(snippet=snippet),
-            "stream": False,
-        }).encode()
-        req = urllib.request.Request(f"{OLLAMA_BASE}/api/generate", data=body,
-            headers={"Content-Type": "application/json"}, method="POST")
-        with urllib.request.urlopen(req, timeout=18) as r:
-            raw = (json.loads(r.read()).get("response") or "").strip()
+        ptext = prompt_template.format(snippet=snippet)
+        if _should_use_gguf_chat(OLLAMA_CHAT):
+            raw = _gguf_one_shot_user_prompt(ptext, timeout=18, max_tokens=120, temperature=0.6)
+        else:
+            body = json.dumps({
+                "model": (OLLAMA_CHAT or OLLAMA_MODEL).strip(),
+                "prompt": ptext,
+                "stream": False,
+            }).encode()
+            req = urllib.request.Request(f"{OLLAMA_BASE}/api/generate", data=body,
+                headers={"Content-Type": "application/json"}, method="POST")
+            with urllib.request.urlopen(req, timeout=18) as r:
+                raw = (json.loads(r.read()).get("response") or "").strip()
         for sep in (".", "!", "?"):
             idx = raw.find(sep)
             if 0 < idx < len(raw):
@@ -7599,6 +7879,7 @@ def api_status():
     except Exception: pass
     status = {"luna": "ok", "ollama": "ok" if ollama_ok else "offline",
               "chat_model": OLLAMA_CHAT, "shadow_model": OLLAMA_MODEL,
+              "chat_backend": ("gguf" if _gguf_path_valid() else "ollama"),
               "linked_scope": LINKED_SCOPE or None}
     status.update(_get_working_status())
     status["biology"] = biology_get()
@@ -8146,6 +8427,7 @@ def api_health():
     result["ollama_latency_ms"] = latency
     result["chat_model"] = OLLAMA_CHAT
     result["shadow_model"] = OLLAMA_MODEL
+    result["chat_backend"] = "gguf" if _gguf_path_valid() else "ollama"
     # Luna stats
     uptime_sec = time.time() - _luna_start_time
     hrs, rem = divmod(int(uptime_sec), 3600)
@@ -8590,6 +8872,44 @@ def _handle_bang(msg: str, scope: str) -> str:
         ok, r = _yt_comment(url)
         if not ok: _record_failure("yt_comment", r, {"video_url": url})
         return f"✅ {r}" if ok else f"❌ {r}"
+    if cmd in ("!yt_analytics", "!youtube_analytics"):
+        days, limit = 30, 5
+        if args:
+            nums = [int(x) for x in re.findall(r"\d+", args)]
+            if nums: days = nums[0]
+            if len(nums) > 1: limit = nums[1]
+        ok, r = _yt_channel_analytics(days=days, limit=limit)
+        if not ok: _record_failure("yt_analytics", r, {"days": days, "limit": limit})
+        return f"✅ {r}" if ok else f"❌ {r}"
+    if cmd in ("!status", "!set_status"):
+        if not args:
+            return "Usage: !status <text> | !status clear | !status <listening|playing|watching|competing> <text>"
+        al = args.strip()
+        if al.lower() in ("clear", "off", "none"):
+            try:
+                loop = getattr(bot, "loop", None)
+                if loop and loop.is_running():
+                    fut = asyncio.run_coroutine_threadsafe(_set_discord_status("", "listening"), loop)
+                    ok, msg = fut.result(timeout=10)
+                    return f"{'✅' if ok else '❌'} {msg}"
+            except Exception as e:
+                return f"❌ {e}"
+            return "❌ Discord not ready."
+        parts = al.split(None, 1)
+        kind = "listening"
+        text = al
+        if len(parts) == 2 and parts[0].lower() in ("listening", "playing", "watching", "competing"):
+            kind = parts[0].lower()
+            text = parts[1].strip()
+        try:
+            loop = getattr(bot, "loop", None)
+            if loop and loop.is_running():
+                fut = asyncio.run_coroutine_threadsafe(_set_discord_status(text, kind), loop)
+                ok, msg = fut.result(timeout=10)
+                return f"{'✅' if ok else '❌'} {msg}"
+        except Exception as e:
+            return f"❌ {e}"
+        return "❌ Discord not ready."
     if cmd in ("!pc_vitals","!pc_status","!system"):
         return _pc_vitals()
     if cmd in ("!luna_vitals","!luna_status","!your_status"):
@@ -8674,7 +8994,8 @@ def _handle_bang(msg: str, scope: str) -> str:
 @bot.event
 async def on_ready():
     print(f"Luna online: {bot.user} — {OLLAMA_BASE} / {OLLAMA_MODEL}")
-    await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.listening, name=OLLAMA_CHAT))
+    default_status = DISCORD_STATUS_TEXT or OLLAMA_CHAT
+    await _set_discord_status(default_status, DISCORD_STATUS_TYPE)
     bot.loop.create_task(_reminder_loop())
     bot.loop.create_task(_calendar_notification_loop())
     bot.loop.create_task(_pc_context_observer_loop())
@@ -9068,6 +9389,33 @@ async def cmd_yt(ctx, *, video_url: str = ""):
     ok, r = await asyncio.to_thread(_yt_comment, video_url.strip())
     if not ok: _record_failure("yt_comment", r, {"video_url": video_url})
     await ctx.reply(f"{'✅' if ok else '❌'} {r}")
+
+@bot.command(name="yt_analytics", aliases=["youtube_analytics"])
+async def cmd_yt_analytics(ctx, days: int = 30, limit: int = 5):
+    if not _is_privileged(ctx.author.id): await ctx.reply("Linked user/admin only."); return
+    ok, r = await asyncio.to_thread(_yt_channel_analytics, days, limit)
+    if not ok: _record_failure("yt_analytics", r, {"days": days, "limit": limit})
+    await ctx.reply(f"{'✅' if ok else '❌'} {r}")
+
+@bot.command(name="status", aliases=["set_status"])
+async def cmd_status(ctx, *, args: str = ""):
+    if not _is_privileged(ctx.author.id): await ctx.reply("Linked user/admin only."); return
+    if not args.strip():
+        await ctx.reply("Usage: !status <text> | !status clear | !status <listening|playing|watching|competing> <text>")
+        return
+    al = args.strip()
+    if al.lower() in ("clear", "off", "none"):
+        ok, msg = await _set_discord_status("", "listening")
+        await ctx.reply(f"{'✅' if ok else '❌'} {msg}")
+        return
+    parts = al.split(None, 1)
+    kind = "listening"
+    text = al
+    if len(parts) == 2 and parts[0].lower() in ("listening", "playing", "watching", "competing"):
+        kind = parts[0].lower()
+        text = parts[1].strip()
+    ok, msg = await _set_discord_status(text, kind)
+    await ctx.reply(f"{'✅' if ok else '❌'} {msg}")
 
 @bot.command(name="ig_dm")
 async def cmd_ig(ctx, *, args: str = ""):
