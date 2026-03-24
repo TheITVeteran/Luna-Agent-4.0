@@ -81,6 +81,8 @@ _admin_int  = int(ADMIN_ID)  if ADMIN_ID.isdigit()  else None
 
 _dm_sync_ids = {int(x) for x in _env("DISCORD_DM_SYNC_USER_IDS").split(",") if x.strip().isdigit()}
 _tts_channels = {int(x) for x in _env("DISCORD_TTS_CHANNEL_IDS").split(",") if x.strip().isdigit()}
+# When a user @mentions Luna in a server and she replies in text, also join their VC (if in one) and speak the reply.
+_DISCORD_REPLY_VC_TTS = _env("DISCORD_REPLY_VC_TTS", "1").strip().lower() not in ("0", "false", "no", "off")
 
 # Social / media URLs
 SUNO_CREATE_URL  = _env("SUNO_CREATE_URL", "https://suno.com/create")
@@ -5906,6 +5908,94 @@ async def _join_linked_user_vc_and_speak(text: str, disconnect_after: bool = Tru
         except Exception: pass
     return True
 
+
+async def _discord_vc_speak_reply_to_author(message: discord.Message, reply: str) -> None:
+    """Join the message author's voice channel (if any) and play TTS of Luna's text reply. No-op in DMs or if author not in VC."""
+    if not _DISCORD_REPLY_VC_TTS or not message.guild or not (reply or "").strip():
+        return
+    member = message.author
+    if not isinstance(member, discord.Member):
+        return
+    if not member.voice or not member.voice.channel:
+        return
+    target_channel = member.voice.channel
+    guild = message.guild
+    vc = guild.voice_client
+    try:
+        if not vc or not vc.is_connected() or vc.channel != target_channel:
+            if vc and vc.is_connected():
+                await vc.move_to(target_channel)
+            else:
+                await target_channel.connect()
+            vc = guild.voice_client
+        if not vc or not vc.is_connected():
+            return
+        tts_text = _clean_for_tts(reply)
+        if not tts_text.strip():
+            return
+        if len(tts_text) > 4500:
+            tts_text = tts_text[:4500] + " — truncated."
+        try:
+            if vc.is_playing():
+                vc.stop()
+                await asyncio.sleep(0.15)
+        except Exception:
+            pass
+        for chunk in _split_tts(tts_text, max_chars=200):
+            piece = (chunk or "").strip()[:500]
+            if not piece:
+                continue
+            while vc.is_playing() and vc.is_connected():
+                await asyncio.sleep(0.2)
+            mp3 = await asyncio.to_thread(_tts_bytes, piece)
+            if not mp3:
+                continue
+            fd, path = tempfile.mkstemp(suffix=".mp3")
+            try:
+                os.write(fd, mp3)
+                os.close(fd)
+                fd = None
+                done = asyncio.Event()
+                loop = bot.loop
+
+                def _after_play(_err):
+                    loop.call_soon_threadsafe(done.set)
+
+                play_path = path.replace("\\", "/")
+                source = discord.FFmpegPCMAudio(play_path, options=_FFMPEG_OPTS)
+                vc.play(source, after=_after_play)
+                try:
+                    await asyncio.wait_for(done.wait(), timeout=180)
+                except asyncio.TimeoutError:
+                    try:
+                        vc.stop()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            finally:
+                if fd is not None:
+                    try:
+                        os.close(fd)
+                    except Exception:
+                        pass
+                try:
+                    os.unlink(path)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+
+def _schedule_discord_vc_tts_reply(message: discord.Message, reply: str | None) -> None:
+    if not reply or not isinstance(reply, str):
+        return
+    try:
+        asyncio.create_task(_discord_vc_speak_reply_to_author(message, reply))
+    except RuntimeError:
+        if bot.loop and bot.loop.is_running():
+            bot.loop.create_task(_discord_vc_speak_reply_to_author(message, reply))
+
 def _play_tts_in_vc_sync(vc, text: str) -> None:
     """Generate TTS and play in Discord VC (run on bot loop from sync)."""
     tts_text = _clean_for_tts(text)
@@ -8742,6 +8832,11 @@ def api_briefing():
     """Generate and return morning briefing."""
     briefing = _generate_morning_briefing()
     _mark_briefing_shown()
+    try:
+        if briefing:
+            _play_reply_tts(briefing)
+    except Exception:
+        pass
     return jsonify({"briefing": briefing})
 
 # ── Screen analytics API ─────────────────────────────────────────────────────
@@ -8775,6 +8870,11 @@ def api_analytics_describe_screen():
             "reply": "Window capture by ID is only supported on **Windows**. Use **monitor** instead.",
         })
     ok, reply = _describe_dashboard_screenshot(hwnd=hwnd, monitor_index=monitor)
+    try:
+        if reply:
+            _play_reply_tts(reply)
+    except Exception:
+        pass
     return jsonify({"ok": ok, "reply": reply})
 
 # ── Manifest + SW for PWA ────────────────────────────────────────────────────
@@ -8835,6 +8935,9 @@ def api_chat():
     if msg.startswith("!"):
         reply = _handle_bang(msg, scope)
         append_exchange(scope, msg, reply)
+        _bang0 = (msg.split(None, 1)[0] or "").lower()
+        if _bang0 in ("!briefing", "!analytics_screen", "!dashboard_read", "!read_dashboard"):
+            _play_reply_tts(reply)
         return jsonify({"reply": reply})
 
     # Retry
@@ -9330,7 +9433,9 @@ async def on_message(message: discord.Message):
     text = effective
     if bot.user: text = text.replace(f"<@{bot.user.id}>","").strip()
     if not text:
-        await message.reply(f"<@{message.author.id}> Hey! I'm **Luna** — chat or say **Shadow, command**. **!help** for list.")
+        _greet = "Hey! I'm **Luna** — chat or say **Shadow, command**. **!help** for list."
+        await message.reply(f"<@{message.author.id}> {_greet}")
+        _schedule_discord_vc_tts_reply(message, _greet)
         return
 
     global _last_user_activity
@@ -9347,16 +9452,22 @@ async def on_message(message: discord.Message):
             except Exception: pass
             reply = f"Saved to **{key}.md**."
             await asyncio.to_thread(append_exchange, scope, text, reply)
-            await message.reply(f"{mention} {reply}"); return
+            await message.reply(f"{mention} {reply}")
+            _schedule_discord_vc_tts_reply(message, reply)
+            return
 
     if _is_retry(text):
         reply = await asyncio.to_thread(_handle_retry)
         await asyncio.to_thread(append_exchange, scope, text, reply)
-        await message.reply(f"{mention} {reply}"); return
+        await message.reply(f"{mention} {reply}")
+        _schedule_discord_vc_tts_reply(message, reply)
+        return
 
     if text.strip().lower() in ("!help","!commands","!files"):
         await asyncio.to_thread(append_exchange, scope, text, HELP_TEXT)
-        await message.reply(f"{mention} {HELP_TEXT}"); return
+        await message.reply(f"{mention} {HELP_TEXT}")
+        _schedule_discord_vc_tts_reply(message, HELP_TEXT)
+        return
 
     # Shadow
     if celine_route == "shadow" or strip_shadow_prefix(text) is not None:
@@ -9367,7 +9478,9 @@ async def on_message(message: discord.Message):
             await message.reply(f"{mention} {reply.get('message', '?')} — answer in the **web UI** (popup).")
             return
         await asyncio.to_thread(append_exchange, scope, text, reply)
-        await message.reply(f"{mention} {reply}"); return
+        await message.reply(f"{mention} {reply}")
+        _schedule_discord_vc_tts_reply(message, reply)
+        return
 
     # NL commands
     if _likely_command(text):
@@ -9375,7 +9488,9 @@ async def on_message(message: discord.Message):
         if parsed:
             cmd, params = parsed
             if cmd == "help":
-                await message.reply(f"{mention} {HELP_TEXT}"); return
+                await message.reply(f"{mention} {HELP_TEXT}")
+                _schedule_discord_vc_tts_reply(message, HELP_TEXT)
+                return
             if _is_privileged(message.author.id) or cmd not in ("suno","suno_ready","create_code","msg","dm","call","share_x","share_facebook","yt_comment","ig_dm","fb_msg","remind"):
                 reply = await asyncio.to_thread(_run_cmd, cmd, params, scope, text)
                 if isinstance(reply, dict) and reply.get("need_feedback"):
@@ -9384,7 +9499,9 @@ async def on_message(message: discord.Message):
                 if reply:
                     await asyncio.to_thread(_log_action, cmd, params, reply)
                     await asyncio.to_thread(append_exchange, scope, text, reply)
-                    await message.reply(f"{mention} {reply}"); return
+                    await message.reply(f"{mention} {reply}")
+                    _schedule_discord_vc_tts_reply(message, reply)
+                    return
 
     # Luna chat
     system = await asyncio.to_thread(_build_luna_chat_system, scope)
@@ -9419,6 +9536,8 @@ async def on_message(message: discord.Message):
         asyncio.get_event_loop().run_in_executor(None, _bg_notice)
 
     await message.reply(f"{mention} {reply}")
+    if reply and reply != COMMAND_ONLY:
+        _schedule_discord_vc_tts_reply(message, reply)
     await bot.process_commands(message)
 
 async def _play_from_url(message: discord.Message, url: str):
