@@ -618,6 +618,29 @@
     margin: 4px 0;
     background: rgba(0,212,255,0.04);
   }
+  .analytics-screen-overlay {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.65);
+    display: none; align-items: center; justify-content: center; z-index: 10013;
+  }
+  .analytics-screen-overlay.open { display: flex; }
+  .analytics-screen-popup {
+    width: min(440px, 94vw);
+    max-height: 88vh;
+    overflow: auto;
+    background: rgba(5,15,30,0.98);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px 16px;
+    box-shadow: 0 8px 40px rgba(0,0,0,0.5);
+  }
+  .analytics-screen-popup .field-label { display: block; font-size: 10px; letter-spacing: 0.12em; color: rgba(0,212,255,0.55); margin: 10px 0 4px; text-transform: uppercase; }
+  .analytics-screen-popup select {
+    width: 100%; max-width: 100%; background: rgba(0,20,40,0.9); border: 1px solid var(--border);
+    color: var(--text-bright); font-family: var(--font-data); font-size: 12px; padding: 8px; border-radius: 6px;
+  }
+  .analytics-screen-popup #analytics-window-select { min-height: 140px; }
+  .analytics-capture-mode { display: flex; flex-direction: column; gap: 6px; margin: 8px 0; font-size: 12px; }
+  .analytics-capture-mode label { cursor: pointer; }
   .audiobook-popup-overlay {
     position: fixed; inset: 0; background: rgba(0,0,0,0.65);
     display: none; align-items: center; justify-content: center; z-index: 10012;
@@ -1645,6 +1668,9 @@
       <button class="cmd-btn" onclick="insertCommand('!yt_comment ')" title="Comment on YouTube video — paste URL in box">
         <span class="cmd-icon">💬</span> YT Comment
       </button>
+      <button class="cmd-btn" onclick="openAnalyticsScreenPicker()" title="Choose a window or monitor, then vision reads analytics (OLLAMA_VISION_MODEL).">
+        <span class="cmd-icon">👁</span> Read screen analytics
+      </button>
       <button class="cmd-btn" onclick="insertCommand('!ig_dm ', 'username then optional message')" title="Instagram DM — type username then message, then Send">
         <span class="cmd-icon">📷</span> Instagram DM
       </button>
@@ -1735,9 +1761,6 @@
       </button>
       <button class="cmd-btn" onclick="sendQuick('!briefing')" title="Morning briefing: weather, calendar, todos, news">
         <span class="cmd-icon">🌅</span> Briefing
-      </button>
-      <button class="cmd-btn" onclick="sendQuick('!screenshot')" title="Capture and describe what's on your screen">
-        <span class="cmd-icon">🖥</span> Screenshot
       </button>
         </div>
       </div>
@@ -1973,6 +1996,33 @@
       <button type="button" class="close-dm-popup" id="close-more-cmd" onclick="closeMoreCommands()" aria-label="Close">×</button>
     </div>
     <div class="more-cmd-body" id="more-cmd-body"></div>
+  </div>
+</div>
+
+<!-- Read screen analytics: choose window (Windows) or monitor -->
+<div class="analytics-screen-overlay" id="analytics-screen-overlay" onclick="closeAnalyticsScreenPicker()">
+  <div class="analytics-screen-popup" onclick="event.stopPropagation()">
+    <div class="more-cmd-popup-head" style="margin:-4px -4px 8px;padding-bottom:8px;border-bottom:1px solid rgba(0,212,255,0.15);">
+      <span>👁 Read screen analytics</span>
+      <button type="button" class="close-dm-popup" onclick="closeAnalyticsScreenPicker()" aria-label="Close">×</button>
+    </div>
+    <p class="audiobook-popup-hint" style="margin-bottom:10px;">
+      Choose what to capture. <strong>Browser tabs</strong> are not separate — pick the <strong>browser window</strong> where your analytics tab is active. Or pick a <strong>monitor</strong> for the full display.
+    </p>
+    <div class="analytics-capture-mode" id="analytics-capture-mode-radios">
+      <label><input type="radio" name="analytics-capture-mode" value="window" checked onchange="syncAnalyticsCaptureUI()" /> <strong>Window</strong> (Windows — one app window)</label>
+      <label><input type="radio" name="analytics-capture-mode" value="monitor" onchange="syncAnalyticsCaptureUI()" /> <strong>Monitor</strong> (entire screen)</label>
+    </div>
+    <label class="field-label" for="analytics-window-select">Window</label>
+    <select id="analytics-window-select" size="6" title="Visible windows"></select>
+    <p class="more-cmd-desc" id="analytics-windows-hint" style="padding-left:0;">Loading…</p>
+    <label class="field-label" for="analytics-monitor-select">Monitor</label>
+    <select id="analytics-monitor-select" title="Screens"></select>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:14px;">
+      <button type="button" class="cmd-btn" onclick="loadAnalyticsScreenSources()">Refresh list</button>
+      <button type="button" class="cmd-btn" onclick="submitAnalyticsScreenCapture()">Capture &amp; analyze</button>
+      <button type="button" class="cmd-btn" onclick="closeAnalyticsScreenPicker()">Cancel</button>
+    </div>
   </div>
 </div>
 
@@ -2598,6 +2648,141 @@ function submitAudiobookCreate() {
   sendMessage();
 }
 
+function openAnalyticsScreenPicker() {
+  var o = document.getElementById('analytics-screen-overlay');
+  if (!o) return;
+  o.classList.add('open');
+  syncAnalyticsCaptureUI();
+  loadAnalyticsScreenSources();
+}
+
+function closeAnalyticsScreenPicker() {
+  var o = document.getElementById('analytics-screen-overlay');
+  if (o) o.classList.remove('open');
+}
+
+function _analyticsCaptureMode() {
+  var r = document.querySelector('input[name="analytics-capture-mode"]:checked');
+  return r ? r.value : 'monitor';
+}
+
+function syncAnalyticsCaptureUI() {
+  var mode = _analyticsCaptureMode();
+  var w = document.getElementById('analytics-window-select');
+  var m = document.getElementById('analytics-monitor-select');
+  var winRadio = document.querySelector('input[name="analytics-capture-mode"][value="window"]');
+  var overlay = document.getElementById('analytics-screen-overlay');
+  var plat = overlay ? overlay.getAttribute('data-platform') : '';
+  if (winRadio) {
+    winRadio.disabled = !!(plat && plat !== 'win32');
+  }
+  if (w) w.disabled = (mode === 'monitor');
+  if (m) m.disabled = (mode === 'window');
+}
+
+async function loadAnalyticsScreenSources() {
+  var monSel = document.getElementById('analytics-monitor-select');
+  var winSel = document.getElementById('analytics-window-select');
+  var hint = document.getElementById('analytics-windows-hint');
+  if (monSel) monSel.innerHTML = '';
+  if (winSel) winSel.innerHTML = '';
+  if (hint) hint.textContent = 'Loading…';
+  try {
+    var res = await fetch('/api/screen/sources');
+    var data = await res.json() || {};
+    var overlay = document.getElementById('analytics-screen-overlay');
+    if (overlay) overlay.setAttribute('data-platform', data.platform || '');
+    if (data.platform && data.platform !== 'win32') {
+      var mr = document.querySelector('input[name="analytics-capture-mode"][value="monitor"]');
+      if (mr) mr.checked = true;
+    }
+    var mons = data.monitors || [];
+    if (monSel) {
+      mons.forEach(function(m) {
+        var opt = document.createElement('option');
+        opt.value = String(m.index);
+        opt.textContent = (m.label || ('Monitor ' + m.index)) + '  (' + m.width + '×' + m.height + ')';
+        monSel.appendChild(opt);
+      });
+      if (!mons.length) {
+        var opt0 = document.createElement('option');
+        opt0.value = '';
+        opt0.textContent = 'No monitors detected';
+        monSel.appendChild(opt0);
+      }
+    }
+    var wins = data.windows || [];
+    if (hint) {
+      if (data.platform !== 'win32') {
+        hint.textContent = 'Window list: Windows only. Use Monitor mode, or run Luna on Windows to pick a window.';
+      } else {
+        hint.textContent = wins.length ? 'Select the window that shows your analytics (e.g. Chrome).' : 'No windows listed — click Refresh.';
+      }
+    }
+    if (winSel) {
+      wins.forEach(function(w) {
+        var opt = document.createElement('option');
+        opt.value = String(w.hwnd);
+        opt.textContent = (w.title || '(untitled)').slice(0, 120);
+        winSel.appendChild(opt);
+      });
+    }
+  } catch (e) {
+    if (hint) hint.textContent = 'Could not load sources. Is Luna running?';
+  }
+  syncAnalyticsCaptureUI();
+}
+
+async function submitAnalyticsScreenCapture() {
+  var monSel = document.getElementById('analytics-monitor-select');
+  var winSel = document.getElementById('analytics-window-select');
+  var mode = _analyticsCaptureMode();
+  var body = {};
+  if (mode === 'window') {
+    if (winSel && winSel.value) {
+      var h = parseInt(winSel.value, 10);
+      if (isNaN(h)) {
+        if (typeof showToast === 'function') showToast('Invalid window selection.', true);
+        return;
+      }
+      body.hwnd = h;
+    } else {
+      if (typeof showToast === 'function') showToast('Select a window, or switch to Monitor.', true);
+      else alert('Select a window, or switch to Monitor mode.');
+      return;
+    }
+  } else {
+    if (monSel && monSel.value) {
+      var mi = parseInt(monSel.value, 10);
+      if (isNaN(mi)) {
+        if (typeof showToast === 'function') showToast('Invalid monitor selection.', true);
+        return;
+      }
+      body.monitor = mi;
+    } else {
+      if (typeof showToast === 'function') showToast('Select a monitor.', true);
+      else alert('Select a monitor.');
+      return;
+    }
+  }
+  closeAnalyticsScreenPicker();
+  appendMsg('user', '📊 Read analytics (chosen window/monitor)');
+  showThinking();
+  try {
+    var res = await fetch('/api/analytics/describe-screen', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    var data = await res.json();
+    removeThinking();
+    appendMsg('luna', (data.ok ? '✅ ' : '❌ ') + (data.reply || data.error || 'No response.'));
+  } catch (e) {
+    removeThinking();
+    appendMsg('luna', '⚠ Could not read screen. Is Luna running?');
+  }
+}
+
 // ── More commands popups (one per main section: Social / Media / System / Tools) ──
 const MORE_COMMANDS = {
   social: {
@@ -2606,6 +2791,7 @@ const MORE_COMMANDS = {
       { label: 'Suno ready', icon: '✓', desc: "Tell Luna you're logged into Suno (!suno_ready)", run: function() { sendQuick('!suno_ready'); } },
       { label: 'Share song (cmd)', icon: '𝕏', desc: 'Same as the Share Song button (!share_song)', run: function() { sendQuick('!share_song'); } },
       { label: 'Share Facebook (cmd)', icon: '📘', desc: 'Same as Share Facebook (!share_facebook)', run: function() { sendQuick('!share_facebook'); } },
+      { label: 'Read screen analytics', icon: '👁', desc: 'Pick window or monitor, then vision (!analytics_screen)', run: function() { openAnalyticsScreenPicker(); } },
     ]
   },
   media: {
@@ -2698,6 +2884,8 @@ document.addEventListener('keydown', function(e) {
     if (o && o.classList.contains('open')) closeMoreCommands();
     var a = document.getElementById('audiobook-popup-overlay');
     if (a && a.classList.contains('open')) closeAudiobookCreateDialog();
+    var an = document.getElementById('analytics-screen-overlay');
+    if (an && an.classList.contains('open')) closeAnalyticsScreenPicker();
   }
 });
 

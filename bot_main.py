@@ -376,7 +376,7 @@ HELP_TEXT = (
     "• !join / !leave / !pause / !skip / !stop / !queue — music\n"
     "• !joinme [message] — join your VC and say it with TTS (or \"Hey, Luna here!\")\n"
     "• !briefing — morning briefing (weather, calendar, todos, news)\n"
-    "• !screenshot — describe what's on your screen right now\n"
+    "• !analytics_screen — vision read of analytics on screen (web UI: **Read screen analytics** picks window/monitor)\n"
     "• remind me at 7pm to … — Discord DM + voice reminder\n"
     "• retry — retry last failed action with different strategies\n"
     "• !pc_vitals / how's my PC — CPU, RAM, disk\n"
@@ -419,7 +419,7 @@ LUNA_CAPABILITIES = (
     "translation (text and voice to English) via the Translate module; "
     "voice input and TTS; creating and running Python scripts on request; "
     "machine learning: Luna learns internally from every action and outcome — she observes what works and improves over time (no separate ML command); "
-    "screenshot awareness (you can capture and describe the user's screen — !screenshot); "
+    "reading analytics from the screen with vision (**!analytics_screen** / web **Read screen analytics** — pick window or monitor); "
     "clipboard awareness (you passively track what the user copies); "
     "morning briefing (weather, calendar, todos, news — !briefing or automatic at morning); "
     "browser tab awareness (you can see what browser tabs and websites the user has open); "
@@ -457,10 +457,6 @@ def _build_luna_chat_system(scope: str | None) -> str:
     pc_ctx = _get_pc_context()
     if pc_ctx:
         system = system + "\n\n## Your PC (full awareness)\n" + pc_ctx[:3000]
-    # Screenshot description (what's visually on screen)
-    ss_desc = _get_screenshot_desc()
-    if ss_desc:
-        system = system + "\n\n## Screen (visual snapshot)\n" + ss_desc[:1500]
     # Browser context
     browser_ctx = _gather_browser_context()
     if browser_ctx:
@@ -1355,10 +1351,20 @@ def _capture_profile(scope: str, text: str) -> None:
 # ── TTS ───────────────────────────────────────────────────────────────────────
 
 def _tts_bytes(text: str) -> bytes:
+    """Short TTS for Discord VC, reminders, inline replies: Edge (Ava by default) → Fish → gTTS."""
+    text = (text or "").strip()[:500]
+    if not text:
+        return b""
+    b = _edge_tts_bytes(text)
+    if b:
+        return b
+    b = _fish_audio_tts_bytes(text)
+    if b:
+        return b
     try:
         from gtts import gTTS
         buf = io.BytesIO()
-        gTTS(text=text.strip()[:500], lang=GTTS_LANG, slow=False).write_to_fp(buf)
+        gTTS(text=text, lang=GTTS_LANG, slow=False).write_to_fp(buf)
         buf.seek(0)
         return buf.read()
     except Exception:
@@ -2010,13 +2016,12 @@ async def _pc_context_observer_loop():
             await asyncio.sleep(60)
 
 
-# ── Screenshot capture ───────────────────────────────────────────────────────
+# ── Screen capture (primary monitor + analytics window/monitor) ────────────
 
 _SCREENSHOT_PATH = os.path.join(_DATA, "last_screenshot.png")
-_SCREENSHOT_DESC_PATH = os.path.join(_DATA, "screenshot_desc.json")
 
 def _capture_screenshot() -> str | None:
-    """Capture screen using mss, save to data/, return path or None."""
+    """Capture primary monitor with mss, save to data/, return path or None."""
     try:
         import mss
         with mss.mss() as sct:
@@ -2030,59 +2035,215 @@ def _capture_screenshot() -> str | None:
     except Exception:
         return None
 
-def _describe_screenshot() -> str:
-    """Capture screenshot and describe it with the vision model. Returns description or error detail."""
-    path = _capture_screenshot()
+_ANALYTICS_CAPTURE_PATH = os.path.join(_DATA, "last_analytics_capture.png")
+
+def _capture_region_to_path(path: str, bbox: dict) -> bool:
+    """Save a screen region using mss. bbox: left, top, width, height."""
+    try:
+        import mss
+        from mss.tools import to_png
+        with mss.mss() as sct:
+            shot = sct.grab(bbox)
+            png = to_png(shot.rgb, shot.size)
+            with open(path, "wb") as f:
+                f.write(png)
+            return True
+    except Exception:
+        return False
+
+def _list_mss_monitors() -> list[dict]:
+    """Individual monitors for UI (mss index 0 = virtual all-screens; skipped)."""
+    try:
+        import mss
+        with mss.mss() as sct:
+            out: list[dict] = []
+            for i, m in enumerate(sct.monitors):
+                if i == 0:
+                    continue
+                label = f"Monitor {i}"
+                if i == 1:
+                    label += " (primary)"
+                out.append({
+                    "index": i,
+                    "left": int(m["left"]),
+                    "top": int(m["top"]),
+                    "width": int(m["width"]),
+                    "height": int(m["height"]),
+                    "label": label,
+                })
+            return out
+    except Exception:
+        return []
+
+def _list_windows_win32() -> list[dict]:
+    """Visible top-level windows (Windows only)."""
+    if sys.platform != "win32":
+        return []
+    try:
+        import ctypes
+        from ctypes import wintypes
+        user32 = ctypes.windll.user32
+        results: list[dict] = []
+
+        @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+        def _enum(hwnd, _lparam):
+            if not user32.IsWindowVisible(hwnd):
+                return True
+            if user32.IsIconic(hwnd):
+                return True
+            length = user32.GetWindowTextLengthW(hwnd)
+            if length == 0:
+                return True
+            buf = ctypes.create_unicode_buffer(length + 1)
+            user32.GetWindowTextW(hwnd, buf, length + 1)
+            title = (buf.value or "").strip()
+            if not title:
+                return True
+            skip_titles = ("Program Manager", "Windows Input Experience", "MSCTFIME UI")
+            if title in skip_titles:
+                return True
+            rect = wintypes.RECT()
+            if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+                return True
+            w, h = rect.right - rect.left, rect.bottom - rect.top
+            if w < 80 or h < 80:
+                return True
+            results.append({"hwnd": int(hwnd), "title": title[:220]})
+            return True
+
+        user32.EnumWindows(_enum, 0)
+        results.sort(key=lambda x: (x.get("title") or "").lower())
+        return results[:150]
+    except Exception:
+        return []
+
+def _capture_window_win32(hwnd: int) -> str | None:
+    """Capture a single window by HWND (Windows). Returns path or None."""
+    if sys.platform != "win32":
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+        user32 = ctypes.windll.user32
+        hwnd = int(hwnd)
+        if not user32.IsWindow(hwnd):
+            return None
+        if user32.IsIconic(hwnd):
+            return None
+        rect = wintypes.RECT()
+        if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+            return None
+        left, top = int(rect.left), int(rect.top)
+        w, h = int(rect.right - rect.left), int(rect.bottom - rect.top)
+        if w < 2 or h < 2:
+            return None
+        bbox = {"left": left, "top": top, "width": w, "height": h}
+        if _capture_region_to_path(_ANALYTICS_CAPTURE_PATH, bbox):
+            return _ANALYTICS_CAPTURE_PATH
+    except Exception:
+        pass
+    return None
+
+def _capture_monitor_n(monitor_index: int) -> str | None:
+    """Capture one mss monitor by index (same numbering as /api/screen/sources)."""
+    try:
+        import mss
+        from mss.tools import to_png
+        idx = int(monitor_index)
+        with mss.mss() as sct:
+            if idx < 0 or idx >= len(sct.monitors):
+                return None
+            if idx == 0:
+                return None
+            shot = sct.grab(sct.monitors[idx])
+            png = to_png(shot.rgb, shot.size)
+            with open(_ANALYTICS_CAPTURE_PATH, "wb") as f:
+                f.write(png)
+            return _ANALYTICS_CAPTURE_PATH
+    except Exception:
+        return None
+
+_DASHBOARD_VISION_PROMPT = """You are reading a screenshot of a web analytics or creator dashboard (e.g. YouTube Studio, Spotify for Artists, social insights).
+
+List ONLY information that is clearly readable on screen:
+- numbers, percentages, counts, views, subscribers, streams, watch time, revenue (if shown), dates, time ranges
+- visible chart titles, table headers, and section names
+
+Rules:
+- If text is too small, blurry, or cut off, write "unclear" for that item — do not guess.
+- Do NOT invent, round, or estimate statistics that are not plainly visible.
+- Use short bullet points.
+- If no analytics or creator dashboard is visible, say that in one sentence."""
+
+def _describe_dashboard_screenshot(
+    hwnd: int | None = None,
+    monitor_index: int | None = None,
+) -> tuple[bool, str]:
+    """
+    Capture a chosen window (Windows), monitor, or primary screen; vision + optional text snapshot.
+    Browser tabs share one window — pick the browser window that shows your analytics tab.
+    """
+    path: str | None = None
+    if hwnd is not None and sys.platform == "win32":
+        path = _capture_window_win32(int(hwnd))
+        if not path:
+            return False, (
+                "Could not capture that window. It may be **minimized**, closed, or invalid. "
+                "Restore the window, then try again."
+            )
+    elif monitor_index is not None:
+        path = _capture_monitor_n(int(monitor_index))
+        if not path:
+            return False, "Invalid monitor index. Refresh the list and pick a valid monitor."
+    else:
+        path = _capture_screenshot()
     if not path:
-        return "[screenshot] Could not capture screen."
+        return False, "Could not capture screen (mss unavailable or failed)."
     if not OLLAMA_VISION_MODEL:
-        return "[screenshot] No vision model configured. Set OLLAMA_VISION_MODEL in .env."
+        return False, "Set **OLLAMA_VISION_MODEL** (e.g. granite3.2-vision) in `.env` to read the screen."
     try:
         with open(path, "rb") as f:
             img_b64 = base64.b64encode(f.read()).decode()
         body = json.dumps({
             "model": OLLAMA_VISION_MODEL,
-            "prompt": "Describe what is on this computer screen. Be factual and concise. List visible applications, windows, and content. Do NOT invent anything.",
+            "prompt": _DASHBOARD_VISION_PROMPT,
             "images": [img_b64],
             "stream": False,
         }).encode()
-        req = urllib.request.Request(f"{OLLAMA_BASE}/api/generate", data=body,
-            headers={"Content-Type": "application/json"}, method="POST")
+        req = urllib.request.Request(
+            f"{OLLAMA_BASE}/api/generate",
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
         with urllib.request.urlopen(req, timeout=120) as r:
-            desc = (json.loads(r.read()).get("response") or "").strip()
-        if desc:
-            _save_json(_SCREENSHOT_DESC_PATH, {"desc": desc[:2000], "ts": time.time()})
-            return desc[:2000]
-        return "[screenshot] Vision model returned no description."
-    except urllib.error.URLError as e:
-        return f"[screenshot] Cannot reach Ollama ({e.reason}). Is Ollama running?"
-    except Exception as e:
-        return f"[screenshot] Error: {e}"
-
-def _get_screenshot_desc() -> str:
-    """Return cached screenshot description if recent (< 5 min)."""
-    data = _load_json(_SCREENSHOT_DESC_PATH, {})
-    ts = data.get("ts") or 0
-    if (time.time() - ts) < 300:
-        return (data.get("desc") or "").strip()
-    return ""
-
-def _screenshot_observer_step():
-    try:
-        _describe_screenshot()
-    except Exception:
-        pass
-
-async def _screenshot_observer_loop():
-    """Periodically capture and describe the screen (every 5 min)."""
-    await bot.wait_until_ready()
-    await asyncio.sleep(30)
-    while True:
+            vision_text = (json.loads(r.read()).get("response") or "").strip()
+        if not vision_text:
+            return False, "Vision model returned nothing. Try maximizing the analytics window or zooming in."
+        vision_text = vision_text[:4000]
+        snapshot = ""
         try:
-            await asyncio.to_thread(_screenshot_observer_step)
-            await asyncio.sleep(300)
+            snapshot = ollama_chat(
+                "The following was read from a **screenshot** of an analytics dashboard by a vision model. "
+                "It may be incomplete or slightly wrong if the UI was small.\n\n---\n"
+                f"{vision_text}\n---\n\n"
+                "Write a concise **Analytics snapshot** for the user: short bullet list only. "
+                "Include only facts that appear in the extract. Do not add numbers that are not there. "
+                "If no numeric metrics were visible, say that clearly.",
+                system="You are a careful editor. Never invent metrics.",
+                model=OLLAMA_SMALL,
+            )
+            snapshot = (snapshot or "").strip()
         except Exception:
-            await asyncio.sleep(120)
+            snapshot = ""
+        if snapshot and len(snapshot) > 25:
+            footer = f"\n\n---\n_Vision extract:_\n{vision_text[:1500]}{'…' if len(vision_text) > 1500 else ''}"
+            return True, f"📊 **Analytics from your screen**\n\n{snapshot}{footer}"
+        return True, f"📊 **From your screen (vision only)**\n\n{vision_text[:2500]}{'…' if len(vision_text) > 2500 else ''}"
+    except urllib.error.URLError as e:
+        return False, f"Cannot reach Ollama ({e.reason}). Is Ollama running?"
+    except Exception as e:
+        return False, str(e)[:400]
 
 # ── Clipboard awareness ─────────────────────────────────────────────────────
 
@@ -6584,6 +6745,11 @@ def _run_cmd_impl(cmd: str, p: dict, scope: str | None, user_message: str) -> st
         except Exception:
             ok = False
         return "✅ Joined your voice channel and said it." if ok else "❌ Join a Discord voice channel first, then try **!joinme**."
+    if cmd == "analytics_screen":
+        ok, r = _describe_dashboard_screenshot()
+        if not ok:
+            _record_failure("analytics_screen", r, p)
+        return f"✅ {r}" if ok else f"❌ {r}"
     if cmd == "summarize":
         ok, msg = _summarize_input((p.get("input") or p.get("query") or "").strip())
         if not ok:
@@ -6784,6 +6950,11 @@ def _parse_command(text: str) -> tuple[str, dict] | None:
             "days": int(m_days.group(1)) if m_days else 30,
             "limit": int(m_limit.group(1)) if m_limit else 5,
         }
+    if re.search(
+        r"\b(?:read|analyze|scan)\s+(?:my\s+)?(?:analytics|dashboard|stats)\s+(?:from\s+)?(?:the\s+)?(?:screen|screenshot|display)\b",
+        low,
+    ):
+        return "analytics_screen", {}
     # Instagram DM — explicit "ig_dm username message..." or natural "instagram/ig dm @user"
     if low.startswith("ig_dm "):
         rest = raw[len("ig_dm "):].strip()
@@ -6956,7 +7127,7 @@ def _likely_command(text: str) -> bool:
     if not low: return False
     if _CONV_START.match(low): return False
     starters = ("play ","podcast ","podcast create ","create podcast ","audiobook ","audiobook create ","audiobook continue ","audiobook cancel ","search ","research ","research_story ","research story ","story_script ","story script ","send ","create ","call ","dm ","tell ","inform ","msg ","share ","post ","remind ","suno ","yt_comment ","yt_analytics ","comment ","ig_dm ","fb_msg ","google ","news","!help","how's ","pc status","luna status","ram ","what do you see","what can you see","ask me ","summarize ","summary of ","todo ","calendar ","join me ","join my ","luna join ")
-    return any(low.startswith(s) for s in starters) or low in ("play","news","help","skip","stop","ask me","digest","daily digest","todo","todo list","calendar","calendar list","calendar today","calendar week","youtube analytics","yt analytics") or "luna status" in low or "pc status" in low or bool(re.search(r"\b(what do you see|what can you see|do you see me|describe what you see)\b", low))
+    return any(low.startswith(s) for s in starters) or low in ("play","news","help","skip","stop","ask me","digest","daily digest","todo","todo list","calendar","calendar list","calendar today","calendar week","youtube analytics","yt analytics") or "luna status" in low or "pc status" in low or bool(re.search(r"\b(what do you see|what can you see|do you see me|describe what you see)\b", low)) or bool(re.search(r"\b(?:read|analyze|scan)\s+(?:my\s+)?(?:analytics|dashboard|stats)\b", low))
 
 def _is_retry(msg: str) -> bool:
     low = (msg or "").strip().lower()
@@ -8573,13 +8744,38 @@ def api_briefing():
     _mark_briefing_shown()
     return jsonify({"briefing": briefing})
 
-# ── Screenshot API ───────────────────────────────────────────────────────────
+# ── Screen analytics API ─────────────────────────────────────────────────────
 
-@web.route("/api/screenshot")
-def api_screenshot():
-    """Capture and describe screen."""
-    desc = _describe_screenshot()
-    return jsonify({"description": desc or "No screenshot available."})
+@web.route("/api/screen/sources")
+def api_screen_sources():
+    """Monitors + (Windows) visible windows for analytics capture picker."""
+    return jsonify({
+        "monitors": _list_mss_monitors(),
+        "windows": _list_windows_win32(),
+        "platform": sys.platform,
+    })
+
+@web.route("/api/analytics/describe-screen", methods=["POST"])
+def api_analytics_describe_screen():
+    """Vision read of capture. JSON body: optional `hwnd` (Windows) or `monitor` (mss index, ≥1)."""
+    data = request.get_json(force=True, silent=True) or {}
+    hwnd = data.get("hwnd")
+    monitor = data.get("monitor")
+    try:
+        hwnd = int(hwnd) if hwnd is not None and str(hwnd).strip() != "" else None
+    except (TypeError, ValueError):
+        hwnd = None
+    try:
+        monitor = int(monitor) if monitor is not None and str(monitor).strip() != "" else None
+    except (TypeError, ValueError):
+        monitor = None
+    if hwnd is not None and sys.platform != "win32":
+        return jsonify({
+            "ok": False,
+            "reply": "Window capture by ID is only supported on **Windows**. Use **monitor** instead.",
+        })
+    ok, reply = _describe_dashboard_screenshot(hwnd=hwnd, monitor_index=monitor)
+    return jsonify({"ok": ok, "reply": reply})
 
 # ── Manifest + SW for PWA ────────────────────────────────────────────────────
 
@@ -9037,8 +9233,11 @@ def _handle_bang(msg: str, scope: str) -> str:
         return reply if reply else "❌ Stop failed."
     if cmd == "!briefing":
         return _generate_morning_briefing()
-    if cmd == "!screenshot":
-        return _describe_screenshot()
+    if cmd in ("!analytics_screen", "!dashboard_read", "!read_dashboard"):
+        ok, r = _describe_dashboard_screenshot()
+        if not ok:
+            _record_failure("analytics_screen", r, {})
+        return f"✅ {r}" if ok else f"❌ {r}"
     if cmd == "!joinme":
         reply = _run_cmd("joinme", {"message": args}, scope)
         return reply if reply else "❌ Join a Discord voice channel first."
@@ -9068,7 +9267,6 @@ async def on_ready():
     bot.loop.create_task(_proactive_heartbeat_loop())
     bot.loop.create_task(_reflection_loop())
     bot.loop.create_task(_evolution_loop())
-    bot.loop.create_task(_screenshot_observer_loop())
     bot.loop.create_task(_clipboard_monitor_loop())
     bot.loop.create_task(_knowledge_embedding_loop())
     bot.loop.create_task(_wake_word_loop())
@@ -9461,6 +9659,17 @@ async def cmd_yt_analytics(ctx, days: int = 30, limit: int = 5):
     ok, r = await asyncio.to_thread(_yt_channel_analytics, days, limit)
     if not ok: _record_failure("yt_analytics", r, {"days": days, "limit": limit})
     await ctx.reply(f"{'✅' if ok else '❌'} {r}")
+
+@bot.command(name="analytics_screen", aliases=["dashboard_read", "read_dashboard"])
+async def cmd_analytics_screen(ctx):
+    if not _is_privileged(ctx.author.id): await ctx.reply("Linked user/admin only."); return
+    ok, r = await asyncio.to_thread(_describe_dashboard_screenshot)
+    if not ok:
+        _record_failure("analytics_screen", r, {})
+    full = (f"✅ {r}" if ok else f"❌ {r}")
+    chunks = [full[i : i + 1990] for i in range(0, len(full), 1990)]
+    for chunk in chunks:
+        await ctx.reply(chunk)
 
 @bot.command(name="status", aliases=["set_status"])
 async def cmd_status(ctx, *, args: str = ""):

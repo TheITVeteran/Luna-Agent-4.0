@@ -45,7 +45,6 @@ data/fb_last_seen.json
 data/evolution_enabled.json
 data/clipboard_history.json
 data/pc_context.json
-data/screenshot_desc.json
 data/ml_learned.json
 data/knowledge_embeddings.json
 data/last_screenshot.png

@@ -147,7 +147,7 @@ Every chat query is semantically matched against the knowledge base (`data/knowl
 | `!skip` / `!stop` / `!queue` / `!pause` / `!resume` | Music controls |
 | `!joinme [message]` | Luna joins your voice channel and speaks via TTS |
 | `!briefing` | Morning briefing: weather, calendar, todos, headlines |
-| `!screenshot` | Capture + describe what's on screen |
+| `!analytics_screen` | Vision read of analytics on screen (web UI **Read screen analytics** can pick window/monitor) |
 | `!pc_vitals` | CPU, RAM, disk usage |
 | `!luna_vitals` | Luna process, Ollama status, uptime |
 | `!todo add\|list\|done` | Local todo list |
@@ -190,7 +190,7 @@ Every chat query is semantically matched against the knowledge base (`data/knowl
 - **Running processes** — full process list
 - **Recent files** — what files changed recently in your workspace
 - **Repository structure** — aware of the project layout
-- **Screenshot awareness** — `!screenshot` captures and describes screen; also used passively
+- **Screen analytics (vision)** — `!analytics_screen` or web **Read screen analytics** (pick window/monitor) reads dashboard metrics from a capture
 - **Clipboard** — tracks what you copy
 - **Browser tabs** — knows what websites you have open
 - All of this is in the system prompt without you asking
@@ -363,7 +363,7 @@ All persistent state lives in `data/`:
 | `todos.json` | Todo list |
 | `ml_learned.json` | Machine learning: which commands succeed/fail |
 | `pc_context.json` | Cached PC/repo awareness |
-| `screenshot_desc.json` | Latest screenshot description |
+| `last_analytics_capture.png` | Latest window/monitor capture used for analytics vision |
 | `clipboard_history.json` | Recent clipboard entries |
 
 ---
