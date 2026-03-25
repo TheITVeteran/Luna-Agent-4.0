@@ -1668,6 +1668,9 @@
       <button class="cmd-btn" onclick="insertCommand('!yt_comment ')" title="Comment on YouTube video — paste URL in box">
         <span class="cmd-icon">💬</span> YT Comment
       </button>
+      <button type="button" class="cmd-btn" id="yt-like-btn" onclick="ytLikeFromInput()" title="Like one video — paste its URL in the message box, then press (same browser login as YT Comment)">
+        <span class="cmd-icon">👍</span> YT Like (1 video)
+      </button>
       <button class="cmd-btn" onclick="openAnalyticsScreenPicker()" title="Choose a window or monitor, then vision reads analytics (OLLAMA_VISION_MODEL).">
         <span class="cmd-icon">👁</span> Read screen analytics
       </button>
@@ -2600,6 +2603,38 @@ function insertCommand(prefix, placeholderHint) {
   inputEl.focus();
 }
 inputEl.addEventListener('blur', function() { if (!inputEl.value.trim()) inputEl.placeholder = defaultPlaceholder; });
+
+async function ytLikeFromInput() {
+  const raw = (inputEl.value || '').trim();
+  const m = raw.match(/https?:\/\/(?:www\.)?(?:youtube\.com|youtu\.be)\/[^\s]+/i);
+  var url = m ? m[0].replace(/[.,!?;:]+$/, '') : '';
+  if (!url && /^https?:\/\//i.test(raw) && /youtu\.?be|youtube\.com/i.test(raw)) {
+    url = raw.split(/\s+/)[0].replace(/[.,!?;:]+$/, '');
+  }
+  if (!url) {
+    showToast('Paste a YouTube video URL in the message box first.', true);
+    insertCommand('!yt_like ', 'paste video URL, then press YT Like or Send');
+    return;
+  }
+  var btn = document.getElementById('yt-like-btn');
+  if (btn) { btn.disabled = true; btn.classList.add('loading'); }
+  showToast('Liking one video (browser)…', false);
+  try {
+    const r = await fetch('/api/youtube/like', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: url })
+    });
+    const j = await r.json().catch(function() { return {}; });
+    if (btn) { btn.disabled = false; btn.classList.remove('loading'); }
+    var msg = j.message || (j.ok ? 'Done.' : 'Request failed.');
+    showToast(msg, !j.ok);
+    if (j.ok) appendMsg('luna', '✅ ' + msg);
+  } catch (e) {
+    if (btn) { btn.disabled = false; btn.classList.remove('loading'); }
+    showToast('Network error.', true);
+  }
+}
 
 function showHelp() {
   inputEl.value = '!help';

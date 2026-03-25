@@ -182,3 +182,4 @@
 {"ts": "2026-03-23T15:55:28.282752+00:00", "cmd": "stop", "params": {}, "reply": "✅ ⏹️ Stopped."}
 {"ts": "2026-03-23T15:56:25.404459+00:00", "cmd": "stop", "params": {}, "reply": "✅ ⏹️ Stopped."}
 {"ts": "2026-03-23T15:56:46.574842+00:00", "cmd": "play", "params": {"query": ""}, "reply": "Usage: !play <song or URL> (from UI: play in Discord if you're in a voice channel)."}
+{"ts": "2026-03-25T13:27:56.263847+00:00", "cmd": "ask_me", "params": {}, "reply": [false, {"need_feedback": true, "request_id": "c16b5500d804", "message": "Choose an option:", "options": ["Option A", "Option B"]}]}

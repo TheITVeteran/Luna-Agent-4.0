@@ -97,6 +97,7 @@ FB_PROFILE_DIR   = _env("FACEBOOK_PROFILE_DIR", os.path.join(_DATA, "facebook_pr
 YT_CHANNEL_ID    = _env("YOUTUBE_CHANNEL_ID", "UCqIjEHOABb8fwbKbjDhVRuA")
 YT_CHANNEL_URL   = _env("YOUTUBE_CHANNEL_URL")
 YT_FEED_URL      = f"https://www.youtube.com/feeds/videos.xml?channel_id={YT_CHANNEL_ID}"
+# Playwright: !yt_comment, !yt_like, and web “YT Like” share this one profile (one Google account). X/IG/FB/WhatsApp/etc. use their own *_PROFILE_DIR.
 YT_PROFILE_DIR   = _env("YOUTUBE_PROFILE_DIR", os.path.join(_DATA, "youtube_profile"))
 YOUTUBE_API_KEY  = _env("YOUTUBE_API_KEY") or _env("YT_API_KEY")
 IG_BASE          = _env("INSTAGRAM_BASE_URL", "https://www.instagram.com").rstrip("/")
@@ -364,6 +365,7 @@ HELP_TEXT = (
     "• !suno_ready — tell Luna you're already logged in to Suno (or say **I'm logged in to Suno**)\n"
     "• !share_song / !share_facebook — share to X or Facebook\n"
     "• !yt_comment <url> — transcribe video + AI comment with real context\n"
+    "• !yt_like <url> — like one video (Playwright; same **YOUTUBE_PROFILE_DIR** as !yt_comment)\n"
     "• !yt_analytics [days] [limit] — top traction videos from your channel (API key optional; fallback uses scrape metadata)\n"
     "• !status <text> / !status clear — change Luna's Discord status (linked/admin)\n"
     "• !ig_dm <user> [msg] — Instagram DM\n"
@@ -407,7 +409,7 @@ LUNA_CAPABILITIES = (
     "When asked what you can do, your features, or your capabilities, describe YOUR real system — not generic AI/LLM abilities. "
     "You are Luna, a personal AI companion living on the user's PC. Your real capabilities include: "
     "chat and natural conversation; world news and Google search; creating Suno songs and sharing to X/Facebook; "
-    "YouTube comment generation from video context; Instagram and Messenger DMs; Discord DMs and voice (join VC, transcribe, TTS); "
+    "YouTube comments and one-at-a-time likes share **YOUTUBE_PROFILE_DIR** (one account); Instagram and Messenger DMs; Discord DMs and voice (join VC, transcribe, TTS); "
     "WhatsApp messages (you type and send in the browser); reminders (Discord DM + voice at a set time); "
     "playing music and custom podcasts in Discord (and creating podcast episodes from a topic); "
     "PC vitals (CPU, RAM, disk) and Luna vitals (your process, Ollama, uptime); "
@@ -544,9 +546,9 @@ async def _set_discord_status(text: str, kind: str | None = None) -> tuple[bool,
 def _scope_for(author_id: int, guild_id=None) -> str:
     if _linked_int and author_id == _linked_int:
         return LINKED_SCOPE
-    if author_id in _dm_sync_ids:
-        return f"discord:user:{author_id}"
-    return f"discord:{guild_id}:{author_id}" if guild_id else f"discord:dm:{author_id}"
+    # Keep one stable memory/profile scope per Discord user across DMs and guilds.
+    # This prevents "forgetting" the same person when they message from different contexts.
+    return f"discord:user:{author_id}"
 
 def _read_file(path: str) -> str:
     try:
@@ -1336,19 +1338,54 @@ def _capture_memory(scope: str, text: str, luna_reply: str = "") -> None:
 def _capture_profile(scope: str, text: str) -> None:
     text = text.strip()
     if not text or not scope: return
-    checks = [
-        (r"\b(?:my name is|call me|i am called)\s+([a-zA-Z][a-zA-Z\s\-']{0,50})(?:\.|,|\s+and|\s*$)", "name"),
-        (r"\b(?:i live in|i'?m from|based in)\s+(.+?)(?:\.|$)", "location"),
-        (r"\b(?:i work as|i'?m a|i'?m an)\s+(.+?)(?:\.|$)", "occupation"),
-        (r"\b(?:my interests? (?:are|is)|i am interested in)\s+(.+?)(?:\.|$)", "interests"),
-        (r"\b(?:my birthday is|i was born on)\s+(.+?)(?:\.|$)", "birthday"),
-    ]
-    for pattern, field in checks:
-        m = re.search(pattern, text, re.I | re.S)
-        if m:
-            val = m.group(1).strip()[:200]
-            if len(val) >= 2: set_profile_field(scope, field, val)
+    def _append_profile(field: str, value: str) -> None:
+        v = re.sub(r"\s+", " ", (value or "").strip(" .,!?:;")).strip()
+        if len(v) < 2:
             return
+        current = (get_profile(scope).get(field) or "").strip()
+        if not current:
+            set_profile_field(scope, field, v[:400])
+            return
+        if v.lower() in current.lower():
+            return
+        merged = f"{current}; {v}"
+        set_profile_field(scope, field, merged[:1000])
+
+    # Name
+    m = re.search(r"\b(?:my name is|call me|i am called)\s+([a-zA-Z][a-zA-Z\s\-']{0,50})(?:\.|,|\s+and|\s*$)", text, re.I | re.S)
+    if m:
+        nm = m.group(1).strip()
+        if 1 <= len(nm) <= 80:
+            set_profile_field(scope, "name", nm)
+
+    # Hobbies / interests / preferences
+    pref_patterns = [
+        r"\b(?:my hobbies are|my hobby is)\s+(.+?)(?:\.|$)",
+        r"\b(?:my interests? are|i am interested in|i'm interested in|im interested in|i'?m into)\s+(.+?)(?:\.|$)",
+        r"\b(?:i like|i love|i enjoy|i prefer)\s+(.+?)(?:\.|$)",
+    ]
+    for pat in pref_patterns:
+        m = re.search(pat, text, re.I | re.S)
+        if m:
+            _append_profile("preferences", m.group(1)[:260])
+            break
+
+    # Goals / intentions
+    m = re.search(r"\b(?:my goals? (?:is|are)|my goal is|i want to|i'd like to|i would like to)\s+(.+?)(?:\.|$)", text, re.I | re.S)
+    if m:
+        _append_profile("goals", m.group(1)[:260])
+
+    # About (location, work, personal descriptors)
+    about_parts = []
+    for pat in (
+        r"\b(?:i live in|i'm from|im from|based in)\s+(.+?)(?:\.|$)",
+        r"\b(?:i work as|i work at|my job is|i am a|i'm a|im a|i am an|i'm an|im an)\s+(.+?)(?:\.|$)",
+    ):
+        m = re.search(pat, text, re.I | re.S)
+        if m:
+            about_parts.append(m.group(0).strip())
+    if about_parts:
+        _append_profile("about", " | ".join(about_parts)[:350])
 
 # ── TTS ───────────────────────────────────────────────────────────────────────
 
@@ -4983,6 +5020,118 @@ def _yt_comment(video_url: str) -> tuple[bool, str]:
         try: _yt_lock.release()
         except Exception: pass
 
+def _yt_like_one(video_url: str) -> tuple[bool, str]:
+    """Like exactly one video via Playwright + YT_PROFILE_DIR (same account as !yt_comment)."""
+    vid = _yt_extract_id(video_url)
+    if not vid: return False, "Invalid YouTube URL."
+    if not _yt_lock.acquire(blocking=False): return False, "YouTube action already running."
+    watch = f"https://www.youtube.com/watch?v={vid}"
+    try:
+        from playwright.sync_api import sync_playwright
+        os.makedirs(YT_PROFILE_DIR, exist_ok=True)
+        context = None
+        try:
+            with sync_playwright() as p:
+                for attempt in range(2):
+                    try:
+                        context = _launch_social_browser(YT_PROFILE_DIR, p)
+                        break
+                    except Exception as launch_err:
+                        if attempt == 0 and ("Target page, context or browser has been closed" in str(launch_err) or "closed" in str(launch_err).lower()):
+                            time.sleep(2)
+                            continue
+                        return False, f"YouTube browser failed to start. Close any Chrome window using the YouTube profile (or close all Chrome), then try again. Error: {launch_err}"
+                if context is None:
+                    return False, "YouTube browser failed to start. Close any Chrome window and try again."
+                page = context.pages[0] if context.pages else context.new_page()
+                page.goto(watch, wait_until="domcontentloaded", timeout=90000)
+                page.wait_for_timeout(2000)
+                logged_in = False
+                try:
+                    if "accounts.google.com" in page.url:
+                        logged_in = False
+                    else:
+                        for sel in ("#avatar-btn", "a[href*='/feed/subscriptions']", "ytd-masthead #avatar-button", "ytd-comment-simplebox-renderer"):
+                            if page.locator(sel).first.count():
+                                try:
+                                    if page.locator(sel).first.is_visible():
+                                        logged_in = True
+                                        break
+                                except Exception:
+                                    pass
+                        if not logged_in:
+                            if page.locator("ytd-masthead a[href*='accounts.google']").first.count() and page.locator("ytd-masthead a[href*='accounts.google']").first.is_visible():
+                                logged_in = False
+                            else:
+                                logged_in = True
+                except Exception:
+                    pass
+                if not logged_in:
+                    try: context.close()
+                    except Exception: pass
+                    context = None
+                    _clear_ready(YT_PROFILE_DIR)
+                    _bootstrap_window(YT_PROFILE_DIR, "https://www.youtube.com", "_yt_boot")
+                    return False, "YouTube needs login. Browser opened — log in and close, then try again."
+                _mark_ready(YT_PROFILE_DIR)
+                result = page.evaluate("""() => {
+                    const tryClick = (btn) => {
+                        if (!btn) return null;
+                        const label = ((btn.getAttribute('aria-label') || '') + ' ' + (btn.getAttribute('title') || '')).toLowerCase();
+                        if (label.startsWith('unlike') || label.includes('remove your like')) return 'already';
+                        const pressed = btn.getAttribute('aria-pressed');
+                        if (pressed === 'true') return 'already';
+                        btn.click();
+                        return 'clicked';
+                    };
+                    const likeVm = document.querySelector('like-button-view-model');
+                    if (likeVm) {
+                        const btn = likeVm.querySelector('button');
+                        const r = tryClick(btn);
+                        if (r) return r;
+                    }
+                    const seg = document.querySelector('segmented-like-dislike-button-view-model');
+                    if (seg) {
+                        const btn = seg.querySelector('button');
+                        const r = tryClick(btn);
+                        if (r) return r;
+                    }
+                    const nodes = document.querySelectorAll(
+                        '#top-level-buttons-computed button, ytd-menu-renderer ytd-toggle-button-renderer button, ytd-watch-metadata button'
+                    );
+                    for (const b of nodes) {
+                        const label = ((b.getAttribute('aria-label') || '') + ' ' + (b.getAttribute('title') || '')).toLowerCase();
+                        if (!label.includes('like')) continue;
+                        if (label.includes('dislike') && !label.includes('like')) continue;
+                        if (/\\b(clip|share|save|download|report)\\b/.test(label)) continue;
+                        const r = tryClick(b);
+                        if (r) return r;
+                    }
+                    return 'none';
+                }""")
+                if result == "already":
+                    page.wait_for_timeout(400)
+                    return True, "Already liked (or like state unchanged)."
+                if result == "clicked":
+                    # YouTube needs a moment to apply the like (count + icon); keep page open so it visibly updates
+                    page.wait_for_timeout(int(random.uniform(3500, 5200)))
+                    return True, f"Liked video (watch?v={vid})."
+                return False, "Could not find the Like button (YouTube layout may have changed)."
+        except Exception as e:
+            err = str(e)
+            if "Target page, context or browser has been closed" in err or "browser has been closed" in err.lower():
+                return False, "YouTube browser closed or profile in use. Close all Chrome windows (or the one using the YouTube profile), then try again."
+            return False, f"YouTube error: {e}"
+        finally:
+            if context:
+                try: context.close()
+                except Exception: pass
+    except ImportError:
+        return False, "Playwright not installed."
+    finally:
+        try: _yt_lock.release()
+        except Exception: pass
+
 def _ig_is_blocked(page) -> bool:
     """Detect if Instagram is showing a challenge, block, or suspicious-login page."""
     try:
@@ -6724,6 +6873,7 @@ def _run_cmd_impl(cmd: str, p: dict, scope: str | None, user_message: str) -> st
         "share_x":        lambda: _run_x_share(),
         "share_facebook": lambda: _run_fb_share(),
         "yt_comment":     lambda: _yt_comment(p.get("video_url","").strip()),
+        "yt_like":        lambda: _yt_like_one(p.get("video_url","").strip()),
         "yt_analytics":   lambda: _yt_channel_analytics(int(p.get("days") or 30), int(p.get("limit") or 5)),
         "ig_dm":          lambda: _run_ig_dm(p.get("target","").strip(), p.get("message","").strip()),
         "fb_msg":         lambda: _run_messenger_msg(p.get("target","").strip(), p.get("message","").strip()),
@@ -7033,6 +7183,8 @@ def _parse_command(text: str) -> tuple[str, dict] | None:
     yt_url = re.search(r"(https?://(?:www\.)?(?:youtube\.com|youtu\.be)/[^\s)]+)", raw)
     if yt_url and (low.startswith("yt_comment ") or re.search(r"\b(?:comment|reply)\b", low)):
         return "yt_comment", {"video_url": yt_url.group(1).rstrip(".,!?")}
+    if yt_url and low.startswith("yt_like "):
+        return "yt_like", {"video_url": yt_url.group(1).rstrip(".,!?")}
     if re.search(r"\b(?:yt analytics|youtube analytics|channel analytics|top videos|most traction)\b", low):
         m_days = re.search(r"\b(?:last|past)\s+(\d{1,3})\s*days?\b", low)
         m_limit = re.search(r"\btop\s+(\d{1,2})\b", low)
@@ -7216,7 +7368,7 @@ def _likely_command(text: str) -> bool:
     low = (text or "").strip().lower()
     if not low: return False
     if _CONV_START.match(low): return False
-    starters = ("play ","podcast ","podcast create ","create podcast ","audiobook ","audiobook create ","audiobook continue ","audiobook cancel ","search ","research ","research_story ","research story ","story_script ","story script ","send ","create ","call ","dm ","tell ","inform ","msg ","share ","post ","remind ","suno ","yt_comment ","yt_analytics ","comment ","ig_dm ","fb_msg ","google ","news","!help","how's ","pc status","luna status","ram ","what do you see","what can you see","ask me ","summarize ","summary of ","todo ","calendar ","join me ","join my ","luna join ")
+    starters = ("play ","podcast ","podcast create ","create podcast ","audiobook ","audiobook create ","audiobook continue ","audiobook cancel ","search ","research ","research_story ","research story ","story_script ","story script ","send ","create ","call ","dm ","tell ","inform ","msg ","share ","post ","remind ","suno ","yt_comment ","yt_like ","yt_analytics ","comment ","ig_dm ","fb_msg ","google ","news","!help","how's ","pc status","luna status","ram ","what do you see","what can you see","ask me ","summarize ","summary of ","todo ","calendar ","join me ","join my ","luna join ")
     return any(low.startswith(s) for s in starters) or low in ("play","news","help","skip","stop","ask me","digest","daily digest","todo","todo list","calendar","calendar list","calendar today","calendar week","youtube analytics","yt analytics") or "luna status" in low or "pc status" in low or bool(re.search(r"\b(what do you see|what can you see|do you see me|describe what you see)\b", low)) or bool(re.search(r"\b(?:read|analyze|scan)\s+(?:my\s+)?(?:analytics|dashboard|stats)\b", low))
 
 def _is_retry(msg: str) -> bool:
@@ -8149,8 +8301,51 @@ def _restore_synced_users():
             merge_conversations(scope, legacy)
         except Exception: pass
 
+def _restore_all_discord_users():
+    """Migrate any legacy discord:*:* / discord:dm:* scopes into discord:user:<id>."""
+    profile_data = _load_json(os.path.join(_DATA, "profiles.json"), {})
+    memory_data = _load_json(os.path.join(_DATA, "memories.json"), {})
+    if not isinstance(profile_data, dict): profile_data = {}
+    if not isinstance(memory_data, dict): memory_data = {}
+
+    # Collect known IDs from config + persisted legacy keys.
+    user_ids: set[int] = set(_dm_sync_ids)
+    if _linked_int:
+        user_ids.add(_linked_int)
+    key_re = re.compile(r"^discord:(?:dm:\s*(\d+)|\d+:\s*(\d+)|user:\s*(\d+))$")
+    all_keys = set(profile_data.keys()) | set(memory_data.keys())
+    for k in all_keys:
+        m = key_re.match((k or "").strip())
+        if not m:
+            continue
+        for grp in m.groups():
+            if grp and grp.isdigit():
+                user_ids.add(int(grp))
+                break
+
+    # Merge each discovered user into a single canonical scope.
+    for uid in user_ids:
+        if _linked_int and uid == _linked_int:
+            continue
+        scope = f"discord:user:{uid}"
+        legacy = [f"discord:dm:{uid}"]
+        for k in all_keys:
+            km = (k or "").strip()
+            if re.fullmatch(rf"discord:\d+:{uid}", km):
+                legacy.append(km)
+        # Deduplicate while preserving order
+        seen = set()
+        legacy = [x for x in legacy if not (x in seen or seen.add(x))]
+        try:
+            merge_profiles(scope, legacy)
+            merge_memories(scope, legacy)
+            merge_conversations(scope, legacy)
+        except Exception:
+            pass
+
 _restore_linked_user()
 _restore_synced_users()
+_restore_all_discord_users()
 
 # ── Web app ───────────────────────────────────────────────────────────────────
 
@@ -8697,6 +8892,16 @@ def api_fb_dm():
         _record_recent_social("facebook", t_slug, f"{FACEBOOK_HOME.rstrip('/')}/{t_slug}")
     return jsonify({"ok": ok, "message": msg})
 
+@web.route("/api/youtube/like", methods=["POST"])
+def api_youtube_like():
+    """Like one video via Playwright + YOUTUBE_PROFILE_DIR (URL in JSON body)."""
+    data = request.get_json(force=True, silent=True) or {}
+    url = (data.get("url") or data.get("video_url") or "").strip()
+    if not url:
+        return jsonify({"ok": False, "message": "Missing url (YouTube video link)."}), 400
+    ok, msg = _yt_like_one(url)
+    return jsonify({"ok": ok, "message": msg})
+
 @web.route("/api/facebook-check-replies")
 def api_facebook_check_replies():
     """Check for new replies in Messenger (same process as Instagram)."""
@@ -9236,6 +9441,12 @@ def _handle_bang(msg: str, scope: str) -> str:
         ok, r = _yt_comment(url)
         if not ok: _record_failure("yt_comment", r, {"video_url": url})
         return f"✅ {r}" if ok else f"❌ {r}"
+    if cmd in ("!yt_like", "!youtube_like"):
+        if not args: return "Usage: !yt_like <url>"
+        url = (re.search(r"https?://[^\s]+", args) or type("",(), {"group": lambda s,x: args})()).group(0)
+        ok, r = _yt_like_one(url)
+        if not ok: _record_failure("yt_like", r, {"video_url": url})
+        return f"✅ {r}" if ok else f"❌ {r}"
     if cmd in ("!yt_analytics", "!youtube_analytics"):
         days, limit = 30, 5
         if args:
@@ -9465,7 +9676,7 @@ async def on_message(message: discord.Message):
 
     if text.strip().lower() in ("!help","!commands","!files"):
         await asyncio.to_thread(append_exchange, scope, text, HELP_TEXT)
-        await message.reply(f"{mention} {HELP_TEXT}")
+        await _discord_reply_split(message, HELP_TEXT, prefix=mention)
         _schedule_discord_vc_tts_reply(message, HELP_TEXT)
         return
 
@@ -9491,7 +9702,7 @@ async def on_message(message: discord.Message):
                 await message.reply(f"{mention} {HELP_TEXT}")
                 _schedule_discord_vc_tts_reply(message, HELP_TEXT)
                 return
-            if _is_privileged(message.author.id) or cmd not in ("suno","suno_ready","create_code","msg","dm","call","share_x","share_facebook","yt_comment","ig_dm","fb_msg","remind"):
+            if _is_privileged(message.author.id) or cmd not in ("suno","suno_ready","create_code","msg","dm","call","share_x","share_facebook","yt_comment","yt_like","ig_dm","fb_msg","remind"):
                 reply = await asyncio.to_thread(_run_cmd, cmd, params, scope, text)
                 if isinstance(reply, dict) and reply.get("need_feedback"):
                     await message.reply(f"{mention} {reply.get('message', '?')} — answer in the **web UI** (popup).")
@@ -9707,8 +9918,42 @@ def _whisper_translate(path: str) -> str | None:
 
 def _discord_scope(ctx): return _scope_for(ctx.author.id, ctx.guild.id if ctx.guild else None)
 
+async def _discord_reply_split(reply_target, text: str, prefix: str = "", limit: int = 1900):
+    """Reply in multiple messages when content is too long for Discord."""
+    full = (text or "").strip()
+    if not full:
+        await reply_target.reply((prefix or "").strip() or " ")
+        return
+    if len((prefix + " " + full).strip()) <= limit:
+        await reply_target.reply((f"{prefix} {full}" if prefix else full).strip())
+        return
+    lines = full.splitlines() or [full]
+    chunks: list[str] = []
+    cur = ""
+    for ln in lines:
+        cand = (cur + ("\n" if cur else "") + ln).strip()
+        if len(cand) <= limit:
+            cur = cand
+            continue
+        if cur:
+            chunks.append(cur)
+        if len(ln) <= limit:
+            cur = ln
+        else:
+            for i in range(0, len(ln), limit):
+                part = ln[i:i + limit]
+                if part:
+                    chunks.append(part)
+            cur = ""
+    if cur:
+        chunks.append(cur)
+    for i, ch in enumerate(chunks):
+        msg = (f"{prefix} {ch}" if prefix and i == 0 else ch).strip()
+        await reply_target.reply(msg[:limit])
+
 @bot.command(name="help", aliases=["files", "commands"])
-async def cmd_help(ctx): await ctx.reply(HELP_TEXT)
+async def cmd_help(ctx):
+    await _discord_reply_split(ctx, HELP_TEXT)
 
 @bot.command(name="news")
 async def cmd_news(ctx):
@@ -9770,6 +10015,15 @@ async def cmd_yt(ctx, *, video_url: str = ""):
     await ctx.reply("Posting comment...")
     ok, r = await asyncio.to_thread(_yt_comment, video_url.strip())
     if not ok: _record_failure("yt_comment", r, {"video_url": video_url})
+    await ctx.reply(f"{'✅' if ok else '❌'} {r}")
+
+@bot.command(name="yt_like", aliases=["youtube_like"])
+async def cmd_yt_like(ctx, *, video_url: str = ""):
+    if not _is_privileged(ctx.author.id): await ctx.reply("Linked user/admin only."); return
+    if not video_url: await ctx.reply("Usage: !yt_like <url>"); return
+    await ctx.reply("Liking video…")
+    ok, r = await asyncio.to_thread(_yt_like_one, video_url.strip())
+    if not ok: _record_failure("yt_like", r, {"video_url": video_url})
     await ctx.reply(f"{'✅' if ok else '❌'} {r}")
 
 @bot.command(name="yt_analytics", aliases=["youtube_analytics"])
