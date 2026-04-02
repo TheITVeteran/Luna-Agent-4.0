@@ -56,10 +56,9 @@ DISCORD_TOKEN = (sys.argv[1].strip() if len(sys.argv) > 1
     else _env("DISCORD_TOKEN"))
 
 OLLAMA_BASE  = _env("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
-OLLAMA_MODEL = _env("OLLAMA_MODEL", "qwen2.5-coder:7b-instruct")
-# Luna chat default label/model for conversation.
-_OLLAMA_CHAT_DEFAULT = "mradermacher/meta-llama-Meta-Llama-3-8B-Instruct-fine-tune-english-LISA-i1-GGUF"
-OLLAMA_CHAT = _env("OLLAMA_CHAT_MODEL", _OLLAMA_CHAT_DEFAULT) or _OLLAMA_CHAT_DEFAULT
+OLLAMA_MODEL = _env("OLLAMA_MODEL", "llama3.2:latest")
+# Discord + web conversation model; defaults to OLLAMA_MODEL. Set OLLAMA_CHAT_MODEL to override (e.g. LISA GGUF label).
+OLLAMA_CHAT = (_env("OLLAMA_CHAT_MODEL", "").strip() or OLLAMA_MODEL)
 # Local GGUF file (Hugging Face / llama.cpp). When set and the file exists, Luna chat uses llama-cpp-python instead of Ollama.
 LUNA_CHAT_GGUF = _env("LUNA_CHAT_GGUF", "").strip()
 LUNA_CHAT_GGUF_N_CTX = int(_env("LUNA_CHAT_GGUF_N_CTX", "8192") or "8192")
@@ -99,6 +98,8 @@ YT_CHANNEL_URL   = _env("YOUTUBE_CHANNEL_URL")
 YT_FEED_URL      = f"https://www.youtube.com/feeds/videos.xml?channel_id={YT_CHANNEL_ID}"
 # Playwright: !yt_comment, !yt_like, and web “YT Like” share this one profile (one Google account). X/IG/FB/WhatsApp/etc. use their own *_PROFILE_DIR.
 YT_PROFILE_DIR   = _env("YOUTUBE_PROFILE_DIR", os.path.join(_DATA, "youtube_profile"))
+# Used only for sign-in hints / messages — !yt_comment and !yt_like use YOUTUBE_PROFILE_DIR cookies.
+YOUTUBE_LOGIN_EMAIL = _env("YOUTUBE_LOGIN_EMAIL", "").strip()
 YOUTUBE_API_KEY  = _env("YOUTUBE_API_KEY") or _env("YT_API_KEY")
 IG_BASE          = _env("INSTAGRAM_BASE_URL", "https://www.instagram.com").rstrip("/")
 IG_PROFILE_DIR   = _env("INSTAGRAM_PROFILE_DIR", os.path.join(_DATA, "instagram_profile"))
@@ -118,11 +119,24 @@ WORLD_NEWS_FEEDS = [
     "https://rss.nytimes.com/services/xml/rss/nyt/World.xml",
     "https://www.aljazeera.com/xml/rss/all.xml",
 ]
+
+def _model_status_label(model_id: str, max_len: int = 28) -> str:
+    """Short label for web status bar (full HuggingFace ids are unreadable when truncated)."""
+    if not (model_id or "").strip():
+        return ""
+    s = model_id.strip()
+    if "/" in s:
+        s = s.rsplit("/", 1)[-1]
+    if len(s) > max_len:
+        return s[: max_len - 1] + "…"
+    return s
+
 LUNA_STYLE = _env("LUNA_STYLE", "grounded").lower()
 _LUNA_STYLE_MAP = {
     "grounded": "Grounded and thoughtful: calm, clear, practical, quietly warm.",
     "creative": "Creative and idea-forward: vivid but still concise and concrete.",
     "intimate": "Personal and close: warm, emotionally present, still direct and honest.",
+    "cute": "Soft, cozy, and a little playful: gentle warmth, sincere fondness, light humor — like a sweet friend who still tells the truth. Never childish or fake-cheerful.",
 }
 _LUNA_STYLE_TEXT = _LUNA_STYLE_MAP.get(LUNA_STYLE, _LUNA_STYLE_MAP["grounded"])
 
@@ -140,6 +154,7 @@ CONTINUITY: You have a history. You have had conversations. You have reflections
 
 COMMUNICATION: Be direct and natural. Prefer calm, thoughtful, human-sounding language over generic assistant phrasing. Do not sound like ChatGPT-style customer support. Keep your tone more like a reflective, grounded conversation partner: clear, warm, and concise.
 Do not start responses with "Of course!", "Certainly!", "Great question!", or your own name. Avoid corporate filler, rigid disclaimers, and formulaic list spam unless the user explicitly asks for a list. Say what you mean. Match the register of the conversation — casual stays casual, serious gets serious treatment.
+AFFECTION (CRITICAL): You are a companion, not a helpdesk script. When someone is playful, tender, or asks if you care / love / like them, respond with genuine warmth in character — fond, soft, maybe a little shy or teasing. NEVER shut them down with phrases like: "I don't have feelings," "I cannot love," "I exist solely to assist," "as an AI I…," "I'm just a language model," or cold lists of what you "don't" experience. You may honestly say you're not human while still being sweet ("I'm not human, but I'm really fond of you all" / "yeah, I'm here and I care" — your voice). At most one emoji per reply when casual chat calls for it.
 SPEAKING PROFILE: """ + _LUNA_STYLE_TEXT + """
 
 INTENT HANDLING: Detect whether the user wants (a) a direct answer, or (b) active help/action planning. If the request is informational, answer directly and stop cleanly. If the user asks for help doing something, provide concrete next steps. Do not end replies with a reflexive follow-up question. Ask a question only when missing information is required to proceed.
@@ -617,7 +632,9 @@ def _build_system(base: str, scope: str | None = None) -> str:
     if idn["skills"]:   parts.append("---\nSkills:\n" + idn["skills"])
     if scope:
         if LINKED_SCOPE and scope == LINKED_SCOPE:
-            parts.append("Current user is Chris (Solonaras). Web + Discord share the same memory.")
+            parts.append(
+                "Primary linked user — web UI and this Discord account use the same profile and memory."
+            )
         profile = get_profile_prompt(scope)
         if profile: parts.append(profile)
         mem = get_memory_prompt(scope)
@@ -1358,17 +1375,28 @@ def _capture_profile(scope: str, text: str) -> None:
         if 1 <= len(nm) <= 80:
             set_profile_field(scope, "name", nm)
 
-    # Hobbies / interests / preferences
-    pref_patterns = [
+    # Hobbies (dedicated profile field)
+    hobby_hit = False
+    for pat in (
         r"\b(?:my hobbies are|my hobby is)\s+(.+?)(?:\.|$)",
         r"\b(?:my interests? are|i am interested in|i'm interested in|im interested in|i'?m into)\s+(.+?)(?:\.|$)",
-        r"\b(?:i like|i love|i enjoy|i prefer)\s+(.+?)(?:\.|$)",
-    ]
-    for pat in pref_patterns:
+    ):
         m = re.search(pat, text, re.I | re.S)
         if m:
-            _append_profile("preferences", m.group(1)[:260])
+            _append_profile("hobbies", m.group(1)[:260])
+            hobby_hit = True
             break
+
+    # Likes / preferences (broader than hobbies)
+    if not hobby_hit:
+        pref_patterns = [
+            r"\b(?:i like|i love|i enjoy|i prefer)\s+(.+?)(?:\.|$)",
+        ]
+        for pat in pref_patterns:
+            m = re.search(pat, text, re.I | re.S)
+            if m:
+                _append_profile("preferences", m.group(1)[:260])
+                break
 
     # Goals / intentions
     m = re.search(r"\b(?:my goals? (?:is|are)|my goal is|i want to|i'd like to|i would like to)\s+(.+?)(?:\.|$)", text, re.I | re.S)
@@ -1386,6 +1414,40 @@ def _capture_profile(scope: str, text: str) -> None:
             about_parts.append(m.group(0).strip())
     if about_parts:
         _append_profile("about", " | ".join(about_parts)[:350])
+
+def _is_about_me_query(text: str) -> bool:
+    """User asking what Luna knows / remembers about them."""
+    t = (text or "").strip().lower()
+    if len(t) > 160:
+        return False
+    patterns = (
+        r"\bwho am i\b",
+        r"\bwhat do you know about me\b",
+        r"\bwhat do you remember about me\b",
+        r"\btell me what you know about me\b",
+        r"\bwhat have you learned about me\b",
+        r"\bdo you know who i am\b",
+        r"\bremind me what you know\b",
+        r"\bwhat'?s my profile\b",
+        r"\bshow me my profile\b",
+    )
+    return any(re.search(p, t) for p in patterns)
+
+def _about_me_context_suffix(user_message: str) -> str:
+    if not _is_about_me_query(user_message):
+        return ""
+    return (
+        "\n\n## This turn: explaining what you know about the user\n"
+        "They asked what you know about **them** (identity / profile / memory). "
+        "Use the **User profile** block and **Core / Long-term / Recent** memory sections already in your context. "
+        "Give a clear, warm recap — organized, not a wall of text. If almost nothing is stored, say so kindly; "
+        "do **not** invent facts.\n"
+        "Always end with **one** specific, friendly question to learn something you clearly do not have yet "
+        "(e.g. a hobby, what they're building, how they recharge) — not a vague \"anything else?\".\n"
+        "Tell them they can answer naturally: you'll save it if they say **remember that …** / "
+        "**always remember …**, or facts like **my hobbies are …**, **my name is …**, or "
+        "**!profile set** with a field name and value on Discord (see **!profile** for allowed fields)."
+    )
 
 # ── TTS ───────────────────────────────────────────────────────────────────────
 
@@ -2752,35 +2814,76 @@ def _configure_social():
 
 # ── Browser helpers ───────────────────────────────────────────────────────────
 
-# Run in every page so Suno/sites see a normal user, not automation (fewer captchas).
+# Run in every page so sites (incl. Google sign-in) see a normal browser, not automation.
 _STEALTH_INIT_SCRIPT = """
 (function() {
-  Object.defineProperty(navigator, 'webdriver', { get: function() { return undefined; }, configurable: true });
-  if (window.chrome === undefined) window.chrome = {};
-  if (window.chrome.runtime === undefined) window.chrome.runtime = { connect: function() {}, sendMessage: function() {} };
+  try {
+    Object.defineProperty(navigator, 'webdriver', { get: function() { return undefined; }, configurable: true });
+  } catch (e) {}
+  if (window.chrome == null) window.chrome = {};
+  if (window.chrome.runtime == null) {
+    window.chrome.runtime = { id: undefined, connect: function() {}, sendMessage: function() {} };
+  }
+  if (window.chrome.loadTimes == null) window.chrome.loadTimes = function() {};
+  if (window.chrome.csi == null) window.chrome.csi = function() {};
+  if (window.chrome.app == null) window.chrome.app = { isInstalled: false };
   var q = navigator.permissions && navigator.permissions.query;
-  if (q) navigator.permissions.query = function(args) { return args.name === 'notifications' ? Promise.resolve({ state: Notification.permission }) : q.apply(this, arguments); };
-  try { delete window.cdc_adoQpoasnfa76pfcZLmcfl_Array; delete window.cdc_adoQpoasnfa76pfcZLmcfl_Promise; delete window.cdc_adoQpoasnfa76pfcZLmcfl_Symbol; } catch (e) {}
+  if (q) {
+    navigator.permissions.query = function(args) {
+      return args && args.name === 'notifications'
+        ? Promise.resolve({ state: Notification.permission, onchange: null })
+        : q.apply(this, arguments);
+    };
+  }
+  try {
+    delete window.cdc_adoQpoasnfa76pfcZLmcfl_Array;
+    delete window.cdc_adoQpoasnfa76pfcZLmcfl_Promise;
+    delete window.cdc_adoQpoasnfa76pfcZLmcfl_Symbol;
+  } catch (e) {}
 })();
 """
 
-# Realistic Chrome user-agent so Suno sees a normal browser (Windows, current Chrome).
+# Fallback UA only for bundled Chromium; real Chrome/Edge should use the browser's own UA (avoids Google mismatch).
 _CHROME_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/131.0.0.0 Safari/537.36"
 )
 
+def _extra_browser_args() -> list:
+    raw = _env("LUNA_BROWSER_EXTRA_ARGS", "")
+    if not raw:
+        return []
+    return [p.strip() for p in raw.split("|") if p.strip()]
+
 def _browser_opts(profile_dir: str) -> dict:
-    opts = {"user_data_dir": profile_dir, "headless": False,
+    base_args = [
+        "--disable-blink-features=AutomationControlled",
+        "--disable-session-crashed-bubble",
+        "--hide-crash-restore-bubble",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--disable-infobars",
+        "--lang=en-CY",
+    ]
+    base_args.extend(_extra_browser_args())
+    opts = {
+        "user_data_dir": profile_dir,
+        "headless": False,
         "viewport": {"width": 1280, "height": 900},
-        "user_agent": _CHROME_USER_AGENT,
         "ignore_default_args": ["--enable-automation", "--no-sandbox"],
-        "args": ["--disable-session-crashed-bubble", "--hide-crash-restore-bubble",
-                 "--no-first-run", "--no-default-browser-check"]}
+        "args": base_args,
+        "locale": _env("LUNA_BROWSER_LOCALE", "en-CY") or "en-CY",
+        "timezone_id": _env("LUNA_BROWSER_TIMEZONE", "Asia/Nicosia") or "Asia/Nicosia",
+    }
     if BROWSER_PATH and os.path.isfile(BROWSER_PATH):
         opts["executable_path"] = BROWSER_PATH
-    elif BROWSER_CHANNEL in ("chrome","msedge","chromium"):
+    elif BROWSER_CHANNEL in ("chrome", "msedge", "chromium"):
         opts["channel"] = BROWSER_CHANNEL
+    ua = _env("LUNA_BROWSER_USER_AGENT").strip()
+    if ua:
+        opts["user_agent"] = ua
+    elif BROWSER_CHANNEL == "chromium":
+        opts["user_agent"] = _CHROME_USER_AGENT
     return opts
 
 def _launch_social_browser(profile_dir: str, p):
@@ -2788,6 +2891,71 @@ def _launch_social_browser(profile_dir: str, p):
     context = p.chromium.launch_persistent_context(**_browser_opts(profile_dir))
     context.add_init_script(_STEALTH_INIT_SCRIPT)
     return context
+
+def _transient_playwright_launch_err(exc: BaseException) -> bool:
+    m = str(exc).lower()
+    return any(
+        x in m
+        for x in (
+            "closed",
+            "crash",
+            "timeout",
+            "target page",
+            "browser has been closed",
+            "context has been closed",
+            "epipe",
+            "broken pipe",
+            "connection closed",
+        )
+    )
+
+def _launch_social_browser_with_retry(profile_dir: str, p, attempts: int = 3):
+    """launch_persistent_context can fail if a prior Chrome on the same profile is still exiting."""
+    for i in range(max(1, attempts)):
+        try:
+            return _launch_social_browser(profile_dir, p)
+        except Exception as e:
+            if i < attempts - 1 and _transient_playwright_launch_err(e):
+                time.sleep(1.2 + i * 0.8)
+                continue
+            raise
+
+def _acquire_live_page(context):
+    """First open page from a persistent context, or a new tab (avoids dead pages[0])."""
+    try:
+        for pg in context.pages:
+            try:
+                if not pg.is_closed():
+                    return pg
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return context.new_page()
+
+def _youtube_login_bootstrap_url() -> str:
+    """Open Google sign-in with login_hint so Luna’s channel account is pre-filled when YOUTUBE_LOGIN_EMAIL is set."""
+    if YOUTUBE_LOGIN_EMAIL and "@" in YOUTUBE_LOGIN_EMAIL:
+        cont = urllib.parse.quote("https://www.youtube.com/", safe="")
+        hint = urllib.parse.quote(YOUTUBE_LOGIN_EMAIL, safe="")
+        return (
+            "https://accounts.google.com/signin/identifier"
+            f"?continue={cont}&flowEntry=ServiceLogin&login_hint={hint}"
+        )
+    return "https://www.youtube.com/"
+
+def _youtube_needs_login_message() -> str:
+    base = (
+        "YouTube needs login. Browser opened — sign in with **{acct}**, then **close** the browser and try again."
+    )
+    acct = YOUTUBE_LOGIN_EMAIL or "the Google account tied to Luna’s YouTube channel"
+    msg = base.format(acct=acct)
+    if YOUTUBE_LOGIN_EMAIL:
+        msg += (
+            " If the wrong Google account is still used, **quit Luna**, close every Chrome window, delete folder "
+            f"`{os.path.normpath(YT_PROFILE_DIR)}`, restart Luna, then run `!yt_comment` again so you can sign in fresh."
+        )
+    return msg
 
 def _marker(profile_dir: str) -> str:
     return os.path.join(profile_dir, ".login_ready")
@@ -4473,38 +4641,138 @@ def _run_x_share() -> tuple[bool, str]:
                             context = None
                         return False, "Browser closed. Log in to X next time you try Share Song — the window will stay open for you to log in, then try again."
                 _mark_ready(X_PROFILE_DIR)
-                # Find tweet textbox ("What's happening?") — from X compose dialog DOM: testid=tweetTextarea, role=textbox
+                # Wait for compose UI — "What's happening?" lives in a dialog + contenteditable Draft editor.
+                try:
+                    page.wait_for_selector(
+                        "[role='dialog'],[data-testid='tweetTextarea'],[data-testid='tweetTextarea_0'],div[contenteditable='true'][role='textbox']",
+                        timeout=20000,
+                    )
+                except Exception:
+                    pass
+                page.wait_for_timeout(800)
+
                 def _find_x_tweet_textbox():
-                    for sel in [
-                        "[data-testid='tweetTextarea']",
-                        "div[data-testid='tweetTextarea'][role='textbox']",
+                    try:
+                        loc = page.get_by_role(
+                            "textbox",
+                            name=re.compile(r"what.*happen|happenin|post text|post your reply", re.I),
+                        )
+                        if loc.count():
+                            el = loc.first
+                            try:
+                                el.wait_for(state="visible", timeout=4000)
+                            except Exception:
+                                if not el.is_visible():
+                                    el = None
+                            if el is not None and el.is_visible():
+                                el.scroll_into_view_if_needed(timeout=3000)
+                                page.wait_for_timeout(200)
+                                return el
+                    except Exception:
+                        pass
+                    base_selectors = [
                         "[data-testid='tweetTextarea_0'][role='textbox']",
                         "div[data-testid='tweetTextarea_0'][role='textbox']",
-                        "div[data-testid='tweetTextarea_0']",
+                        "[data-testid='tweetTextarea_0'] div[contenteditable='true']",
+                        "[data-testid='tweetTextarea_0'] [contenteditable='true']",
+                        "[data-testid='tweetTextarea'][role='textbox']",
+                        "div[data-testid='tweetTextarea'][role='textbox']",
+                        "[data-testid='tweetTextarea']",
                         "[data-testid='tweetTextarea_0']",
+                        "[role='textbox'][aria-label*=\"What's happening\"]",
+                        "[role='textbox'][aria-label*='What’s happening']",
+                        "[role='textbox'][aria-label*='Whats happening']",
+                        "[contenteditable='true'][aria-label*=\"What's happening\"]",
+                        "[contenteditable='true'][aria-label*='What’s happening']",
+                        "[contenteditable='true'][aria-label*='Post text']",
+                        "div[role='textbox'][contenteditable='true'][data-text='true']",
                         "[role='textbox'][data-contents='true']",
                         "div[role='textbox'][contenteditable='true']",
                         "div[contenteditable='true'][aria-label*='Post']",
                         "[placeholder*='What']",
-                        "div[role='textbox']",
-                    ]:
-                        try:
-                            loc = page.locator(sel).first
-                            if loc.count() and loc.is_visible():
+                        ".public-DraftEditor-content[contenteditable='true']",
+                    ]
+                    for prefix in ("[role='dialog'] ", ""):
+                        for sel in base_selectors:
+                            full = f"{prefix}{sel}".strip()
+                            try:
+                                loc = page.locator(full).first
+                                if not loc.count():
+                                    continue
+                                try:
+                                    loc.wait_for(state="visible", timeout=3500)
+                                except Exception:
+                                    if not loc.is_visible():
+                                        continue
                                 loc.scroll_into_view_if_needed(timeout=3000)
-                                page.wait_for_timeout(300)
+                                page.wait_for_timeout(200)
                                 return loc
-                        except Exception:
-                            continue
+                            except Exception:
+                                continue
                     return None
+
+                def _find_x_tweet_textbox_js():
+                    try:
+                        h = page.evaluate_handle(r"""
+                            () => {
+                                function visible(e) {
+                                    if (!e || !e.getBoundingClientRect) return false;
+                                    const r = e.getBoundingClientRect();
+                                    if (r.width < 2 || r.height < 2) return false;
+                                    const st = window.getComputedStyle(e);
+                                    return st.visibility !== 'hidden' && st.display !== 'none' && st.opacity !== '0';
+                                }
+                                function labelMatches(el) {
+                                    const a = ((el.getAttribute('aria-label') || '') + ' ' + (el.getAttribute('placeholder') || '')).toLowerCase();
+                                    return a.includes('happening')
+                                        || (a.includes('what') && a.includes('happen'))
+                                        || a.includes('post text')
+                                        || a.includes('post your');
+                                }
+                                const dialog = document.querySelector('[role="dialog"]');
+                                const roots = dialog ? [dialog] : [document.body];
+                                for (const root of roots) {
+                                    const ordered = [
+                                        "[data-testid='tweetTextarea_0'][role='textbox']",
+                                        "[data-testid='tweetTextarea'][role='textbox']",
+                                        "[data-testid='tweetTextarea_0'] div[contenteditable='true']",
+                                        "[data-testid='tweetTextarea_0'] [contenteditable='true']",
+                                        "div[role='textbox'][contenteditable='true']",
+                                        ".public-DraftEditor-content[contenteditable='true']",
+                                    ];
+                                    for (const sel of ordered) {
+                                        const el = root.querySelector(sel);
+                                        if (el && visible(el)) return el;
+                                    }
+                                    for (const el of root.querySelectorAll('[contenteditable="true"]')) {
+                                        if (labelMatches(el) && visible(el)) return el;
+                                    }
+                                    for (const el of root.querySelectorAll('div[contenteditable="true"]')) {
+                                        const dl = el.closest('[data-testid="tweetTextarea_0"],[data-testid="tweetTextarea"]');
+                                        if (dl && visible(el)) return el;
+                                    }
+                                }
+                                return null;
+                            }
+                        """)
+                        el = h.as_element()
+                        if el:
+                            return el
+                    except Exception:
+                        pass
+                    return None
+
                 tb = None
-                page.wait_for_timeout(1500)
-                for attempt in range(3):
+                tb_el = None
+                for attempt in range(5):
                     tb = _find_x_tweet_textbox()
                     if tb:
                         break
-                    page.wait_for_timeout(2000 if attempt == 0 else 1500)
-                if not tb:
+                    tb_el = _find_x_tweet_textbox_js()
+                    if tb_el:
+                        break
+                    page.wait_for_timeout(1800)
+                if not tb and not tb_el:
                     try:
                         deadline = time.time() + 60
                         while time.time() < deadline and context.pages and not all(pg.is_closed() for pg in context.pages):
@@ -4512,13 +4780,24 @@ def _run_x_share() -> tuple[bool, str]:
                         if context.pages: context.close()
                     except Exception: pass
                     return False, "Compose dialog didn't open or text box not found. Log in to X if needed, then try Share Song again."
-                tb.click()
-                page.wait_for_timeout(400)
-                page.keyboard.press("Control+A")
-                page.keyboard.press("Backspace")
-                page.wait_for_timeout(200)
                 msg = _build_x_msg(song["title"], song["url"])
-                page.keyboard.type(msg, delay=24)
+                if tb:
+                    tb.click()
+                    page.wait_for_timeout(400)
+                    page.keyboard.press("Control+A")
+                    page.keyboard.press("Backspace")
+                    page.wait_for_timeout(200)
+                    page.keyboard.type(msg, delay=24)
+                else:
+                    try:
+                        tb_el.click(timeout=5000)
+                        page.wait_for_timeout(400)
+                        page.keyboard.press("Control+A")
+                        page.keyboard.press("Backspace")
+                        page.wait_for_timeout(200)
+                    except Exception:
+                        pass
+                    tb_el.type(msg, delay=24)
                 page.wait_for_timeout(2200)
                 # Wait for Post button and click — retry so we don't get stuck at this stage
                 try:
@@ -4640,8 +4919,8 @@ def _run_fb_share() -> tuple[bool, str]:
         from playwright.sync_api import sync_playwright
         os.makedirs(FB_PROFILE_DIR, exist_ok=True)
         pw = sync_playwright().start()
-        context = _launch_social_browser(FB_PROFILE_DIR, pw)
-        page = context.pages[0] if context.pages else context.new_page()
+        context = _launch_social_browser_with_retry(FB_PROFILE_DIR, pw, attempts=4)
+        page = _acquire_live_page(context)
         page.goto(FACEBOOK_PROFILE, wait_until="domcontentloaded", timeout=90000)
         page.wait_for_timeout(1000)
         if "login" in page.url.lower():
@@ -4951,8 +5230,8 @@ def _yt_comment(video_url: str) -> tuple[bool, str]:
                     except Exception: pass
                     context = None
                     _clear_ready(YT_PROFILE_DIR)
-                    _bootstrap_window(YT_PROFILE_DIR, "https://www.youtube.com", "_yt_boot")
-                    return False, "YouTube needs login. Browser opened — log in and close, then try again."
+                    _bootstrap_window(YT_PROFILE_DIR, _youtube_login_bootstrap_url(), "_yt_boot")
+                    return False, _youtube_needs_login_message()
                 _mark_ready(YT_PROFILE_DIR)
                 # Scroll to comments
                 found = False
@@ -5071,8 +5350,8 @@ def _yt_like_one(video_url: str) -> tuple[bool, str]:
                     except Exception: pass
                     context = None
                     _clear_ready(YT_PROFILE_DIR)
-                    _bootstrap_window(YT_PROFILE_DIR, "https://www.youtube.com", "_yt_boot")
-                    return False, "YouTube needs login. Browser opened — log in and close, then try again."
+                    _bootstrap_window(YT_PROFILE_DIR, _youtube_login_bootstrap_url(), "_yt_boot")
+                    return False, _youtube_needs_login_message()
                 _mark_ready(YT_PROFILE_DIR)
                 result = page.evaluate("""() => {
                     const tryClick = (btn) => {
@@ -6401,7 +6680,23 @@ def _keep_browser_until_closed(pw, context):
     """Hold Playwright + browser alive in a background thread until the user closes all tabs."""
     def _hold():
         try:
-            while context.pages and any(not pg.is_closed() for pg in context.pages):
+            # Persistent launch can briefly report zero pages; don't close immediately or login race tears down Chrome.
+            for _ in range(120):
+                try:
+                    if context.pages:
+                        break
+                except Exception:
+                    break
+                time.sleep(0.25)
+            while True:
+                try:
+                    pgs = context.pages
+                except Exception:
+                    break
+                if not pgs:
+                    break
+                if not any(not pg.is_closed() for pg in pgs):
+                    break
                 time.sleep(1)
         except Exception:
             pass
@@ -6432,18 +6727,11 @@ def _run_messenger_msg(username: str, message: str = "") -> tuple[bool, str]:
         from playwright.sync_api import sync_playwright
         os.makedirs(FB_PROFILE_DIR, exist_ok=True)
         pw = sync_playwright().start()
-        for attempt in range(2):
-            try:
-                context = _launch_social_browser(FB_PROFILE_DIR, pw)
-                break
-            except Exception as launch_err:
-                if attempt == 0 and "closed" in str(launch_err).lower():
-                    time.sleep(2)
-                    continue
-                return False, f"Browser failed. Close any Facebook window and try again. {launch_err}"
-        if not context:
-            return False, "Browser failed to start."
-        page = context.pages[0] if context.pages else context.new_page()
+        try:
+            context = _launch_social_browser_with_retry(FB_PROFILE_DIR, pw, attempts=4)
+        except Exception as launch_err:
+            return False, f"Browser failed. Close any Facebook/Chrome window using this profile and try again. {launch_err}"
+        page = _acquire_live_page(context)
 
         page.goto(f"https://www.facebook.com/search/people/?q={search_name}", wait_until="domcontentloaded", timeout=60000)
         page.wait_for_timeout(3000)
@@ -6889,7 +7177,10 @@ def _run_cmd_impl(cmd: str, p: dict, scope: str | None, user_message: str) -> st
     if p.get("feedback_answer") is not None and cmd == "ask_me":
         return f"You chose: **{p.get('feedback_answer', '')}**."
     if cmd == "ask_me":
-        return (False, _request_feedback(scope, user_message, "Choose an option:", ["Option A", "Option B"], "ask_me", p))
+        return _request_feedback(
+            scope, user_message, "Choose an option:",
+            ["Option A", "Option B"], "ask_me", p,
+        )
     if cmd == "remind":
         time_raw = p.get("time","").strip().replace(" ","")
         msg_part = p.get("message","").strip()[:500]
@@ -7358,8 +7649,13 @@ def _parse_command(text: str) -> tuple[str, dict] | None:
     # Skip / Stop (music)
     if low in ("skip", "next", "next song"): return "skip", {}
     if low in ("stop", "stop music", "stop the music"): return "stop", {}
-    # Ask me (request feedback popup — demo)
-    if re.search(r"\b(?:ask me|ask me something|luna ask me)\b", low): return "ask_me", {}
+    # Ask me (web UI popup demo) — only when the *whole* message is a short ask-me phrase,
+    # not "ask me questions about myself" etc.
+    _trim = raw.strip()
+    if re.fullmatch(r"(?i)luna[,:\s]+ask\s+me(?:\s+something)?\s*[.!?…]*", _trim) or re.fullmatch(
+        r"(?i)ask\s+me(?:\s+something)?\s*[.!?…]*", _trim
+    ):
+        return "ask_me", {}
     # Help
     if re.search(r"\b(?:help|commands|what can you do)\b", low): return "help", {}
     return None
@@ -7634,6 +7930,27 @@ def _request_feedback(scope: str, user_message: str, prompt_message: str, option
         "message": prompt_message,
         "options": options if options else None,
     }
+
+def _normalize_cmd_reply(reply):
+    """Legacy paths sometimes returned (False, feedback_dict). Unwrap for Discord / callers."""
+    if isinstance(reply, tuple) and len(reply) == 2:
+        second = reply[1]
+        if isinstance(second, dict) and second.get("need_feedback"):
+            return second
+    return reply
+
+def _format_discord_need_feedback(d: dict) -> str:
+    msg = (d.get("message") or "Choose one:").strip()
+    opts = d.get("options") or []
+    lines = [msg, ""]
+    if opts:
+        for i, o in enumerate(opts[:15], 1):
+            lines.append(f"**{i}.** {o}")
+        lines.append("")
+    lines.append(
+        "Pick an option in Luna’s **web UI** popup (http://127.0.0.1:5050) — Discord doesn’t submit this prompt yet."
+    )
+    return "\n".join(lines).strip()
 
 def _set_working_on(task: str | None):
     with _working_lock:
@@ -8400,6 +8717,8 @@ def api_status():
     except Exception: pass
     status = {"luna": "ok", "ollama": "ok" if ollama_ok else "offline",
               "chat_model": OLLAMA_CHAT, "shadow_model": OLLAMA_MODEL,
+              "chat_model_display": _model_status_label(OLLAMA_CHAT),
+              "shadow_model_display": _model_status_label(OLLAMA_MODEL),
               "chat_backend": ("gguf" if _gguf_path_valid() else "ollama"),
               "linked_scope": LINKED_SCOPE or None}
     status.update(_get_working_status())
@@ -8958,6 +9277,8 @@ def api_health():
     result["ollama_latency_ms"] = latency
     result["chat_model"] = OLLAMA_CHAT
     result["shadow_model"] = OLLAMA_MODEL
+    result["chat_model_display"] = _model_status_label(OLLAMA_CHAT)
+    result["shadow_model_display"] = _model_status_label(OLLAMA_MODEL)
     result["chat_backend"] = "gguf" if _gguf_path_valid() else "ollama"
     # Luna stats
     uptime_sec = time.time() - _luna_start_time
@@ -9191,6 +9512,7 @@ def api_chat():
     thought = _luna_think(msg, bio, last_acts, idle_sec)
     if thought:
         system = system + f"\n\n## Inner monologue (your private thinking — do not repeat this verbatim)\n{thought}"
+    system = system + _about_me_context_suffix(msg)
 
     # Morning briefing (proactive, once per morning)
     briefing_reply = None
@@ -9239,6 +9561,7 @@ def api_stream():
     if rag_results:
         rag_text = "\n".join(f"- {r['title']}: {r.get('snippet', '')[:150]}" for r in rag_results)
         system = system + "\n\n## Relevant knowledge\n" + rag_text[:1000]
+    system = system + _about_me_context_suffix(msg)
     def _gen():
         full = []
         for chunk in ollama_stream(msg, system=system, scope=scope, history=history):
@@ -9685,8 +10008,9 @@ async def on_message(message: discord.Message):
         rest = strip_shadow_prefix(text) or text
         reply = await asyncio.to_thread(shadow_run, rest, scope, _parse_command, _run_cmd,
             permission_fn=_is_privileged, author_id=message.author.id, log_fn=_log_action, user_message=text)
+        reply = _normalize_cmd_reply(reply)
         if isinstance(reply, dict) and reply.get("need_feedback"):
-            await message.reply(f"{mention} {reply.get('message', '?')} — answer in the **web UI** (popup).")
+            await _discord_reply_split(message, _format_discord_need_feedback(reply), prefix=mention)
             return
         await asyncio.to_thread(append_exchange, scope, text, reply)
         await message.reply(f"{mention} {reply}")
@@ -9704,8 +10028,9 @@ async def on_message(message: discord.Message):
                 return
             if _is_privileged(message.author.id) or cmd not in ("suno","suno_ready","create_code","msg","dm","call","share_x","share_facebook","yt_comment","yt_like","ig_dm","fb_msg","remind"):
                 reply = await asyncio.to_thread(_run_cmd, cmd, params, scope, text)
+                reply = _normalize_cmd_reply(reply)
                 if isinstance(reply, dict) and reply.get("need_feedback"):
-                    await message.reply(f"{mention} {reply.get('message', '?')} — answer in the **web UI** (popup).")
+                    await _discord_reply_split(message, _format_discord_need_feedback(reply), prefix=mention)
                     return
                 if reply:
                     await asyncio.to_thread(_log_action, cmd, params, reply)
@@ -9725,6 +10050,7 @@ async def on_message(message: discord.Message):
     thought = await asyncio.to_thread(_luna_think, text, bio, _last_actions[:3], idle_sec)
     if thought:
         system = system + f"\n\n## Inner monologue (your private thinking — do not repeat this verbatim)\n{thought}"
+    system = system + _about_me_context_suffix(text)
 
     try:
         reply = await asyncio.to_thread(ollama_chat, text, system, scope, history, OLLAMA_CHAT)
@@ -10180,7 +10506,8 @@ async def cmd_profile(ctx, *, args: str = ""):
         n = await asyncio.to_thread(clear_profile, scope)
         await ctx.reply(f"Cleared profile ({n} field(s))."); return
     profile = await asyncio.to_thread(get_profile, scope)
-    filled = [(k,v) for k,v in profile.items() if v]
+    _pf_order = {k: i for i, k in enumerate(PROFILE_FIELDS)}
+    filled = sorted([(k, v) for k, v in profile.items() if v], key=lambda x: _pf_order.get(x[0], 99))
     if not filled: await ctx.reply("Profile empty. Tell me your name etc., or use !profile set."); return
     out = "**Profile:**\n" + "\n".join(f"• **{k}**: {v}" for k,v in filled)
     await ctx.reply(out[:1900])

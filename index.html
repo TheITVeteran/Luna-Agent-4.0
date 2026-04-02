@@ -2166,8 +2166,8 @@ async function checkStatus() {
     el.textContent = d.ollama === 'ok' ? 'ONLINE' : 'OFFLINE';
     el.className = 'stat-value ' + (d.ollama === 'ok' ? 'ok' : 'err');
     const modelEl = document.getElementById('stat-model');
-    const m = (d.chat_model || '').split(':')[0].toUpperCase().slice(0, 10);
-    modelEl.textContent = m || '—';
+    const m = (d.chat_model_display || d.chat_model || '').trim();
+    modelEl.textContent = m ? m.toUpperCase() : '—';
     updateWorkingStatus(d);
   } catch {
     document.getElementById('stat-ollama').textContent = 'OFFLINE';

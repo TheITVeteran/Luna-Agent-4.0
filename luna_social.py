@@ -86,12 +86,29 @@ _solutions_lock = threading.Lock()
 
 _STEALTH_INIT_SCRIPT = """
 (function() {
-  Object.defineProperty(navigator, 'webdriver', { get: function() { return undefined; }, configurable: true });
-  if (window.chrome === undefined) window.chrome = {};
-  if (window.chrome.runtime === undefined) window.chrome.runtime = { connect: function() {}, sendMessage: function() {} };
+  try {
+    Object.defineProperty(navigator, 'webdriver', { get: function() { return undefined; }, configurable: true });
+  } catch (e) {}
+  if (window.chrome == null) window.chrome = {};
+  if (window.chrome.runtime == null) {
+    window.chrome.runtime = { id: undefined, connect: function() {}, sendMessage: function() {} };
+  }
+  if (window.chrome.loadTimes == null) window.chrome.loadTimes = function() {};
+  if (window.chrome.csi == null) window.chrome.csi = function() {};
+  if (window.chrome.app == null) window.chrome.app = { isInstalled: false };
   var q = navigator.permissions && navigator.permissions.query;
-  if (q) navigator.permissions.query = function(args) { return args.name === 'notifications' ? Promise.resolve({ state: Notification.permission }) : q.apply(this, arguments); };
-  try { delete window.cdc_adoQpoasnfa76pfcZLmcfl_Array; delete window.cdc_adoQpoasnfa76pfcZLmcfl_Promise; delete window.cdc_adoQpoasnfa76pfcZLmcfl_Symbol; } catch (e) {}
+  if (q) {
+    navigator.permissions.query = function(args) {
+      return args && args.name === 'notifications'
+        ? Promise.resolve({ state: Notification.permission, onchange: null })
+        : q.apply(this, arguments);
+    };
+  }
+  try {
+    delete window.cdc_adoQpoasnfa76pfcZLmcfl_Array;
+    delete window.cdc_adoQpoasnfa76pfcZLmcfl_Promise;
+    delete window.cdc_adoQpoasnfa76pfcZLmcfl_Symbol;
+  } catch (e) {}
 })();
 """
 
@@ -100,17 +117,41 @@ _CHROME_USER_AGENT = (
     "Chrome/131.0.0.0 Safari/537.36"
 )
 
+def _extra_browser_args() -> list:
+    raw = _env("LUNA_BROWSER_EXTRA_ARGS", "")
+    if not raw:
+        return []
+    return [p.strip() for p in raw.split("|") if p.strip()]
+
 def _browser_opts(profile_dir: str) -> dict:
-    opts = {"user_data_dir": profile_dir, "headless": False,
+    base_args = [
+        "--disable-blink-features=AutomationControlled",
+        "--disable-session-crashed-bubble",
+        "--hide-crash-restore-bubble",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--disable-infobars",
+        "--lang=en-CY",
+    ]
+    base_args.extend(_extra_browser_args())
+    opts = {
+        "user_data_dir": profile_dir,
+        "headless": False,
         "viewport": {"width": 1280, "height": 900},
-        "user_agent": _CHROME_USER_AGENT,
         "ignore_default_args": ["--enable-automation", "--no-sandbox"],
-        "args": ["--disable-session-crashed-bubble", "--hide-crash-restore-bubble",
-                 "--no-first-run", "--no-default-browser-check"]}
+        "args": base_args,
+        "locale": _env("LUNA_BROWSER_LOCALE", "en-CY") or "en-CY",
+        "timezone_id": _env("LUNA_BROWSER_TIMEZONE", "Asia/Nicosia") or "Asia/Nicosia",
+    }
     if BROWSER_PATH and os.path.isfile(BROWSER_PATH):
         opts["executable_path"] = BROWSER_PATH
     elif BROWSER_CHANNEL in ("chrome", "msedge", "chromium"):
         opts["channel"] = BROWSER_CHANNEL
+    ua = _env("LUNA_BROWSER_USER_AGENT").strip()
+    if ua:
+        opts["user_agent"] = ua
+    elif BROWSER_CHANNEL == "chromium":
+        opts["user_agent"] = _CHROME_USER_AGENT
     return opts
 
 def _launch_social_browser(profile_dir: str, p):
@@ -225,7 +266,7 @@ def _fetch_news(limit: int = 8) -> tuple[bool, str]:
     headlines_only = [it["title"] for it in top]
     if ollama_chat:
         try:
-            OLLAMA_MODEL = _env("OLLAMA_MODEL", "qwen2.5-coder:7b-instruct")
+            OLLAMA_MODEL = _env("OLLAMA_MODEL", "llama3.2:latest")
             summary = ollama_chat(
                 "Summarize these world news headlines in a short, readable paragraph (2–4 sentences). "
                 "Do not include any URLs, links, or sources. Just the summary.\n\nHeadlines:\n"

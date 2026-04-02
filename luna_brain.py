@@ -22,7 +22,7 @@ def _brain_model() -> str:
     return (
         os.environ.get("OLLAMA_MODEL")
         or os.environ.get("OLLAMA_CHAT_MODEL")
-        or "qwen2.5-coder:7b-instruct"
+        or "llama3.2:latest"
     ).strip()
 
 _REMEMBER_PROMPT = """\

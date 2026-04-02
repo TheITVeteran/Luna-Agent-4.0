@@ -183,3 +183,17 @@
 {"ts": "2026-03-23T15:56:25.404459+00:00", "cmd": "stop", "params": {}, "reply": "✅ ⏹️ Stopped."}
 {"ts": "2026-03-23T15:56:46.574842+00:00", "cmd": "play", "params": {"query": ""}, "reply": "Usage: !play <song or URL> (from UI: play in Discord if you're in a voice channel)."}
 {"ts": "2026-03-25T13:27:56.263847+00:00", "cmd": "ask_me", "params": {}, "reply": [false, {"need_feedback": true, "request_id": "c16b5500d804", "message": "Choose an option:", "options": ["Option A", "Option B"]}]}
+{"ts": "2026-03-27T20:09:47.140154+00:00", "cmd": "share_x", "params": {}, "reply": "❌ Compose dialog didn't open or text box not found. Log in to X if needed, then try Share Song again."}
+{"ts": "2026-03-27T20:18:48.486762+00:00", "cmd": "share_x", "params": {}, "reply": "❌ X share already running."}
+{"ts": "2026-03-27T20:19:19.199948+00:00", "cmd": "share_x", "params": {}, "reply": "❌ Compose dialog didn't open or text box not found. Log in to X if needed, then try Share Song again."}
+{"ts": "2026-03-27T20:20:48.096352+00:00", "cmd": "share_x", "params": {}, "reply": "❌ Compose dialog didn't open or text box not found. Log in to X if needed, then try Share Song again."}
+{"ts": "2026-03-27T20:29:58.512066+00:00", "cmd": "share_x", "params": {}, "reply": "✅ Shared to X: \"Ghost in The Server\""}
+{"ts": "2026-03-27T20:32:21.519557+00:00", "cmd": "share_facebook", "params": {}, "reply": "❌ Could not open Facebook composer. I left the browser open — log in if needed, then close and try again."}
+{"ts": "2026-03-27T20:36:31.075897+00:00", "cmd": "share_facebook", "params": {}, "reply": "❌ Facebook error: BrowserType.launch_persistent_context: Target page, context or browser has been closed\nBrowser logs:\n\n<launching> C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe --disable-field-trial-config --disable-background-networking --disable-background-timer-throttling --disable-backg"}
+{"ts": "2026-03-27T20:36:59.357208+00:00", "cmd": "share_facebook", "params": {}, "reply": "❌ Facebook error: BrowserType.launch_persistent_context: Target page, context or browser has been closed\nBrowser logs:\n\n<launching> C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe --disable-field-trial-config --disable-background-networking --disable-background-timer-throttling --disable-backg"}
+{"ts": "2026-03-27T20:42:48.553280+00:00", "cmd": "share_facebook", "params": {}, "reply": "✅ Shared to Facebook: \"Angels In The Side Streets\""}
+{"ts": "2026-03-27T22:12:50.700451+00:00", "cmd": "ask_me", "params": {}, "reply": [false, {"need_feedback": true, "request_id": "172fdd08a108", "message": "Choose an option:", "options": ["Option A", "Option B"]}]}
+{"ts": "2026-03-30T20:56:13.087401+00:00", "cmd": "share_facebook", "params": {}, "reply": "✅ Shared to Facebook: \"Carnival Na Rua\""}
+{"ts": "2026-04-01T01:06:18.421233+00:00", "cmd": "share_facebook", "params": {}, "reply": "✅ Shared to Facebook: \"Nature's Flow\""}
+{"ts": "2026-04-02T20:32:54.388469+00:00", "cmd": "share_x", "params": {}, "reply": "❌ X error: Keyboard.type: Target page, context or browser has been closed"}
+{"ts": "2026-04-02T20:33:37.682690+00:00", "cmd": "share_x", "params": {}, "reply": "✅ Shared to X: \"Binary Soul, Borrowed Hands\""}

@@ -7,7 +7,16 @@ _DATA = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 _PROFILE_FILE = os.path.join(_DATA, "profiles.json")
 _lock = threading.Lock()
 
-PROFILE_FIELDS = ["name", "about", "style", "goals", "preferences"]
+PROFILE_FIELDS = ["name", "hobbies", "about", "preferences", "style", "goals"]
+
+_PROFILE_LABELS = {
+    "name": "Name",
+    "hobbies": "Hobbies",
+    "about": "About",
+    "preferences": "Preferences",
+    "style": "Communication style",
+    "goals": "Goals",
+}
 
 # ── Disk helpers ──────────────────────────────────────────────────────────────
 
@@ -33,8 +42,14 @@ def _save(data: dict) -> None:
 
 def get_profile_prompt(scope: str) -> str:
     p = get_profile(scope)
-    parts = [f"{k}: {v}" for k, v in p.items() if v]
-    return "Profile: " + "; ".join(parts) if parts else ""
+    lines = []
+    for k in PROFILE_FIELDS:
+        v = (p.get(k) or "").strip()
+        if v:
+            lines.append(f"{_PROFILE_LABELS.get(k, k.title())}: {v}")
+    if not lines:
+        return ""
+    return "User profile (structured — use this when they ask who they are or what you know about them):\n" + "\n".join(lines)
 
 
 def get_profile(scope: str) -> dict[str, str]:
