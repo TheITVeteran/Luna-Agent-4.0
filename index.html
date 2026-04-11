@@ -1138,6 +1138,32 @@
   }
 
   /* Input action buttons */
+  .chat-mode-btn {
+    flex-shrink: 0;
+    min-width: 78px;
+    padding: 8px 10px;
+    font-size: 11px;
+    font-family: var(--font-main);
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    border-radius: 6px;
+    border: 1px solid rgba(0,212,255,0.38);
+    background: rgba(0,35,55,0.55);
+    color: var(--cyan);
+    cursor: pointer;
+    line-height: 1.15;
+    transition: background 0.15s, border-color 0.15s, color 0.15s;
+  }
+  .chat-mode-btn.instruction {
+    border-color: rgba(180,130,255,0.5);
+    color: #d4c4ff;
+    background: rgba(45,25,70,0.5);
+  }
+  .chat-mode-btn:hover {
+    filter: brightness(1.1);
+  }
+
   .input-btns {
     display: flex;
     gap: 6px;
@@ -1789,6 +1815,9 @@
       <a class="cmd-btn" href="/health/" style="text-decoration:none;color:inherit;display:inline-flex;align-items:center;gap:6px;" title="System health dashboard">
         <span class="cmd-icon">💊</span> Health
       </a>
+      <a class="cmd-btn" href="/vrm/" target="_blank" rel="noopener" style="text-decoration:none;color:inherit;display:inline-flex;align-items:center;gap:6px;" title="3D VRM avatar viewer (Three.js; set LUNA_VRM_PATH if needed)">
+        <span class="cmd-icon">🎭</span> VRM viewer
+      </a>
         </div>
       </div>
     </div>
@@ -1910,6 +1939,7 @@
           <textarea id="input" rows="1" placeholder="Speak to Luna, or say Shadow, [command]…" autocomplete="off"></textarea>
         </div>
         <div class="input-btns">
+          <button type="button" class="chat-mode-btn" id="chat-mode-btn" aria-pressed="true">Fast</button>
           <button class="icon-btn" id="mic-btn" title="Hold to record voice">🎙</button>
           <button class="icon-btn" id="stop-btn" onclick="stopTTS()" title="Stop voice">◼</button>
           <button class="send-btn" id="send-btn" onclick="sendMessage()">
@@ -1922,6 +1952,7 @@
         <span class="hint-item"><kbd>Shift+Enter</kbd> New line</span>
         <span class="hint-item"><kbd>Shadow,</kbd> Commands</span>
         <span class="hint-item"><kbd>!help</kbd> All commands</span>
+        <span class="hint-item" title="Fast = compact prompt, quicker. Instruction = full context + inner monologue.">Fast / Instruction toggle</span>
       </div>
     </div>
   </div>
@@ -2132,6 +2163,7 @@ function toggleSetting(el) {
   if (id === 'setting-stream-anim') { lunaSettings.streamAnim = on; localStorage.setItem('luna-stream-anim', on ? '1' : '0'); }
 }
 syncSettingsUI();
+
 document.getElementById('settings-btn').addEventListener('click', () => {
   document.getElementById('settings-overlay').classList.add('open');
   loadModelList();
@@ -2250,6 +2282,25 @@ document.getElementById('luna-says-ack').addEventListener('click', async functio
 });
 setInterval(checkStatus, 30000);
 checkStatus();
+
+// Twitch chat (read-only): show viewer lines + Luna replies when the bot ingests IRC
+let twitchSince = 0;
+async function pollTwitchChat() {
+  try {
+    const res = await fetch('/api/twitch/pending?since=' + twitchSince);
+    if (!res.ok) return;
+    const data = await res.json();
+    const events = data.events || [];
+    for (const ev of events) {
+      const who = (ev.user || '?').replace(/[<>]/g, '');
+      appendMsg('user', ev.text || '', { userLabel: who + ' · Twitch' });
+      if (ev.reply) appendMsg('luna', ev.reply, { twitchEventId: ev.id });
+      if (ev.id > twitchSince) twitchSince = ev.id;
+    }
+  } catch (_) {}
+}
+setInterval(pollTwitchChat, 2500);
+pollTwitchChat();
 
 // Calendar popup
 const calendarBtn = document.getElementById('calendar-btn');
@@ -2388,6 +2439,26 @@ const chatEl = document.getElementById('chat');
 const inputEl = document.getElementById('input');
 const sendBtn = document.getElementById('send-btn');
 
+/** Web chat: `fast` (compact prompt) vs `instruction` (full system + inner monologue). */
+let chatMode = localStorage.getItem('lunaChatMode') === 'instruction' ? 'instruction' : 'fast';
+function syncChatModeBtn() {
+  const btn = document.getElementById('chat-mode-btn');
+  if (!btn) return;
+  const isInst = chatMode === 'instruction';
+  btn.textContent = isInst ? 'Instruction' : 'Fast';
+  btn.classList.toggle('instruction', isInst);
+  btn.setAttribute('aria-pressed', !isInst ? 'true' : 'false');
+  btn.title = isInst
+    ? 'Instruction: full Luna context, memories, and natural-language commands (sidebar buttons). Click for Fast.'
+    : 'Fast: plain conversation only — no NL command routing (use !commands or switch to Instruction). Click for Instruction.';
+}
+document.getElementById('chat-mode-btn')?.addEventListener('click', () => {
+  chatMode = chatMode === 'fast' ? 'instruction' : 'fast';
+  localStorage.setItem('lunaChatMode', chatMode);
+  syncChatModeBtn();
+});
+syncChatModeBtn();
+
 // Auto-resize textarea
 inputEl.addEventListener('input', () => {
   inputEl.style.height = 'auto';
@@ -2402,6 +2473,35 @@ inputEl.addEventListener('keydown', e => {
   }
 });
 
+/** Strip markdown-ish content for Edge / browser TTS from the VRM page. */
+function plainTextForVrmSpeech(raw) {
+  if (!raw || typeof raw !== 'string') return '';
+  let s = raw;
+  s = s.replace(/```[\s\S]*?```/g, ' ');
+  s = s.replace(/`([^`]+)`/g, '$1');
+  s = s.replace(/\*\*([^*]+)\*\*/g, '$1');
+  s = s.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');
+  s = s.replace(/\s+/g, ' ').trim();
+  return s.slice(0, 8000);
+}
+
+/** When the main chat shows a Luna reply, tell the /vrm/ tab to speak + animate (same BroadcastChannel as manual tests). */
+function notifyVrmViewerFromChat(markdownOrPlain, vrmOpts) {
+  const raw = String(markdownOrPlain || '');
+  const t = raw.trim();
+  if (!t || t.startsWith('⚠') || t.startsWith('❌')) return;
+  const plain = plainTextForVrmSpeech(raw);
+  if (!plain.trim()) return;
+  try {
+    if (!window.__lunaVrmSpeechBc) {
+      window.__lunaVrmSpeechBc = new BroadcastChannel('luna-vrm-speech');
+    }
+    const payload = { type: 'speak', text: plain, engine: 'edge' };
+    if (vrmOpts && vrmOpts.twitchEventId != null) payload.twitchEventId = vrmOpts.twitchEventId;
+    window.__lunaVrmSpeechBc.postMessage(payload);
+  } catch (_) {}
+}
+
 // ── Append message to chat ──
 function appendMsg(role, text, opts) {
   const welcome = document.getElementById('welcome');
@@ -2414,7 +2514,7 @@ function appendMsg(role, text, opts) {
 
   const label = document.createElement('div');
   label.className = 'msg-label';
-  label.textContent = role === 'luna' ? 'Luna' : 'You';
+  label.textContent = role === 'luna' ? 'Luna' : ((opts && opts.userLabel) ? opts.userLabel : 'You');
   div.appendChild(label);
 
   const bubble = document.createElement('div');
@@ -2465,6 +2565,7 @@ function appendMsg(role, text, opts) {
   highlightCode(bubble);
   if (lunaSettings.persist) saveChatHistory();
   if (role === 'luna' && document.hidden) lunaNotify('Luna', text.slice(0, 200));
+  if (role === 'luna' && !(opts && opts.vrmSpeak === false)) notifyVrmViewerFromChat(text, opts || {});
 
   return div;
 }
@@ -2558,11 +2659,33 @@ async function sendMessage() {
     const res = await fetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: msg })
+      body: JSON.stringify({ message: msg, chat_mode: chatMode })
     });
-    const data = await res.json();
+    const raw = await res.text();
+    let data = {};
+    try {
+      data = raw ? JSON.parse(raw) : {};
+    } catch (parseErr) {
+      removeThinking();
+      appendMsg('luna', '⚠ Server returned non-JSON (HTTP ' + res.status + '). If Luna is busy, try again.');
+      isSending = false;
+      sendBtn.disabled = false;
+      sendBtn.classList.remove('loading');
+      inputEl.focus();
+      return;
+    }
     removeThinking();
     const elapsed = Math.round(performance.now() - t0);
+    if (!res.ok) {
+      appendMsg('luna', data.error || data.reply || ('Request failed (HTTP ' + res.status + ').'));
+      loadRecentSocial();
+      updateWorkingStatus();
+      isSending = false;
+      sendBtn.disabled = false;
+      sendBtn.classList.remove('loading');
+      inputEl.focus();
+      return;
+    }
     if (data.need_feedback && data.request_id) {
       showFeedbackPopup(data.request_id, data.message || 'Luna is asking…', data.options);
       loadRecentSocial();
@@ -2578,7 +2701,8 @@ async function sendMessage() {
     updateWorkingStatus();
   } catch (err) {
     removeThinking();
-    appendMsg('luna', '⚠ Connection lost. Is Luna running?');
+    const detail = (err && err.message) ? String(err.message) : '';
+    appendMsg('luna', '⚠ Could not reach Luna (network or server closed the connection).' + (detail ? ' ' + detail : '') + ' Is the bot still running on :5050?');
   }
 
   isSending = false;
@@ -2855,6 +2979,7 @@ const MORE_COMMANDS = {
   tools: {
     title: 'Tools — more',
     items: [
+      { label: 'VRM viewer', icon: '🎭', desc: 'Open 3D avatar page (/vrm/)', run: function() { window.open('/vrm/', '_blank'); } },
       { label: 'Remember', icon: '🧠', desc: 'Store a memory (!remember)', run: function() { insertCommand('!remember ', 'fact to remember'); } },
       { label: 'Always remember', icon: '⭐', desc: 'Core memory (!always_remember)', run: function() { insertCommand('!always_remember ', 'fact'); } },
       { label: 'Profile', icon: '👤', desc: 'View or set profile (!profile)', run: function() { sendQuick('!profile'); } },

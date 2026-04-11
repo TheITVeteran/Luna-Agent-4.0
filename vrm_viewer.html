@@ -1,0 +1,1421 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Luna — VRM</title>
+<style>
+  * { margin: 0; box-sizing: border-box; }
+  html, body { height: 100%; overflow: hidden; background: #020b14; font-family: system-ui, sans-serif; }
+  #canvas-wrap { position: fixed; inset: 0; }
+  canvas { display: block; width: 100%; height: 100%; }
+  #hud {
+    position: fixed; left: 12px; top: 12px; z-index: 2;
+    color: #a8d8ea; font-size: 13px; max-width: min(380px, 88vw);
+    background: rgba(0,20,40,0.75); border: 1px solid rgba(0,212,255,0.25);
+    border-radius: 8px; padding: 10px 12px;
+  }
+  #hud strong { color: #00d4ff; }
+  #hud .err { color: #ff6b8a; margin-top: 6px; word-break: break-all; }
+  #settings-toggle {
+    position: fixed; right: 12px; top: 12px; z-index: 3;
+    width: 42px; height: 42px; border-radius: 10px;
+    border: 1px solid rgba(0,212,255,0.35);
+    background: rgba(0,20,40,0.85); color: #00d4ff;
+    cursor: pointer; font-size: 20px; line-height: 1;
+    display: flex; align-items: center; justify-content: center;
+  }
+  #settings-toggle:hover { background: rgba(0,212,255,0.12); }
+  #settings-panel {
+    position: fixed; right: 12px; top: 58px; z-index: 3;
+    width: min(340px, calc(100vw - 24px));
+    max-height: min(90vh, 920px);
+    overflow-y: auto;
+    background: rgba(0,20,40,0.95);
+    border: 1px solid rgba(0,212,255,0.3);
+    border-radius: 10px; padding: 14px 16px;
+    color: #a8d8ea; font-size: 13px;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.45);
+    display: none;
+  }
+  #settings-panel.open { display: block; }
+  #settings-panel h3 {
+    color: #00d4ff; font-size: 14px; font-weight: 600; margin: 14px 0 10px;
+  }
+  #settings-panel h3:first-child { margin-top: 0; }
+  #settings-panel label { display: block; margin-bottom: 4px; color: #7eb8cc; font-size: 12px; }
+  #settings-panel select, #settings-panel textarea {
+    width: 100%; padding: 8px 10px; border-radius: 6px;
+    border: 1px solid rgba(0,212,255,0.25);
+    background: #061a28; color: #e0f7ff;
+    font-size: 13px; margin-bottom: 10px;
+  }
+  #settings-panel textarea { min-height: 72px; resize: vertical; font-family: inherit; }
+  #settings-panel .hint { font-size: 11px; color: #6a9aaa; line-height: 1.45; margin-top: 8px; }
+  #settings-panel .status { font-size: 12px; color: #7eb8cc; margin-bottom: 8px; }
+  #settings-panel button.btn {
+    width: 100%; padding: 8px 12px; border-radius: 6px; cursor: pointer;
+    border: 1px solid rgba(0,212,255,0.35);
+    background: rgba(0,212,255,0.12); color: #00d4ff;
+    font-size: 13px; margin-top: 6px;
+  }
+  #settings-panel button.btn:hover { background: rgba(0,212,255,0.2); }
+  #settings-panel button.btn-secondary {
+    border-color: rgba(255,100,120,0.4);
+    background: rgba(255,80,100,0.08); color: #ff8a9a;
+  }
+  #settings-panel .row-btns { display: flex; gap: 8px; margin-top: 8px; }
+  #settings-panel .row-btns .btn { margin-top: 0; flex: 1; }
+  #bone-map-panel {
+    margin-top: 8px; padding: 8px; border-radius: 6px;
+    background: rgba(0,24,40,0.9); border: 1px solid rgba(0,212,255,0.2);
+    font-size: 11px; line-height: 1.35; max-height: 220px; overflow: auto;
+    font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+    color: #b8dce8;
+  }
+  #bone-map-panel table { width: 100%; border-collapse: collapse; }
+  #bone-map-panel th { color: #00d4ff; font-weight: 600; padding: 4px 6px 6px 0; }
+  #bone-map-panel td { padding: 3px 6px 3px 0; border-top: 1px solid rgba(0,212,255,0.12); vertical-align: top; }
+  .bone-map-row { display: flex; align-items: center; gap: 8px; margin: 10px 0 6px; font-size: 12px; color: #7eb8cc; }
+  .bone-map-row input { accent-color: #00d4ff; }
+</style>
+<!-- VRM stack: https://github.com/pixiv/three-vrm — GLTFLoader + VRMLoaderPlugin + VRMUtils + @pixiv/three-vrm-animation -->
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.180.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.180.0/examples/jsm/",
+    "@pixiv/three-vrm": "https://cdn.jsdelivr.net/npm/@pixiv/three-vrm@3.5.1/lib/three-vrm.module.min.js",
+    "@pixiv/three-vrm-animation": "https://cdn.jsdelivr.net/npm/@pixiv/three-vrm-animation@3.5.1/lib/three-vrm-animation.module.min.js"
+  }
+}
+</script>
+</head>
+<body>
+<div id="canvas-wrap"><canvas id="c"></canvas></div>
+
+<button type="button" id="settings-toggle" title="Avatar &amp; speech" aria-expanded="false" aria-controls="settings-panel">⚙</button>
+<div id="settings-panel" role="dialog" aria-label="Avatar settings">
+  <h3>Body motion</h3>
+  <div class="status" id="anim-status">Loading…</div>
+  <label for="idle-select">Idle (loop when silent)</label>
+  <select id="idle-select"></select>
+  <label for="talk-select">Talking (while TTS plays)</label>
+  <select id="talk-select"></select>
+  <div class="hint">
+    <strong>Luna animations</strong> (or <code style="color:#00d4ff">LUNA_ANIMATIONS_DIR</code>): <code style="color:#00d4ff">.vrma</code> and/or <code style="color:#00d4ff">.fbx</code> (e.g. Mixamo) in the folder or <code style="color:#00d4ff">motion/</code>.
+    Legacy: <code style="color:#00d4ff">data/vrm/animations/</code>. FBX is retargeted in the browser (bone names must map; try Mixamo + VRM). Optional CDN sample below.
+  </div>
+  <div class="bone-map-row">
+    <label><input type="checkbox" id="bone-map-toggle"/> Show Mixamo ↔ Luna (VRM) bone map</label>
+  </div>
+  <div id="bone-map-panel" hidden></div>
+
+  <h3>Expression clips (optional)</h3>
+  <div class="hint" style="margin-top:0">
+    Face / additive clips — e.g. converted for VRM or from Mixamo pipelines. Use folders:
+    <code style="color:#00d4ff">Luna animations/expressions/</code>,
+    <code style="color:#00d4ff">expression/</code>, or <code style="color:#00d4ff">mixamo/</code>.
+    Full-body clips here may fight body motion; prefer lighter face/brow clips if you see fighting.
+  </div>
+  <label for="expr-idle-select">Expression while idle</label>
+  <select id="expr-idle-select"></select>
+  <label for="expr-talk-select">Expression while talking</label>
+  <select id="expr-talk-select"></select>
+
+  <h3>Speech</h3>
+  <div class="hint" style="margin-top:0">
+    <strong>Edge TTS</strong> uses the same Microsoft neural voice as Luna’s server (default <strong>Ava</strong>, via <code style="color:#00d4ff">EDGE_TTS_VOICE</code>).
+    <strong>Browser</strong> uses OS voices (Web Speech API) — Ava is not listed there.
+    Mouth visemes: Edge uses live audio level; browser uses text-timed shapes.
+    The main Luna page (<code style="color:#00d4ff">/</code>) mirrors replies here; this page also polls Twitch when IRC ingest is enabled (same as the chat UI). Keep <code style="color:#00d4ff">/vrm/</code> open for avatar + Edge TTS.
+    Manual / dev: <code style="color:#00d4ff">BroadcastChannel(&quot;luna-vrm-speech&quot;)</code> → <code style="color:#00d4ff">{ type: &quot;speak&quot;, text: &quot;…&quot;, engine?: &quot;edge&quot; | &quot;browser&quot; }</code>.
+  </div>
+  <label for="tts-engine">Engine</label>
+  <select id="tts-engine">
+    <option value="edge" selected>Edge TTS (Ava)</option>
+    <option value="browser">Browser / system</option>
+  </select>
+  <div id="tts-edge-hint" class="hint" style="margin-top:8px;margin-bottom:10px;">
+    Voice ID: <code id="tts-edge-voice-name" style="color:#00d4ff">…</code> — set in <code style="color:#00d4ff">EDGE_TTS_VOICE</code> (e.g. <code style="color:#00d4ff">en-US-AvaNeural</code> or <code style="color:#00d4ff">en-US-AvaMultilingualNeural</code>).
+  </div>
+  <div id="tts-browser-wrap">
+    <label for="tts-voice">Voice</label>
+    <select id="tts-voice"></select>
+  </div>
+  <label for="tts-text">Text</label>
+  <textarea id="tts-text" placeholder="Type something for Luna to say…"></textarea>
+  <div class="row-btns">
+    <button type="button" class="btn" id="btn-speak">Speak</button>
+    <button type="button" class="btn btn-secondary" id="btn-stop-speech">Stop</button>
+  </div>
+</div>
+
+<div id="hud">
+  <strong>VRM viewer</strong> — orbit · zoom · ⚙ idle / talk + TTS<br/>
+  Model: <span id="path-hint">…</span>
+  <div class="err" id="err" hidden></div>
+</div>
+
+<script type="module">
+import * as THREE from "three";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+import { VRMLoaderPlugin, VRMUtils } from "@pixiv/three-vrm";
+import {
+  createVRMAnimationClip,
+  VRMAnimationLoaderPlugin,
+  VRMLookAtQuaternionProxy,
+} from "@pixiv/three-vrm-animation";
+import { FBXLoader } from "three/addons/loaders/FBXLoader.js";
+import * as SkeletonUtils from "three/addons/utils/SkeletonUtils.js";
+
+const BASE = new URL(".", window.location.href).href;
+const MODEL_URL = new URL("model", BASE).href;
+const API_ANIMATIONS = new URL("api/animations", BASE).href;
+const API_TTS = new URL("api/tts", BASE).href;
+const URL_PARAMS = new URLSearchParams(window.location.search);
+/** `?boneMap=1` — open bone map logging + panel when an FBX clip loads. */
+const BONE_MAP_URL = URL_PARAMS.get("boneMap") === "1" || URL_PARAMS.get("boneMap") === "true";
+
+function pingVrmPresenceToServer() {
+  fetch(new URL("/api/vrm-presence", window.location.origin).href, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ active: true }),
+    credentials: "same-origin",
+  }).catch(() => {});
+}
+pingVrmPresenceToServer();
+setInterval(pingVrmPresenceToServer, 4000);
+window.addEventListener("beforeunload", () => {
+  try {
+    const blob = new Blob([JSON.stringify({ active: false })], { type: "application/json" });
+    navigator.sendBeacon(new URL("/api/vrm-presence", window.location.origin).href, blob);
+  } catch {
+    /* */
+  }
+});
+
+const canvas = document.getElementById("c");
+const errEl = document.getElementById("err");
+const pathHint = document.getElementById("path-hint");
+const settingsToggle = document.getElementById("settings-toggle");
+const settingsPanel = document.getElementById("settings-panel");
+const idleSelect = document.getElementById("idle-select");
+const talkSelect = document.getElementById("talk-select");
+const exprIdleSelect = document.getElementById("expr-idle-select");
+const exprTalkSelect = document.getElementById("expr-talk-select");
+const animStatus = document.getElementById("anim-status");
+const ttsEngine = document.getElementById("tts-engine");
+const ttsBrowserWrap = document.getElementById("tts-browser-wrap");
+const ttsEdgeHint = document.getElementById("tts-edge-hint");
+const ttsEdgeVoiceName = document.getElementById("tts-edge-voice-name");
+const ttsVoice = document.getElementById("tts-voice");
+const ttsText = document.getElementById("tts-text");
+const btnSpeak = document.getElementById("btn-speak");
+const btnStopSpeech = document.getElementById("btn-stop-speech");
+const boneMapToggle = document.getElementById("bone-map-toggle");
+const boneMapPanel = document.getElementById("bone-map-panel");
+
+let vrm = null;
+let mixer = null;
+/** Second layer: expression / face VRMA (optional). */
+let exprMixer = null;
+let animationList = { motion: [], expression: [], local: [], sample: null };
+/** Whether TTS is currently playing (drives talking vs idle clip). */
+let speaking = false;
+/** When true, lipsync follows Web Audio RMS (Edge TTS); else text-timed (browser). */
+let lipAudioMode = false;
+let speakGen = 0;
+let edgeAudioCtx = null;
+let edgeAnalyser = null;
+/** @type {AudioBufferSourceNode | null} */
+let edgePlaybackSource = null;
+let lipAmpSmooth = 0;
+let lipTdBuf = null;
+/** Text-timed viseme lipsync (browser SpeechSynthesis has no audio buffer). */
+const LIP_NAMES = ["aa", "ih", "ee", "ou", "oh"];
+const lipSync = {
+  text: "",
+  t0: 0,
+  durationSec: 1,
+  phase: 0,
+  /** Jaw open/close cycle while speaking (radians). */
+  jawPhase: 0,
+  /** Smoothed target weights for VRM mouth presets */
+  smooth: { aa: 0, ih: 0, ee: 0, ou: 0, oh: 0 },
+};
+
+/** Primary blendshape for big open/close (some models differ). Set after VRM load. */
+let mouthOpenExprName = "aa";
+
+const clock = new THREE.Clock();
+
+function refreshMouthOpenExprName() {
+  mouthOpenExprName = "aa";
+  const em = vrm?.expressionManager;
+  if (!em) return;
+  if (em.getExpression("aa")) return;
+  const keys = Object.keys(em.expressionMap || {});
+  const guess = keys.find((k) => /^aa$/i.test(k));
+  if (guess) {
+    mouthOpenExprName = guess;
+    return;
+  }
+  const loose = keys.find((k) => /mouth|jaw|open|あ|ア/i.test(k) && !/brow|eye|brow/i.test(k));
+  if (loose) mouthOpenExprName = loose;
+}
+
+/** Drive the main mouth-open slider with visible open/close motion. */
+function setPrimaryMouthOpen(em, open01) {
+  const o = Math.min(1, Math.max(0, open01));
+  if (em.getExpression(mouthOpenExprName)) {
+    em.setValue(mouthOpenExprName, o);
+    return true;
+  }
+  if (em.getExpression("aa")) {
+    em.setValue("aa", o);
+    return true;
+  }
+  if (em.getExpression("oh")) {
+    em.setValue("oh", o * 0.92);
+    return true;
+  }
+  return false;
+}
+
+function estimateSpeechDurationSec(text) {
+  const t = (text || "").trim();
+  if (!t) return 1;
+  const words = t.split(/\s+/).filter(Boolean).length;
+  const chars = t.length;
+  return Math.max(0.9, Math.min(180, words * 0.38 + chars * 0.018));
+}
+
+/** Map a character to rough vowel/consonant mouth shapes (VRM preset names). */
+function charToLipWeights(ch) {
+  const w = { aa: 0, ih: 0, ee: 0, ou: 0, oh: 0 };
+  const c = (ch || " ").toLowerCase();
+  if (/[aàáâãäåæ]/.test(c)) {
+    w.aa = 1;
+    return w;
+  }
+  if (/[iìíîïyý]/.test(c)) {
+    w.ih = 0.9;
+    w.ee = 0.35;
+    return w;
+  }
+  if (/[eèéêë]/.test(c)) {
+    w.ee = 1;
+    return w;
+  }
+  if (/[uùúûü]/.test(c)) {
+    w.ou = 1;
+    return w;
+  }
+  if (/[oòóôõöø]/.test(c)) {
+    w.oh = 0.95;
+    w.aa = 0.15;
+    return w;
+  }
+  if (/[fv]/.test(c)) {
+    w.ee = 0.55;
+    w.ih = 0.4;
+    return w;
+  }
+  if (/[mn]/.test(c)) {
+    w.aa = 0.12;
+    return w;
+  }
+  if (/[bpm]/.test(c)) {
+    w.aa = 0.18;
+    return w;
+  }
+  if (/\s/.test(c)) {
+    w.aa = 0.06;
+    return w;
+  }
+  if (/[cdgkqrstxz]/.test(c)) {
+    w.aa = 0.42;
+    return w;
+  }
+  w.aa = 0.32;
+  return w;
+}
+
+function clearLipMouth() {
+  if (!vrm?.expressionManager) return;
+  const em = vrm.expressionManager;
+  for (const name of LIP_NAMES) {
+    if (em.getExpression(name)) em.setValue(name, 0);
+  }
+  for (const k of LIP_NAMES) lipSync.smooth[k] = 0;
+  lipSync.phase = 0;
+  lipSync.jawPhase = 0;
+  lipAmpSmooth = 0;
+}
+
+function updateLipSyncFromAudio(delta) {
+  if (!vrm?.expressionManager || !edgeAnalyser) return;
+  const n = edgeAnalyser.fftSize;
+  if (!lipTdBuf || lipTdBuf.length !== n) lipTdBuf = new Uint8Array(n);
+  edgeAnalyser.getByteTimeDomainData(lipTdBuf);
+  let sum = 0;
+  for (let i = 0; i < n; i++) {
+    const x = (lipTdBuf[i] - 128) / 128;
+    sum += x * x;
+  }
+  const rms = Math.sqrt(sum / n);
+  const open = Math.min(1, Math.max(0, (rms - 0.008) * 7.5));
+  lipAmpSmooth += (open - lipAmpSmooth) * Math.min(1, delta * 22);
+  lipSync.jawPhase += delta * Math.PI * 2 * 6.5;
+  const chatter = 0.22 * (0.5 + 0.5 * Math.sin(lipSync.jawPhase * 1.85));
+  const base = Math.min(1, lipAmpSmooth * 1.02 + 0.08 + chatter * lipAmpSmooth);
+  const em = vrm.expressionManager;
+  if (!setPrimaryMouthOpen(em, base)) {
+    if (em.getExpression("aa")) em.setValue("aa", base);
+  } else if (mouthOpenExprName !== "aa" && em.getExpression("aa")) {
+    em.setValue("aa", 0);
+  }
+  if (em.getExpression("ee")) em.setValue("ee", lipAmpSmooth * 0.4);
+  if (em.getExpression("ih")) em.setValue("ih", lipAmpSmooth * 0.28);
+  if (em.getExpression("oh") && mouthOpenExprName !== "oh") em.setValue("oh", lipAmpSmooth * 0.18);
+  if (em.getExpression("ou")) em.setValue("ou", lipAmpSmooth * 0.2);
+}
+
+function stopEdgePlayback() {
+  if (edgePlaybackSource) {
+    try {
+      edgePlaybackSource.stop(0);
+    } catch {
+      /* already ended */
+    }
+    edgePlaybackSource = null;
+  }
+  lipAudioMode = false;
+  lipAmpSmooth = 0;
+}
+
+function syncTtsEngineUi() {
+  const edge = ttsEngine?.value === "edge";
+  if (ttsBrowserWrap) ttsBrowserWrap.style.display = edge ? "none" : "block";
+  if (ttsEdgeHint) ttsEdgeHint.style.display = edge ? "block" : "none";
+}
+
+/**
+ * Each frame while TTS is active: advance through the utterance and blend mouth visemes.
+ * Runs after animation mixers so lip shapes override conflicting mouth tracks for this frame.
+ */
+function updateLipSync(delta) {
+  if (!vrm?.expressionManager || !speaking) return;
+  const em = vrm.expressionManager;
+  const text = lipSync.text;
+  if (!text.length) return;
+
+  const elapsed = (performance.now() - lipSync.t0) / 1000;
+  const u = Math.min(1, elapsed / Math.max(0.15, lipSync.durationSec));
+  const idx = Math.min(text.length - 1, Math.max(0, Math.floor(u * text.length)));
+  const ch = text[idx];
+  const target = charToLipWeights(ch);
+  const smooth = 1 - Math.exp(-delta * 16);
+
+  lipSync.phase += delta * Math.PI * 2 * 5.5;
+  const micro = 0.76 + 0.24 * (0.5 + 0.5 * Math.sin(lipSync.phase));
+
+  lipSync.jawPhase += delta * Math.PI * 2 * 7.5;
+  /** Strong open/close so the mouth is visibly animated (not just subtle visemes). */
+  const jaw = 0.1 + 0.88 * (0.5 + 0.5 * Math.sin(lipSync.jawPhase));
+
+  for (const name of LIP_NAMES) {
+    if (!em.getExpression(name)) continue;
+    const goal = target[name] ?? 0;
+    lipSync.smooth[name] += (goal - lipSync.smooth[name]) * smooth;
+  }
+
+  const baseAa = Math.min(1, lipSync.smooth.aa * micro);
+  const baseOther = (name) => Math.min(1, lipSync.smooth[name] * micro);
+
+  const openMain = Math.min(1, baseAa * 0.42 + jaw * 0.94);
+  if (!setPrimaryMouthOpen(em, openMain)) {
+    if (em.getExpression("aa")) em.setValue("aa", openMain);
+  } else if (mouthOpenExprName !== "aa" && em.getExpression("aa")) {
+    em.setValue("aa", 0);
+  }
+
+  if (em.getExpression("ih")) em.setValue("ih", baseOther("ih") * 0.75);
+  if (em.getExpression("ee")) em.setValue("ee", baseOther("ee") * 0.75);
+  if (em.getExpression("ou")) em.setValue("ou", baseOther("ou") * 0.75);
+  if (em.getExpression("oh") && mouthOpenExprName !== "oh") em.setValue("oh", baseOther("oh") * 0.75);
+}
+
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+renderer.setClearColor(0x020b14, 1);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(30, 1, 0.1, 100);
+camera.position.set(0, 1.4, 2.2);
+
+const hemi = new THREE.HemisphereLight(0xffffff, 0x444466, 0.9);
+scene.add(hemi);
+const dir = new THREE.DirectionalLight(0xffffff, 0.85);
+dir.position.set(2, 4, 3);
+scene.add(dir);
+
+const controls = new OrbitControls(camera, canvas);
+controls.target.set(0, 1, 0);
+controls.update();
+
+const loader = new GLTFLoader();
+loader.register((parser) => new VRMLoaderPlugin(parser));
+loader.register((parser) => new VRMAnimationLoaderPlugin(parser));
+const fbxLoader = new FBXLoader();
+
+function stopMotionMixer() {
+  if (mixer) {
+    mixer.stopAllAction();
+    mixer = null;
+  }
+}
+
+function stopExpressionMixer() {
+  if (exprMixer) {
+    exprMixer.stopAllAction();
+    exprMixer = null;
+  }
+}
+
+function primeMixer(dt = 1 / 30) {
+  if (!mixer || !vrm) return;
+  for (let i = 0; i < 6; i++) {
+    mixer.update(dt);
+    vrm.update(dt);
+  }
+}
+
+function primeExprMixer(dt = 1 / 30) {
+  if (!exprMixer || !vrm) return;
+  for (let i = 0; i < 6; i++) {
+    exprMixer.update(dt);
+    vrm.update(dt);
+  }
+}
+
+function animKeyForExprIndex(index) {
+  return `expr:${index}`;
+}
+
+function animKeyForSample() {
+  return "sample:cdn";
+}
+
+function keyToMotionUrl(key) {
+  const k = String(key);
+  if (k.startsWith("vrma:")) {
+    const index = parseInt(k.slice(5), 10);
+    return new URL(`animation/motion/${index}`, BASE).href;
+  }
+  if (k.startsWith("motion:")) {
+    const index = parseInt(k.slice(7), 10);
+    return new URL(`animation/motion/${index}`, BASE).href;
+  }
+  if (k.startsWith("local:")) {
+    const index = parseInt(k.slice(6), 10);
+    return new URL(`animation/motion/${index}`, BASE).href;
+  }
+  if (k === animKeyForSample()) {
+    return animationList.sample?.url || null;
+  }
+  return null;
+}
+
+/** Prefer the body mesh (usually the SkinnedMesh with the most bones). */
+function bestSkinnedMesh(root) {
+  let best = null;
+  let bestN = 0;
+  root.traverse((o) => {
+    if (!o.isSkinnedMesh || !o.skeleton?.bones?.length) return;
+    const n = o.skeleton.bones.length;
+    if (n > bestN) {
+      bestN = n;
+      best = o;
+    }
+  });
+  return best;
+}
+
+function normalizeBoneKey(name) {
+  if (!name) return "";
+  let s = String(name).replace(/^mixamorig:/i, "");
+  s = s.replace(/^J_Bip_[CLR]_/i, "").replace(/^J_Sec_[CLR]_/i, "").replace(/^J_/i, "");
+  return s.replace(/_/g, "").toLowerCase();
+}
+
+/** Resolve Mixamo-style bone name on the FBX skeleton (with or without mixamorig:). */
+function findSourceBoneName(sourceBones, logicalName) {
+  if (!logicalName) return null;
+  const cands = [`mixamorig:${logicalName}`, logicalName];
+  for (const c of cands) {
+    const hit = sourceBones.find((b) => b.name === c);
+    if (hit) return hit.name;
+  }
+  const tail = logicalName.replace(/^mixamorig:/i, "");
+  const low = tail.toLowerCase();
+  const hit = sourceBones.find((b) => {
+    const bn = b.name.replace(/^mixamorig:/i, "");
+    return bn === tail || bn.toLowerCase() === low;
+  });
+  return hit ? hit.name : null;
+}
+
+/**
+ * VRM humanoid bone → Mixamo bone (logical). String keys do not match by substring;
+ * SkeletonUtils needs explicit pairs (LeftArm ↔ J_Bip_L_UpperArm, etc.).
+ */
+const VRM_TO_MIXAMO_LOGICAL = [
+  ["J_Bip_C_Hips", "Hips"],
+  ["J_Bip_C_Spine", "Spine"],
+  ["J_Bip_C_Chest", "Spine1"],
+  ["J_Bip_C_UpperChest", "Spine2"],
+  ["J_Bip_C_Spine1", "Spine1"],
+  ["J_Bip_C_Spine2", "Spine2"],
+  ["J_Bip_C_Neck", "Neck"],
+  ["J_Bip_C_Head", "Head"],
+  ["J_Bip_L_Shoulder", "LeftShoulder"],
+  ["J_Bip_L_UpperArm", "LeftArm"],
+  ["J_Bip_L_LowerArm", "LeftForeArm"],
+  ["J_Bip_L_Hand", "LeftHand"],
+  ["J_Bip_R_Shoulder", "RightShoulder"],
+  ["J_Bip_R_UpperArm", "RightArm"],
+  ["J_Bip_R_LowerArm", "RightForeArm"],
+  ["J_Bip_R_Hand", "RightHand"],
+  ["J_Bip_L_UpperLeg", "LeftUpLeg"],
+  ["J_Bip_L_LowerLeg", "LeftLeg"],
+  ["J_Bip_L_Foot", "LeftFoot"],
+  ["J_Bip_L_ToeBase", "LeftToeBase"],
+  ["J_Bip_R_UpperLeg", "RightUpLeg"],
+  ["J_Bip_R_LowerLeg", "RightLeg"],
+  ["J_Bip_R_Foot", "RightFoot"],
+  ["J_Bip_R_ToeBase", "RightToeBase"],
+];
+
+function buildRetargetNameMap(targetMesh, sourceMesh) {
+  const names = {};
+  const srcBones = sourceMesh.skeleton.bones;
+  const tgtBones = targetMesh.skeleton.bones;
+  const tgtSet = new Set(tgtBones.map((b) => b.name));
+
+  for (const [vrmName, logical] of VRM_TO_MIXAMO_LOGICAL) {
+    if (!tgtSet.has(vrmName)) continue;
+    const src = findSourceBoneName(srcBones, logical);
+    if (src) names[vrmName] = src;
+  }
+
+  const srcByNorm = new Map();
+  for (const b of srcBones) {
+    const key = normalizeBoneKey(b.name);
+    if (key && !srcByNorm.has(key)) srcByNorm.set(key, b.name);
+  }
+  for (const b of tgtBones) {
+    if (names[b.name]) continue;
+    const key = normalizeBoneKey(b.name);
+    if (key && srcByNorm.has(key)) names[b.name] = srcByNorm.get(key);
+  }
+  return names;
+}
+
+function boneMapDebugEnabled() {
+  return !!(boneMapToggle?.checked || BONE_MAP_URL);
+}
+
+function escapeHtmlBone(s) {
+  return String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/"/g, "&quot;");
+}
+
+/**
+ * Observes how Mixamo (FBX) bone names line up with Luna’s VRM skeleton after retarget mapping.
+ * Pairs each Luna bone with its Mixamo driver; lists unmapped Luna bones and unused Mixamo bones.
+ */
+const MixamoLunaBoneObserver = {
+  observe(targetMesh, sourceMesh, namesMap) {
+    const srcBones = sourceMesh.skeleton.bones;
+    const tgtBones = targetMesh.skeleton.bones;
+    const mixamoUsed = new Set(Object.values(namesMap));
+    const pairs = Object.entries(namesMap)
+      .map(([luna, mixamo]) => ({ luna, mixamo }))
+      .sort((a, b) => a.luna.localeCompare(b.luna));
+    const lunaOnly = tgtBones.map((b) => b.name).filter((n) => !namesMap[n]);
+    const mixamoOnly = srcBones.map((b) => b.name).filter((n) => !mixamoUsed.has(n));
+    return {
+      pairs,
+      lunaOnly,
+      mixamoOnly,
+      counts: {
+        mapped: pairs.length,
+        lunaTotal: tgtBones.length,
+        mixamoTotal: srcBones.length,
+      },
+    };
+  },
+  log(report) {
+    console.group("[Luna] Mixamo ↔ Luna (VRM) bone map");
+    console.table(report.pairs.map((p) => ({ Luna_VRM: p.luna, Mixamo_FBX: p.mixamo })));
+    if (report.lunaOnly.length) console.info("Luna (VRM) bones with no Mixamo driver:", report.lunaOnly);
+    if (report.mixamoOnly.length) console.info("Mixamo (FBX) bones not mapped to Luna:", report.mixamoOnly);
+    console.groupEnd();
+  },
+  renderTo(el, report) {
+    if (!el) return;
+    const esc = escapeHtmlBone;
+    let html = `<div style="margin-bottom:8px;color:#7eb8cc;">Mapped ${report.counts.mapped} / ${report.counts.lunaTotal} Luna bones · ${report.counts.mixamoTotal} Mixamo bones</div>`;
+    html += "<table><thead><tr><th>Luna (VRM)</th><th>Mixamo (FBX)</th></tr></thead><tbody>";
+    for (const p of report.pairs) {
+      html += `<tr><td>${esc(p.luna)}</td><td>${esc(p.mixamo)}</td></tr>`;
+    }
+    html += "</tbody></table>";
+    if (report.lunaOnly.length) {
+      html += `<div style="margin-top:10px;color:#e8a088;">Luna only (no Mixamo)</div><div style="opacity:0.92;word-break:break-all;">${esc(report.lunaOnly.join(", "))}</div>`;
+    }
+    if (report.mixamoOnly.length) {
+      html += `<div style="margin-top:8px;color:#88b4ff;">Mixamo only (unused)</div><div style="opacity:0.92;word-break:break-all;">${esc(report.mixamoOnly.join(", "))}</div>`;
+    }
+    el.innerHTML = html;
+    el.hidden = false;
+  },
+};
+
+window.MixamoLunaBoneObserver = MixamoLunaBoneObserver;
+
+function patchRetargetedTracksForSceneRoot(clip) {
+  for (const track of clip.tracks) {
+    const m = track.name.match(/^\.bones\[([^\]]+)\]\.(position|quaternion)$/);
+    if (m) {
+      track.name = `${m[1]}.${m[2]}`;
+    }
+  }
+}
+
+function disposeFbxHierarchy(root) {
+  root.traverse((o) => {
+    if (o.geometry) o.geometry.dispose();
+    if (o.material) {
+      const m = o.material;
+      if (Array.isArray(m)) m.forEach((x) => x.dispose());
+      else m.dispose();
+    }
+  });
+}
+
+/**
+ * Mixamo / FBX: retarget onto VRM skeleton, then play on scene mixer.
+ */
+async function playFbxMotionClip(fbxIndex, mode) {
+  const url = new URL(`animation/fbx/${fbxIndex}`, BASE).href;
+  stopMotionMixer();
+  animStatus.textContent = mode === "talk" ? "FBX (talk)…" : "FBX (idle)…";
+
+  const fbx = await fbxLoader.loadAsync(url);
+  fbx.traverse((o) => {
+    if (o.isMesh) o.visible = false;
+  });
+
+  const clipIn = fbx.animations[0];
+  if (!clipIn) {
+    disposeFbxHierarchy(fbx);
+    throw new Error("No animation in FBX");
+  }
+
+  const sourceMesh = bestSkinnedMesh(fbx);
+  const targetMesh = bestSkinnedMesh(vrm.scene);
+  if (!sourceMesh || !targetMesh) {
+    disposeFbxHierarchy(fbx);
+    throw new Error("FBX or VRM has no SkinnedMesh");
+  }
+
+  const names = buildRetargetNameMap(targetMesh, sourceMesh);
+  const boneReport = MixamoLunaBoneObserver.observe(targetMesh, sourceMesh, names);
+  window.__lunaLastBoneMap = boneReport;
+  if (boneMapDebugEnabled()) {
+    MixamoLunaBoneObserver.log(boneReport);
+    MixamoLunaBoneObserver.renderTo(boneMapPanel, boneReport);
+  } else if (boneMapPanel) {
+    boneMapPanel.hidden = true;
+  }
+
+  const mapped = Object.keys(names).length;
+  if (mapped < 8) {
+    console.warn(
+      `[VRM FBX] Only ${mapped} bones mapped; idle may look wrong. Check Mixamo export (mixamorig) vs VRM bone names.`,
+    );
+  }
+  const hipSrc =
+    findSourceBoneName(sourceMesh.skeleton.bones, "Hips") ||
+    Object.values(names).find((n) => /hips/i.test(n)) ||
+    sourceMesh.skeleton.bones[0]?.name;
+
+  let retargeted;
+  try {
+    retargeted = SkeletonUtils.retargetClip(targetMesh, sourceMesh, clipIn, {
+      names,
+      hip: hipSrc,
+      fps: 30,
+    });
+  } catch (e) {
+    disposeFbxHierarchy(fbx);
+    throw e;
+  }
+
+  patchRetargetedTracksForSceneRoot(retargeted);
+  mixer = new THREE.AnimationMixer(vrm.scene);
+  const action = mixer.clipAction(retargeted);
+  action.setLoop(THREE.LoopRepeat);
+  action.clampWhenFinished = false;
+  action.reset().play();
+  primeMixer();
+  disposeFbxHierarchy(fbx);
+
+  const label =
+    mode === "talk"
+      ? talkSelect.options[talkSelect.selectedIndex]?.text
+      : idleSelect.options[idleSelect.selectedIndex]?.text;
+  animStatus.textContent = speaking ? `Speaking — ${label || "FBX"}` : `Idle — ${label || "FBX"}`;
+}
+
+function keyToExprUrl(key) {
+  if (!key || !String(key).startsWith("expr:")) return null;
+  const index = parseInt(String(key).slice(5), 10);
+  if (Number.isNaN(index)) return null;
+  return new URL(`animation/expression/${index}`, BASE).href;
+}
+
+/**
+ * Body / locomotion VRMA.
+ * @param {"idle"|"talk"} mode - for status text only
+ */
+async function playMotionClip(key, mode) {
+  if (!vrm || !key) return;
+  const ks = String(key);
+  if (ks.startsWith("fbx:")) {
+    const idx = parseInt(ks.slice(4), 10);
+    if (Number.isNaN(idx)) throw new Error("Bad FBX key");
+    return playFbxMotionClip(idx, mode);
+  }
+
+  const url = keyToMotionUrl(key);
+  if (!url) throw new Error("No URL for motion clip");
+
+  stopMotionMixer();
+  animStatus.textContent = mode === "talk" ? "Talking clip…" : "Idle clip…";
+
+  const gltfAnim = await loader.loadAsync(url);
+  const vrmAnimation = gltfAnim.userData.vrmAnimations?.[0];
+  if (!vrmAnimation) throw new Error("No vrmAnimations[0] in VRMA");
+
+  const clip = createVRMAnimationClip(vrmAnimation, vrm);
+  mixer = new THREE.AnimationMixer(vrm.scene);
+  const action = mixer.clipAction(clip);
+  action.setLoop(THREE.LoopRepeat);
+  action.clampWhenFinished = false;
+  action.reset().play();
+  primeMixer();
+
+  const label =
+    mode === "talk"
+      ? talkSelect.options[talkSelect.selectedIndex]?.text
+      : idleSelect.options[idleSelect.selectedIndex]?.text;
+  animStatus.textContent = speaking
+    ? `Speaking — ${label || "clip"}`
+    : `Idle — ${label || "clip"}`;
+}
+
+/**
+ * Expression / face layer (optional). Uses a second mixer on the same scene.
+ */
+async function playExpressionClip(key, mode) {
+  stopExpressionMixer();
+  if (!vrm || !key) return;
+  const url = keyToExprUrl(key);
+  if (!url) return;
+
+  const gltfAnim = await loader.loadAsync(url);
+  const vrmAnimation = gltfAnim.userData.vrmAnimations?.[0];
+  if (!vrmAnimation) {
+    console.warn("No vrmAnimations[0] in expression VRMA");
+    return;
+  }
+
+  const clip = createVRMAnimationClip(vrmAnimation, vrm);
+  exprMixer = new THREE.AnimationMixer(vrm.scene);
+  const action = exprMixer.clipAction(clip);
+  action.setLoop(THREE.LoopRepeat);
+  action.clampWhenFinished = false;
+  action.reset().play();
+  primeExprMixer();
+}
+
+async function applyIdleClip() {
+  if (!vrm || speaking) return;
+  const key = idleSelect.value;
+  if (!key) return;
+  errEl.hidden = true;
+  try {
+    await playMotionClip(key, "idle");
+  } catch (e) {
+    console.warn(e);
+    errEl.hidden = false;
+    errEl.textContent = String(e?.message || e);
+    animStatus.textContent = "Idle clip failed.";
+    return;
+  }
+  try {
+    await playExpressionClip(exprIdleSelect.value, "idle");
+  } catch (e) {
+    console.warn("Expression idle:", e);
+  }
+}
+
+async function applyTalkClip() {
+  if (!vrm) return;
+  const key = talkSelect.value || idleSelect.value;
+  if (!key) return;
+  errEl.hidden = true;
+  try {
+    await playMotionClip(key, "talk");
+  } catch (e) {
+    console.warn(e);
+    await applyIdleClip();
+    return;
+  }
+  try {
+    await playExpressionClip(exprTalkSelect.value || exprIdleSelect.value, "talk");
+  } catch (e) {
+    console.warn("Expression talk:", e);
+  }
+}
+
+async function refreshExpressionLayer() {
+  if (!vrm) return;
+  errEl.hidden = true;
+  try {
+    if (speaking) {
+      await playExpressionClip(exprTalkSelect.value || exprIdleSelect.value, "talk");
+    } else {
+      await playExpressionClip(exprIdleSelect.value, "idle");
+    }
+  } catch (e) {
+    console.warn(e);
+  }
+}
+
+function motionItems() {
+  return animationList.motion?.length ? animationList.motion : animationList.local || [];
+}
+
+/** VRMA vs FBX: keys must match /vrm/animation/motion/<n> vs /vrm/animation/fbx/<n>. */
+function inferMotionKind(item) {
+  if (!item) return "vrma";
+  if (item.kind === "fbx" || item.kind === "vrma") return item.kind;
+  const n = String(item.name || "").toLowerCase();
+  if (n.endsWith(".fbx")) return "fbx";
+  return "vrma";
+}
+
+function motionOptionValue(item) {
+  if (!item) return "";
+  const kind = inferMotionKind(item);
+  if (kind === "fbx") return `fbx:${item.index}`;
+  return `vrma:${item.index}`;
+}
+
+function fillClipSelect(selectEl) {
+  selectEl.innerHTML = "";
+  const motion = motionItems();
+  const { sample } = animationList;
+  for (const item of motion) {
+    const opt = document.createElement("option");
+    opt.value = motionOptionValue(item);
+    opt.textContent = item.label || item.stem || item.name;
+    opt.dataset.motionName = item.name || "";
+    selectEl.appendChild(opt);
+  }
+  if (sample?.url) {
+    const opt = document.createElement("option");
+    opt.value = animKeyForSample();
+    opt.textContent = sample.label || "Sample (CDN)";
+    selectEl.appendChild(opt);
+  }
+}
+
+function fillExprSelect(selectEl) {
+  selectEl.innerHTML = "";
+  const none = document.createElement("option");
+  none.value = "";
+  none.textContent = "— None —";
+  selectEl.appendChild(none);
+  const expr = animationList.expression || [];
+  for (const item of expr) {
+    const opt = document.createElement("option");
+    opt.value = animKeyForExprIndex(item.index);
+    opt.textContent = item.label || item.name;
+    selectEl.appendChild(opt);
+  }
+}
+
+function defaultMotionKeys() {
+  const motion = motionItems();
+  const { sample } = animationList;
+  const keys = [];
+  for (const item of motion) {
+    keys.push(motionOptionValue(item));
+  }
+  if (sample?.url) keys.push(animKeyForSample());
+  const idleKey = keys[0] || "";
+  const talkKey = keys.length > 1 ? keys[1] : keys[0] || "";
+  return { idleKey, talkKey };
+}
+
+function defaultExprKeys() {
+  const expr = animationList.expression || [];
+  if (expr.length === 0) return { idleKey: "", talkKey: "" };
+  const k0 = animKeyForExprIndex(expr[0].index);
+  return {
+    idleKey: expr.length > 1 ? animKeyForExprIndex(expr[1].index) : k0,
+    talkKey: k0,
+  };
+}
+
+function populateClipSelects() {
+  fillClipSelect(idleSelect);
+  fillClipSelect(talkSelect);
+  fillExprSelect(exprIdleSelect);
+  fillExprSelect(exprTalkSelect);
+  const { idleKey, talkKey } = defaultMotionKeys();
+  if (idleKey) {
+    idleSelect.value = idleKey;
+    talkSelect.value = talkKey || idleKey;
+  }
+  const ek = defaultExprKeys();
+  if (ek.idleKey) exprIdleSelect.value = ek.idleKey;
+  if (ek.talkKey) exprTalkSelect.value = ek.talkKey;
+}
+
+async function fetchAnimationList() {
+  const r = await fetch(API_ANIMATIONS);
+  if (!r.ok) throw new Error("Failed to load /vrm/api/animations");
+  return r.json();
+}
+
+function populateVoices() {
+  const list = speechSynthesis.getVoices();
+  ttsVoice.innerHTML = "";
+  for (const v of list) {
+    const opt = document.createElement("option");
+    opt.value = v.voiceURI || v.name;
+    opt.textContent = `${v.name} (${v.lang || "?"})`;
+    opt.dataset.name = v.name;
+    ttsVoice.appendChild(opt);
+  }
+}
+
+/** Dedupe Twitch lines when both / and /vrm/ poll the same events. */
+const spokenTwitchEventIds = new Set();
+
+function plainTextForVrmSpeech(raw) {
+  if (!raw || typeof raw !== "string") return "";
+  let s = raw;
+  s = s.replace(/```[\s\S]*?```/g, " ");
+  s = s.replace(/`([^`]+)`/g, "$1");
+  s = s.replace(/\*\*([^*]+)\*\*/g, "$1");
+  s = s.replace(/\[([^\]]+)\]\([^)]+\)/g, "$1");
+  s = s.replace(/\s+/g, " ").trim();
+  return s.slice(0, 8000);
+}
+
+function speakBrowserTts(text) {
+  const t = (text || "").trim();
+  if (!t) return;
+
+  stopEdgePlayback();
+  speakGen += 1;
+  speechSynthesis.cancel();
+  lipAudioMode = false;
+
+  lipSync.text = t;
+  lipSync.t0 = performance.now();
+  lipSync.durationSec = estimateSpeechDurationSec(t);
+  lipSync.phase = 0;
+  for (const k of LIP_NAMES) lipSync.smooth[k] = 0;
+
+  const u = new SpeechSynthesisUtterance(t);
+  const voices = speechSynthesis.getVoices();
+  const chosen = ttsVoice.selectedOptions[0];
+  if (chosen?.value) {
+    const match =
+      voices.find((v) => v.voiceURI === chosen.value) ||
+      voices.find((v) => v.name === chosen.dataset.name);
+    if (match) u.voice = match;
+  }
+
+  u.onstart = () => {
+    speaking = true;
+    lipSync.t0 = performance.now();
+    applyTalkClip();
+  };
+  u.onend = () => {
+    speaking = false;
+    clearLipMouth();
+    applyIdleClip();
+  };
+  u.onerror = () => {
+    speaking = false;
+    clearLipMouth();
+    applyIdleClip();
+  };
+
+  speechSynthesis.speak(u);
+}
+
+async function speakEdgeTts(text, opts = {}) {
+  const t = (text || "").trim();
+  if (!t) return;
+
+  let twitchIdReserved = null;
+  const tid = opts.twitchEventId;
+  if (tid != null && tid !== "") {
+    const idn = typeof tid === "number" ? tid : parseInt(String(tid), 10);
+    if (!Number.isNaN(idn)) {
+      if (spokenTwitchEventIds.has(idn)) return;
+      if (spokenTwitchEventIds.size > 250) spokenTwitchEventIds.clear();
+      spokenTwitchEventIds.add(idn);
+      twitchIdReserved = idn;
+    }
+  }
+
+  speechSynthesis.cancel();
+  stopEdgePlayback();
+  const myGen = ++speakGen;
+
+  lipSync.text = t;
+  lipAudioMode = false;
+  errEl.hidden = true;
+
+  try {
+    const r = await fetch(API_TTS, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: t }),
+    });
+    if (myGen !== speakGen) return;
+    if (!r.ok) {
+      let msg = r.statusText || "TTS request failed";
+      try {
+        const j = await r.json();
+        if (j.hint) msg = `${j.error || msg}: ${j.hint}`;
+        else if (j.error) msg = j.error;
+      } catch {
+        /* */
+      }
+      throw new Error(msg);
+    }
+    const ab = await r.arrayBuffer();
+    if (myGen !== speakGen) return;
+
+    if (!edgeAudioCtx) edgeAudioCtx = new AudioContext();
+    if (edgeAudioCtx.state === "suspended") await edgeAudioCtx.resume();
+    const audioBuf = await edgeAudioCtx.decodeAudioData(ab.slice(0));
+    if (myGen !== speakGen) return;
+
+    if (!edgeAnalyser) {
+      edgeAnalyser = edgeAudioCtx.createAnalyser();
+      edgeAnalyser.fftSize = 512;
+      edgeAnalyser.smoothingTimeConstant = 0.72;
+    }
+
+    const src = edgeAudioCtx.createBufferSource();
+    src.buffer = audioBuf;
+    src.connect(edgeAnalyser);
+    edgeAnalyser.connect(edgeAudioCtx.destination);
+
+    await applyTalkClip();
+    if (myGen !== speakGen) return;
+
+    speaking = true;
+    lipAudioMode = true;
+    lipAmpSmooth = 0;
+    edgePlaybackSource = src;
+
+    src.onended = () => {
+      if (myGen !== speakGen) return;
+      edgePlaybackSource = null;
+      speaking = false;
+      lipAudioMode = false;
+      clearLipMouth();
+      applyIdleClip();
+    };
+
+    src.start(0);
+  } catch (e) {
+    console.warn(e);
+    if (twitchIdReserved != null) spokenTwitchEventIds.delete(twitchIdReserved);
+    if (myGen !== speakGen) return;
+    speaking = false;
+    lipAudioMode = false;
+    edgePlaybackSource = null;
+    clearLipMouth();
+    applyIdleClip();
+    errEl.hidden = false;
+    errEl.textContent = String(e?.message || e);
+  }
+}
+
+function frameCameraToVrm() {
+  if (!vrm) return;
+  const box = new THREE.Box3().setFromObject(vrm.scene);
+  const size = box.getSize(new THREE.Vector3());
+  const ctr = box.getCenter(new THREE.Vector3());
+  controls.target.copy(ctr);
+  const dist = Math.max(size.x, size.y, size.z) * 1.8 || 2;
+  camera.position.set(ctr.x, ctr.y + size.y * 0.15, ctr.z + dist);
+  camera.near = Math.max(0.01, dist / 100);
+  camera.far = dist * 50;
+  camera.updateProjectionMatrix();
+  controls.update();
+}
+
+if (boneMapToggle) {
+  const saved = localStorage.getItem("lunaVrmBoneMap");
+  boneMapToggle.checked = saved === "1" || (saved !== "0" && BONE_MAP_URL);
+  boneMapToggle.addEventListener("change", () => {
+    localStorage.setItem("lunaVrmBoneMap", boneMapToggle.checked ? "1" : "0");
+    if (window.__lunaLastBoneMap && boneMapPanel) {
+      if (boneMapToggle.checked) MixamoLunaBoneObserver.renderTo(boneMapPanel, window.__lunaLastBoneMap);
+      else boneMapPanel.hidden = true;
+    }
+  });
+}
+
+settingsToggle.addEventListener("click", () => {
+  const open = !settingsPanel.classList.contains("open");
+  settingsPanel.classList.toggle("open", open);
+  settingsToggle.setAttribute("aria-expanded", open ? "true" : "false");
+});
+
+document.addEventListener("click", (ev) => {
+  if (!settingsPanel.classList.contains("open")) return;
+  if (ev.target === settingsToggle || settingsToggle.contains(ev.target)) return;
+  if (settingsPanel.contains(ev.target)) return;
+  settingsPanel.classList.remove("open");
+  settingsToggle.setAttribute("aria-expanded", "false");
+});
+
+idleSelect.addEventListener("change", () => {
+  if (!speaking) applyIdleClip();
+});
+
+talkSelect.addEventListener("change", () => {
+  if (speaking) applyTalkClip();
+});
+
+exprIdleSelect.addEventListener("change", () => {
+  if (!speaking) refreshExpressionLayer();
+});
+
+exprTalkSelect.addEventListener("change", () => {
+  if (speaking) refreshExpressionLayer();
+});
+
+function stopAllSpeech() {
+  speakGen += 1;
+  speechSynthesis.cancel();
+  stopEdgePlayback();
+  speaking = false;
+  lipAudioMode = false;
+  clearLipMouth();
+  applyIdleClip();
+}
+
+btnSpeak.addEventListener("click", () => {
+  if (ttsEngine?.value === "edge") speakEdgeTts(ttsText.value);
+  else speakBrowserTts(ttsText.value);
+});
+
+btnStopSpeech.addEventListener("click", () => {
+  stopAllSpeech();
+});
+
+ttsEngine?.addEventListener("change", syncTtsEngineUi);
+
+speechSynthesis.addEventListener("voiceschanged", populateVoices);
+
+try {
+  const lunaVrmBc = new BroadcastChannel("luna-vrm-speech");
+  lunaVrmBc.onmessage = (ev) => {
+    const d = ev.data || {};
+    if (d.type === "speak" && typeof d.text === "string") {
+      if (ttsText) ttsText.value = d.text;
+      const optEdge = ttsEngine?.querySelector?.('option[value="edge"]');
+      const edgeDisabled = optEdge?.disabled;
+      const wantEdge = d.engine !== "browser" && !edgeDisabled;
+      if (wantEdge) {
+        ttsEngine.value = "edge";
+        syncTtsEngineUi();
+        speakEdgeTts(d.text, { twitchEventId: d.twitchEventId });
+      } else {
+        ttsEngine.value = "browser";
+        syncTtsEngineUi();
+        speakBrowserTts(d.text);
+      }
+    } else if (d.type === "stop") {
+      stopAllSpeech();
+    }
+  };
+} catch {
+  /* no BroadcastChannel */
+}
+
+let twitchSinceVrm = 0;
+async function pollTwitchForVrm() {
+  try {
+    const res = await fetch(new URL("/api/twitch/pending?since=" + twitchSinceVrm, window.location.origin).href);
+    if (!res.ok) return;
+    const data = await res.json();
+    const events = data.events || [];
+    for (const ev of events) {
+      if (ev.id > twitchSinceVrm) twitchSinceVrm = ev.id;
+      if (!ev.reply) continue;
+      const raw = String(ev.reply);
+      const tr = raw.trim();
+      if (tr.startsWith("⚠") || tr.startsWith("❌")) continue;
+      const plain = plainTextForVrmSpeech(raw);
+      if (!plain.trim()) continue;
+      speakEdgeTts(plain, { twitchEventId: ev.id });
+    }
+  } catch {
+    /* */
+  }
+}
+setInterval(pollTwitchForVrm, 2500);
+pollTwitchForVrm();
+
+(async () => {
+  let status = {};
+  try {
+    status = await (await fetch(new URL("api/status", BASE).href)).json();
+    pathHint.textContent = status.path || "(unknown)";
+    if (typeof status.edge_tts_voice === "string" && ttsEdgeVoiceName) {
+      ttsEdgeVoiceName.textContent = status.edge_tts_voice || "—";
+    }
+    if (status.edge_tts === false && ttsEngine) {
+      const optEdge = ttsEngine.querySelector('option[value="edge"]');
+      if (optEdge) optEdge.disabled = true;
+      if (ttsEngine.value === "edge") ttsEngine.value = "browser";
+    }
+    syncTtsEngineUi();
+    if (!status.ok) {
+      errEl.hidden = false;
+      errEl.textContent =
+        "File missing. Set LUNA_VRM_PATH or add data/Luna.vrm — default is ~/Downloads/Luna.vrm";
+    }
+  } catch {
+    pathHint.textContent = MODEL_URL;
+    syncTtsEngineUi();
+  }
+
+  try {
+    animationList = await fetchAnimationList();
+    populateClipSelects();
+    const mc = motionItems().length;
+    const ec = (animationList.expression || []).length;
+    const rootHint = animationList.animations_root ? ` · ${animationList.animations_root}` : "";
+    if (mc) {
+      animStatus.textContent = `${mc} body clip(s)${ec ? `, ${ec} expression` : ""}${rootHint}`;
+    } else {
+      animStatus.textContent = `No body clips (.vrma / Mixamo .fbx) in Luna animations/ — using CDN sample if listed.${rootHint}`;
+    }
+  } catch (e) {
+    animStatus.textContent = "Could not load animation list.";
+    console.warn(e);
+  }
+
+  populateVoices();
+  setTimeout(populateVoices, 400);
+
+  try {
+    const gltf = await loader.loadAsync(MODEL_URL);
+    vrm = gltf.userData.vrm;
+    if (!vrm) {
+      errEl.hidden = false;
+      errEl.textContent = "Loaded GLTF but no VRM extension — is this a .vrm file?";
+      return;
+    }
+
+    try {
+      VRMUtils.removeUnnecessaryVertices(vrm.scene);
+      VRMUtils.removeUnnecessaryJoints(vrm.scene);
+    } catch {
+      /* */
+    }
+    vrm.scene.traverse((o) => {
+      o.frustumCulled = false;
+    });
+
+    try {
+      vrm.humanoid?.resetNormalizedPose?.();
+    } catch {
+      /* */
+    }
+
+    refreshMouthOpenExprName();
+
+    if (vrm.lookAt) {
+      const lap = new VRMLookAtQuaternionProxy(vrm.lookAt);
+      lap.name = "lookAtQuaternionProxy";
+      vrm.scene.add(lap);
+    }
+
+    scene.add(vrm.scene);
+    frameCameraToVrm();
+
+    if (idleSelect.options.length > 0) {
+      await applyIdleClip();
+    } else {
+      animStatus.textContent =
+        "Add .vrma or Mixamo .fbx under Luna animations/ (or LUNA_ANIMATIONS_DIR) to animate.";
+    }
+  } catch (e) {
+    errEl.hidden = false;
+    errEl.textContent = String(e && e.message ? e.message : e);
+  }
+})();
+
+function resize() {
+  const w = canvas.clientWidth;
+  const h = canvas.clientHeight;
+  camera.aspect = w / Math.max(h, 1);
+  camera.updateProjectionMatrix();
+  renderer.setSize(w, h, false);
+}
+window.addEventListener("resize", resize);
+resize();
+
+function animate() {
+  requestAnimationFrame(animate);
+  const delta = clock.getDelta();
+  if (mixer) mixer.update(delta);
+  if (exprMixer) exprMixer.update(delta);
+  if (speaking) {
+    if (lipAudioMode) updateLipSyncFromAudio(delta);
+    else updateLipSync(delta);
+  }
+  if (vrm) vrm.update(delta);
+  renderer.render(scene, camera);
+}
+animate();
+</script>
+</body>
+</html>

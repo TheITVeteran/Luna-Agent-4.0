@@ -15,7 +15,7 @@ def _get_bot_deps():
     return {
         "whisper_translate": getattr(_bot, "_whisper_translate", None),
         "ollama_chat": getattr(_bot, "ollama_chat", None),
-        "OLLAMA_MODEL": getattr(_bot, "OLLAMA_MODEL", "llama3.2"),
+        "OLLAMA_MODEL": getattr(_bot, "OLLAMA_MODEL", "llama3.2:latest"),
     }
 
 
@@ -31,7 +31,7 @@ def api_translate_text():
     """Translate arbitrary text to English."""
     deps = _get_bot_deps()
     ollama = deps.get("ollama_chat")
-    model = deps.get("OLLAMA_MODEL") or "llama3.2"
+    model = deps.get("OLLAMA_MODEL") or "llama3.2:latest"
     if not ollama:
         return jsonify({"error": "Translation not available"}), 503
     data = request.get_json(silent=True) or {}
@@ -61,7 +61,7 @@ def api_translate_audio():
     deps = _get_bot_deps()
     fn = deps.get("whisper_translate")
     ollama = deps.get("ollama_chat")
-    model = deps.get("OLLAMA_MODEL") or "llama3.2"
+    model = deps.get("OLLAMA_MODEL") or "llama3.2:latest"
     if not fn:
         return jsonify({"error": "Audio translation not available"}), 503
     path = None

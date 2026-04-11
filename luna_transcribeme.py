@@ -21,7 +21,7 @@ def _get_bot_deps():
         "add_reminder": getattr(_bot, "add_reminder", None),
         "_parse_time": getattr(_bot, "_parse_time", None),
         "LINKED_ID": getattr(_bot, "LINKED_ID", None),
-        "OLLAMA_MODEL": getattr(_bot, "OLLAMA_MODEL", "llama3.2"),
+        "OLLAMA_MODEL": getattr(_bot, "OLLAMA_MODEL", "llama3.2:latest"),
     }
 
 
@@ -160,7 +160,7 @@ def api_ask():
     """Ask a question (GPT-style) → get answer."""
     deps = _get_bot_deps()
     ollama = deps.get("ollama_chat")
-    model = deps.get("OLLAMA_MODEL") or "llama3.2"
+    model = deps.get("OLLAMA_MODEL") or "llama3.2:latest"
     if not ollama:
         return jsonify({"error": "Ask not available"}), 503
     try:

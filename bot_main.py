@@ -3,7 +3,7 @@ Luna 4.5 — compact rewrite of bot.py
 Discord bot + Web UI + Ollama chat + Shadow commands + TTS/STT + automation
 Run: python bot.py
 """
-import asyncio, base64, concurrent.futures, html, io, json, os, random, re, shutil, subprocess, sys
+import asyncio, base64, concurrent.futures, html, io, json, os, queue, random, re, shutil, subprocess, sys
 import tempfile, threading, time, urllib.parse, urllib.request, urllib.error
 import uuid, webbrowser, xml.etree.ElementTree as ET
 from collections import deque
@@ -25,6 +25,12 @@ from luna_profile import (get_profile_prompt, get_profile, set_profile_field,
     clear_profile, PROFILE_FIELDS, merge_profiles)
 from luna_conversation import get_recent_conversation, append_exchange, merge_conversations
 import luna_social
+try:
+    from luna_twitch import run_twitch_irc_reader, send_twitch_chat_message
+except ImportError:
+    run_twitch_irc_reader = None
+    def send_twitch_chat_message(_msg: str) -> bool:
+        return False
 try:
     from luna_security import run_full_scan, scan_file as security_scan_file
 except ImportError:
@@ -99,6 +105,13 @@ FB_PROFILE_DIR   = _env("FACEBOOK_PROFILE_DIR", os.path.join(_DATA, "facebook_pr
 YT_CHANNEL_ID    = _env("YOUTUBE_CHANNEL_ID", "UCqIjEHOABb8fwbKbjDhVRuA")
 YT_CHANNEL_URL   = _env("YOUTUBE_CHANNEL_URL")
 YT_FEED_URL      = f"https://www.youtube.com/feeds/videos.xml?channel_id={YT_CHANNEL_ID}"
+# Twitch: IRC (see luna_twitch.py). Luna's login is solosluna. Token scopes: chat:read, chat:edit (send).
+TWITCH_CHANNEL = _env("TWITCH_CHANNEL", "solonaras").strip().lstrip("#").lower()
+TWITCH_BOT_USERNAME = _env("TWITCH_BOT_USERNAME", "solosluna").strip().lower()  # Luna on Twitch
+TWITCH_OAUTH_TOKEN = _env("TWITCH_OAUTH_TOKEN", "").strip()
+TWITCH_CHAT_ENABLED = _env("TWITCH_CHAT_ENABLED", "1").strip().lower() not in ("0", "false", "no", "off")
+TWITCH_SEND_CHAT = _env("TWITCH_SEND_CHAT", "1").strip().lower() not in ("0", "false", "no", "off")
+TWITCH_TTS = _env("TWITCH_TTS", "1").strip().lower() not in ("0", "false", "no", "off")
 # Playwright: !yt_comment, !yt_like, and web “YT Like” share this one profile (one Google account). X/IG/FB/WhatsApp/etc. use their own *_PROFILE_DIR.
 YT_PROFILE_DIR   = _env("YOUTUBE_PROFILE_DIR", os.path.join(_DATA, "youtube_profile"))
 # Used only for sign-in hints / messages — !yt_comment and !yt_like use YOUTUBE_PROFILE_DIR cookies.
@@ -386,6 +399,11 @@ _wa_lock         = threading.Lock()
 _discord_web_lock = threading.Lock()
 _msg_lock        = threading.Lock()
 _shared_songs_lock = threading.Lock()
+_twitch_lock = threading.Lock()
+_twitch_ui_events: list[dict] = []
+_twitch_event_id: int = 0
+_twitch_stop_event = threading.Event()
+_twitch_msg_queue: queue.Queue = queue.Queue(maxsize=500)
 _pending_feedback_lock = threading.Lock()
 _working_lock    = threading.Lock()
 _knowledge_lock  = threading.Lock()
@@ -642,8 +660,17 @@ def _prepare_main_chat_system(
     If *fast* is None, uses LUNA_CHAT_FAST env. Otherwise forces compact (True) or full (False).
     """
     use_fast = _chat_fast_enabled() if fast is None else fast
+    twitch = (user_message or "").strip().startswith("[Twitch chat]")
+    twitch_note = ""
+    if twitch:
+        twitch_note = (
+            "\n\n## Twitch (public chat)\n"
+            "You are replying in live Twitch chat. Write plain spoken lines only. "
+            "Never prefix with *private message from me*, *private message from anyone*, or similar — "
+            "those are wrong here; speak directly."
+        )
     if use_fast:
-        return LUNA_CHAT_COMPACT_INJECTION.strip()
+        return LUNA_CHAT_COMPACT_INJECTION.strip() + twitch_note
     # Instruction / full mode — single extra cost is optional intuition/existential (see _build_luna_chat_system).
     system = _build_luna_chat_system(scope)
     q = (user_message or "").strip()
@@ -652,7 +679,7 @@ def _prepare_main_chat_system(
         if rag_results:
             rag_text = "\n".join(f"- {r['title']}: {r.get('snippet', '')[:150]}" for r in rag_results)
             system = system + "\n\n## Relevant knowledge\n" + rag_text[:1200]
-    return system + _about_me_context_suffix(user_message)
+    return system + _about_me_context_suffix(user_message) + twitch_note
 
 def _build_luna_chat_system(scope: str | None) -> str:
     """Build full system prompt for Luna chat (capabilities + nudges + biology)."""
@@ -3636,14 +3663,17 @@ def _record_shared_song(url: str) -> None:
             data = dict(by_ts[-50:])
         _save_json(_SHARED_SONGS_FILE, data)
 
-def _get_recently_shared_ids(max_days: float = 7.0) -> set[str]:
-    """Video ids shared in the last max_days (so we prefer not to pick them)."""
-    data = _load_json(_SHARED_SONGS_FILE, {})
-    cutoff = time.time() - (max_days * 24 * 3600)
-    return {vid for vid, ts in data.items() if float(ts) >= cutoff}
+def _get_last_shared_video_id() -> str | None:
+    """Video id from the most recent successful share (for sequential Share Song rotation)."""
+    with _shared_songs_lock:
+        data = _load_json(_SHARED_SONGS_FILE, {})
+    if not data:
+        return None
+    vid, _ = max(data.items(), key=lambda x: float(x[1]))
+    return vid or None
 
-def _get_random_channel_song() -> tuple[bool, dict | str]:
-    """Pick a song from the channel feed, preferring one not shared recently."""
+def _get_next_channel_song() -> tuple[bool, dict | str]:
+    """Pick the next song in channel feed order after the last shared video (newest-first feed; wraps)."""
     try:
         req = urllib.request.Request(YT_FEED_URL, headers={"User-Agent": "Mozilla/5.0"})
         with urllib.request.urlopen(req, timeout=20) as r:
@@ -3657,12 +3687,15 @@ def _get_random_channel_song() -> tuple[bool, dict | str]:
             link = (link_el.attrib.get("href","") if link_el is not None else "") or (f"https://youtu.be/{vid}" if vid else "")
             if title and link: songs.append({"title": title, "url": link, "video_id": vid})
         if not songs: return False, "No songs in channel feed."
-        recent = _get_recently_shared_ids()
-        not_recent = [s for s in songs if s.get("video_id") and s["video_id"] not in recent]
-        if not_recent:
-            chosen = random.choice(not_recent)
+        last_vid = _get_last_shared_video_id()
+        if not last_vid:
+            chosen = songs[0]
         else:
-            chosen = random.choice(songs)
+            idx = next((i for i, s in enumerate(songs) if s.get("video_id") == last_vid), None)
+            if idx is None:
+                chosen = songs[0]
+            else:
+                chosen = songs[(idx + 1) % len(songs)]
         return True, {"title": chosen["title"], "url": chosen["url"]}
     except Exception as e:
         return False, f"Could not load YouTube feed: {e}"
@@ -4878,7 +4911,7 @@ def _build_x_msg(title: str, url: str) -> str:
     return random.choice(templates)
 
 def _run_x_share() -> tuple[bool, str]:
-    ok, song = _get_random_channel_song()
+    ok, song = _get_next_channel_song()
     if not ok: return False, str(song)
     if not _x_lock.acquire(blocking=False): return False, "X share already running."
     try:
@@ -5177,7 +5210,7 @@ def _build_fb_msg(title: str, url: str) -> str:
     ])
 
 def _run_fb_share() -> tuple[bool, str]:
-    ok, song = _get_random_channel_song()
+    ok, song = _get_next_channel_song()
     if not ok: return False, str(song)
     if not _fb_lock.acquire(blocking=False): return False, "Facebook share already running."
     pw = None
@@ -8960,6 +8993,17 @@ except Exception as _vrm_err:
 # Rate limiter
 _rate_hits: dict[str, list] = {}
 
+# VRM viewer tab POSTs /api/vrm-presence while open — skip server speaker TTS (web + Twitch) to avoid doubling with browser Edge TTS.
+_VRM_PRESENCE_TS: float = 0.0
+
+
+def _vrm_presence_recent(max_age: float = 16.0) -> bool:
+    global _VRM_PRESENCE_TS
+    if _VRM_PRESENCE_TS <= 0:
+        return False
+    return (time.time() - _VRM_PRESENCE_TS) < max_age
+
+
 def _rate_ok(ip: str, limit: int = 20, window: int = 60) -> bool:
     now = time.time()
     hits = [t for t in _rate_hits.get(ip, []) if t > now - window]
@@ -9698,77 +9742,121 @@ def serve_icon_512():
 
 # ── Main chat endpoint ───────────────────────────────────────────────────────
 
-@web.route("/api/chat", methods=["POST"])
-def api_chat():
+def _strip_luna_tags_for_twitch(text: str) -> str:
+    """Remove [EMOTION] tags, Discord-style *private message* lines, and flatten for Twitch / TTS."""
+    if not text:
+        return ""
+    t = text.strip()
+    # Model sometimes echoes Discord DM formatting — never show this on Twitch
+    t = re.sub(r"(?is)\*private message from [^*]+\*\s*:?\s*", "", t)
+    t = re.sub(r"\[[A-Za-z][A-Za-z0-9_]*\]\s*", "", t)
+    t = re.sub(r"\*\*([^*]+)\*\*", r"\1", t)
+    t = re.sub(r"\s+", " ", t).strip()
+    return t[:500]
+
+def _tts_for_chat_source(reply: str, chat_source: str) -> None:
+    """Speak Luna's reply on the server (system audio). Skip while /vrm/ pings /api/vrm-presence (browser plays Edge TTS)."""
+    if _vrm_presence_recent():
+        return
+    if chat_source == "twitch" and not TWITCH_TTS:
+        return
+    spoken = _strip_luna_tags_for_twitch(reply) if chat_source == "twitch" else reply
+    _play_reply_tts(spoken)
+
+def _execute_chat_turn(scope: str, msg: str, data: dict | None = None, *, chat_source: str = "web") -> dict:
+    """Shared chat logic for web UI and Twitch reader. Returns a dict with at least `reply` on success."""
     global _last_user_activity
     _last_user_activity = time.time()
-    ip = request.remote_addr or "unknown"
-    if not _rate_ok(ip):
-        return jsonify({"error": "Too many requests. Slow down."}), 429
-    data = request.get_json(force=True, silent=True) or {}
-    msg = (data.get("message") or "").strip()
-    if not msg: return jsonify({"error": "No message"}), 400
-    scope = LINKED_SCOPE or "web"
+    data = data or {}
     biology_satisfy("connection", 0.15)
 
-    # Pending identity file save
-    pending = _pending_file_update.pop(scope, None)
+    def _tts(reply: str) -> None:
+        _tts_for_chat_source(reply, chat_source)
+
+    def _store_assistant(assistant: str) -> str:
+        a = assistant if isinstance(assistant, str) else str(assistant)
+        if chat_source == "twitch":
+            a = _strip_luna_tags_for_twitch(a)
+        append_exchange(scope, msg, a)
+        return a
+
+    pending = _pending_file_update.pop(scope, None) if chat_source == "web" else None
     if pending:
         path = {"SOUL": _SOUL_PATH, "TOOLS": _TOOLS_PATH, "OBJECTIVES": _OBJECTIVES_PATH}.get(pending)
         if path:
             try: _write_file(path, msg); _invalidate_identity()
-            except Exception as e: pass
+            except Exception: pass
             reply = f"Saved to **{pending}.md**."
-            append_exchange(scope, msg, reply); _play_reply_tts(reply)
-            return jsonify({"reply": reply})
+            reply = _store_assistant(reply)
+            _tts(reply)
+            return {"reply": reply}
 
-    # Shadow command
     rest = strip_shadow_prefix(msg)
     if rest is not None:
         reply = shadow_run(rest, scope, _parse_command, _run_cmd, log_fn=_log_action, user_message=msg)
         if isinstance(reply, dict) and reply.get("need_feedback"):
-            return jsonify({"reply": reply.get("message") or "Luna is asking…", "need_feedback": True,
-                            "request_id": reply["request_id"], "message": reply["message"], "options": reply.get("options")})
-        append_exchange(scope, msg, reply); _play_reply_tts(reply)
-        return jsonify({"reply": reply})
+            if chat_source == "twitch":
+                r2 = reply.get("message") or "Luna is asking…"
+                r2 = _store_assistant(r2)
+                _tts(r2)
+                return {"reply": r2}
+            return {
+                "reply": reply.get("message") or "Luna is asking…",
+                "need_feedback": True,
+                "request_id": reply["request_id"],
+                "message": reply["message"],
+                "options": reply.get("options"),
+            }
+        reply = _store_assistant(reply)
+        _tts(reply)
+        return {"reply": reply}
 
-    # ! commands
     if msg.startswith("!"):
         reply = _handle_bang(msg, scope)
-        append_exchange(scope, msg, reply)
+        reply = _store_assistant(reply)
         _bang0 = (msg.split(None, 1)[0] or "").lower()
         if _bang0 in ("!briefing", "!analytics_screen", "!dashboard_read", "!read_dashboard"):
-            _play_reply_tts(reply)
-        return jsonify({"reply": reply})
+            _tts(reply)
+        return {"reply": reply}
 
-    # Retry
     if _is_retry(msg):
         reply = _handle_retry()
-        append_exchange(scope, msg, reply); _play_reply_tts(reply)
-        return jsonify({"reply": reply})
+        reply = _store_assistant(reply)
+        _tts(reply)
+        return {"reply": reply}
 
     fast_override = _chat_fast_from_request(data)
     use_fast = _chat_fast_enabled() if fast_override is None else fast_override
 
-    # Natural language commands — Instruction mode only (Fast = open conversation, not command routing).
     if not use_fast and _likely_command(msg):
         parsed = _parse_command(msg)
         if parsed:
             cmd, params = parsed
-            if cmd == "help": return jsonify({"reply": HELP_TEXT})
+            if cmd == "help":
+                return {"reply": HELP_TEXT}
             reply = _run_cmd(cmd, params, scope, user_message=msg)
             if isinstance(reply, dict) and reply.get("need_feedback"):
-                return jsonify({"reply": reply.get("message") or "Luna is asking…", "need_feedback": True,
-                                "request_id": reply["request_id"], "message": reply["message"], "options": reply.get("options")})
+                if chat_source == "twitch":
+                    r2 = reply.get("message") or "Luna is asking…"
+                    r2 = _store_assistant(r2)
+                    _tts(r2)
+                    return {"reply": r2}
+                return {
+                    "reply": reply.get("message") or "Luna is asking…",
+                    "need_feedback": True,
+                    "request_id": reply["request_id"],
+                    "message": reply["message"],
+                    "options": reply.get("options"),
+                }
             if reply:
                 biology_satisfy("usefulness", 0.2)
                 _log_action(cmd, params, reply if isinstance(reply, str) else str(reply))
                 _record_last_action(cmd, reply if isinstance(reply, str) else reply.get("message", ""))
-                append_exchange(scope, msg, reply); _play_reply_tts(reply)
-                return jsonify({"reply": reply})
-    # Compact before correction + chat — *fast* skips summarize LLM (extra round-trip).
+                reply = _store_assistant(reply if isinstance(reply, str) else str(reply))
+                _tts(reply)
+                return {"reply": reply}
+
     history = _compact_history(get_recent_conversation(scope, 30), fast=use_fast)
-    # Detect user corrections and learn from them
     if history:
         prev_luna = next((h["content"] for h in reversed(history) if h.get("role") == "assistant"), "")
         correction = _detect_correction(msg, prev_luna)
@@ -9777,7 +9865,6 @@ def api_chat():
 
     system = _prepare_main_chat_system(scope, msg, fast=use_fast)
 
-    # Morning briefing (proactive, once per morning)
     briefing_reply = None
     if _should_show_briefing():
         briefing_reply = _generate_morning_briefing()
@@ -9789,8 +9876,8 @@ def api_chat():
     if not reply or reply.startswith("Ollama offline"): reply = COMMAND_ONLY
     if briefing_reply:
         reply = briefing_reply + "\n\n---\n\n" + reply
-    append_exchange(scope, msg, reply)
-    # Memory/profile heuristics (no Ollama) — off the hot path.
+    reply = _store_assistant(reply)
+
     def _post_chat_memory():
         try:
             _capture_memory(scope, msg, reply)
@@ -9798,8 +9885,118 @@ def api_chat():
         except Exception:
             pass
     threading.Thread(target=_post_chat_memory, daemon=True).start()
-    _play_reply_tts(reply)
-    return jsonify({"reply": reply})
+    _tts(reply)
+    return {"reply": reply}
+
+def _twitch_enqueue_privmsg(login: str, display: str, text: str) -> None:
+    if not text or not text.strip():
+        return
+    try:
+        _twitch_msg_queue.put_nowait({"login": login, "display": display, "text": text.strip()})
+    except queue.Full:
+        pass
+
+def _twitch_worker_loop() -> None:
+    global _twitch_event_id
+    scope = LINKED_SCOPE or "web"
+    while not _twitch_stop_event.is_set():
+        try:
+            item = _twitch_msg_queue.get(timeout=1.0)
+        except queue.Empty:
+            continue
+        login = (item.get("login") or "").strip().lower()
+        display = (item.get("display") or "").strip()
+        text = (item.get("text") or "").strip()
+        if not text:
+            continue
+        if TWITCH_BOT_USERNAME and login == TWITCH_BOT_USERNAME.lower():
+            continue
+        label = display or login or "viewer"
+        msg = f"[Twitch chat] {label}: {text}"
+        try:
+            out = _execute_chat_turn(scope, msg, {}, chat_source="twitch")
+            reply = out.get("reply") or ""
+            if out.get("need_feedback") and not reply:
+                reply = out.get("message") or "Check the web UI to continue."
+            public = _strip_luna_tags_for_twitch(reply) if reply else ""
+            if TWITCH_SEND_CHAT and public:
+                send_twitch_chat_message(public)
+            with _twitch_lock:
+                _twitch_event_id += 1
+                eid = _twitch_event_id
+                _twitch_ui_events.append({
+                    "id": eid,
+                    "user": label,
+                    "text": text,
+                    "reply": public if public else reply,
+                    "ts": time.time(),
+                })
+                while len(_twitch_ui_events) > 100:
+                    _twitch_ui_events.pop(0)
+        except Exception as e:
+            with _twitch_lock:
+                _twitch_event_id += 1
+                eid = _twitch_event_id
+                _twitch_ui_events.append({
+                    "id": eid,
+                    "user": label,
+                    "text": text,
+                    "reply": f"⚠ {e}",
+                    "ts": time.time(),
+                })
+
+def _start_twitch_ingest() -> None:
+    if not TWITCH_CHAT_ENABLED or not TWITCH_OAUTH_TOKEN or not TWITCH_CHANNEL:
+        return
+    if not run_twitch_irc_reader:
+        print("[Twitch] luna_twitch not available.", flush=True)
+        return
+    threading.Thread(target=_twitch_worker_loop, daemon=True).start()
+
+    def _irc() -> None:
+        run_twitch_irc_reader(
+            TWITCH_CHANNEL,
+            TWITCH_BOT_USERNAME,
+            TWITCH_OAUTH_TOKEN,
+            _twitch_enqueue_privmsg,
+            _twitch_stop_event,
+            log=lambda m: print(m, flush=True),
+        )
+
+    threading.Thread(target=_irc, daemon=True).start()
+    print(
+        f"[Twitch] IRC #{TWITCH_CHANNEL} as {TWITCH_BOT_USERNAME} — chat replies: "
+        f"{'on' if TWITCH_SEND_CHAT else 'off'}, TTS: {'on' if TWITCH_TTS else 'off'}.",
+        flush=True,
+    )
+
+@web.route("/api/twitch/pending")
+def api_twitch_pending():
+    """UI polls for new Twitch chat lines + Luna replies. ?since=<last id seen>"""
+    try:
+        since = int(request.args.get("since", "0"))
+    except ValueError:
+        since = 0
+    with _twitch_lock:
+        events = [e for e in _twitch_ui_events if e.get("id", 0) > since]
+    return jsonify({"events": events})
+
+@web.route("/api/chat", methods=["POST"])
+def api_chat():
+    global _last_user_activity
+    _last_user_activity = time.time()
+    ip = request.remote_addr or "unknown"
+    if not _rate_ok(ip):
+        return jsonify({"error": "Too many requests. Slow down."}), 429
+    data = request.get_json(force=True, silent=True) or {}
+    msg = (data.get("message") or "").strip()
+    if not msg: return jsonify({"error": "No message"}), 400
+    scope = LINKED_SCOPE or "web"
+    out = _execute_chat_turn(scope, msg, data, chat_source="web")
+    if out.get("need_feedback"):
+        return jsonify({"reply": out.get("message") or "Luna is asking…", "need_feedback": True,
+                        "request_id": out["request_id"], "message": out["message"], "options": out.get("options")})
+    return jsonify({"reply": out.get("reply", "")})
 
 @web.route("/api/stream", methods=["POST"])
 def api_stream():
@@ -9850,6 +10047,19 @@ def api_tts():
 @web.route("/api/tts-stop", methods=["POST"])
 def api_tts_stop():
     _stop_tts(); return jsonify({"ok": True})
+
+
+@web.route("/api/vrm-presence", methods=["POST"])
+def api_vrm_presence():
+    """Called by vrm_viewer.html on an interval while the 3D tab is open."""
+    global _VRM_PRESENCE_TS
+    data = request.get_json(force=True, silent=True) or {}
+    if data.get("active") is False:
+        _VRM_PRESENCE_TS = 0.0
+    else:
+        _VRM_PRESENCE_TS = time.time()
+    return jsonify({"ok": True})
+
 
 @web.route("/api/transcribe", methods=["POST"])
 def api_transcribe():
@@ -10924,6 +11134,7 @@ def main():
     threading.Thread(target=lambda: web.run(host="127.0.0.1", port=5050, use_reloader=False, threaded=True), daemon=True).start()
     threading.Thread(target=lambda: (time.sleep(2), webbrowser.open("http://127.0.0.1:5050")), daemon=True).start()
     print("Web UI: http://127.0.0.1:5050")
+    _start_twitch_ingest()
     try:
         bot.run(DISCORD_TOKEN)
     except discord.LoginFailure:

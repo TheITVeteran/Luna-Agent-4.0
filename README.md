@@ -230,10 +230,10 @@ Toggle with the Evolve switch in Luna's Mind UI.
 **Ollama** (install from [ollama.ai](https://ollama.ai)) — used for code/Shadow (`OLLAMA_MODEL`), embeddings, vision, brain JSON, and fallbacks:
 
 ```bash
-ollama pull qwen2.5-coder:7b-instruct    # code / Shadow (OLLAMA_MODEL default)
-ollama pull qwen2.5:1.5b                 # small/fast fallback
-ollama pull nomic-embed-text             # embeddings (default)
-ollama pull granite3.2-vision            # vision (optional, for camera)
+ollama pull llama3.2:latest                  # code / Shadow (OLLAMA_MODEL default)
+ollama pull qwen2.5:1.5b                     # optional: lighter model for OLLAMA_FALLBACK_MODEL / OLLAMA_MODEL_SMALL
+ollama pull nomic-embed-text                 # embeddings (default)
+ollama pull granite3.2-vision                # vision (optional, for camera)
 ```
 
 **Luna conversation (optional local GGUF)** — the LISA-tuned model [`mradermacher/meta-llama-Meta-Llama-3-8B-Instruct-fine-tune-english-LISA-i1-GGUF`](https://huggingface.co/mradermacher/meta-llama-Meta-Llama-3-8B-Instruct-fine-tune-english-LISA-i1-GGUF) is distributed as **GGUF on Hugging Face**, not as an Ollama library model. Download a `.gguf` file (pick a quantization you can run), then:
@@ -272,7 +272,7 @@ LINKED_DISCORD_USER_ID=your_discord_user_id
 
 # Optional — defaults shown
 OLLAMA_BASE_URL=http://127.0.0.1:11434
-OLLAMA_MODEL=qwen2.5-coder:7b-instruct
+OLLAMA_MODEL=llama3.2:latest
 # OLLAMA_CHAT_MODEL defaults in bot.py to:
 # mradermacher/meta-llama-Meta-Llama-3-8B-Instruct-fine-tune-english-LISA-i1-GGUF
 OLLAMA_FALLBACK_MODEL=qwen2.5:1.5b
@@ -316,11 +316,11 @@ Web UI: **http://127.0.0.1:5050** · Discord bot connects automatically.
 | `LINKED_DISCORD_USER_ID` | required | User who gets reminders + DMs + UI-triggered actions |
 | `DISCORD_ADMIN_ID` | optional | Admin override |
 | `OLLAMA_BASE_URL` | `http://127.0.0.1:11434` | Ollama API base |
-| `OLLAMA_MODEL` | `qwen2.5-coder:7b-instruct` | Code / Shadow / heavy tasks |
+| `OLLAMA_MODEL` | `llama3.2:latest` | Code / Shadow / heavy tasks |
 | `OLLAMA_CHAT_MODEL` | `mradermacher/meta-llama-Meta-Llama-3-8B-Instruct-fine-tune-english-LISA-i1-GGUF` | **Luna conversation** label; must match for GGUF routing |
 | `LUNA_CHAT_GGUF` | — | Path to a local `.gguf` file for Luna chat (bypasses Ollama for chat) |
 | `LUNA_CHAT_GGUF_N_CTX` / `N_GPU` / `THREADS` | `8192` / `-1` / auto | llama-cpp load tuning |
-| `OLLAMA_SMALL` | `qwen2.5:1.5b` | Fast model for quick tasks |
+| `OLLAMA_SMALL` | same as `OLLAMA_MODEL` | Fast model; override with `OLLAMA_MODEL_SMALL` |
 | `OLLAMA_VISION_MODEL` | `granite3.2-vision` | Vision / camera |
 | `YOUTUBE_API_KEY` | optional | Enables richer YouTube channel traction analytics |
 | `YOUTUBE_CHANNEL_ID` | existing default | Channel analyzed by `!yt_analytics` and channel-song workflows |
