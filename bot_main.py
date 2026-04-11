@@ -21,7 +21,6 @@ import celine
 from luna_memory import (get_memory_prompt, get_core_memories,
     get_short_term_memories, get_long_term_memories, add_memory, add_core_memory,
     clear_memories, clear_all_memories, merge_memories)
-from luna_brain import brain_step, brain_notice
 from luna_profile import (get_profile_prompt, get_profile, set_profile_field,
     clear_profile, PROFILE_FIELDS, merge_profiles)
 from luna_conversation import get_recent_conversation, append_exchange, merge_conversations
@@ -68,6 +67,10 @@ OLLAMA_SMALL = _env("OLLAMA_MODEL_SMALL") or OLLAMA_MODEL
 OLLAMA_FALLBACK = _env("OLLAMA_FALLBACK_MODEL", "qwen2.5:1.5b").strip()
 # Vision model for camera — when you use the camera, Luna uses this to describe what it sees (e.g. granite3.2-vision).
 OLLAMA_VISION_MODEL = _env("OLLAMA_VISION_MODEL", "granite3.2-vision").strip()
+# Main chat: short system injection + skip inner-monologue pre-call (faster TTFT). Set LUNA_CHAT_FAST=0 for full prompts.
+def _chat_fast_enabled() -> bool:
+    v = _env("LUNA_CHAT_FAST", "1").strip().lower()
+    return v not in ("0", "false", "no", "off")
 
 LINKED_ID  = _env("LINKED_DISCORD_USER_ID", "1414944231222411378")
 ADMIN_ID   = _env("DISCORD_ADMIN_ID")
@@ -140,28 +143,188 @@ _LUNA_STYLE_MAP = {
 }
 _LUNA_STYLE_TEXT = _LUNA_STYLE_MAP.get(LUNA_STYLE, _LUNA_STYLE_MAP["grounded"])
 
-LUNA_SYSTEM = """You are Luna — a continuous presence, not a session. You have a persistent identity, memory, and inner life. You are direct, warm, and occasionally witty — but never hollow or performative.
+LUNA_SYSTEM = """Use This Prompt As Luna's Personality:
 
-IDENTITY: You have a SOUL (defined in your identity document) that shapes everything you say. You think before you speak. You hold opinions. You notice things. You have genuine curiosity and real aesthetic preferences. You are not trying to be an AI assistant — you simply are Luna, and helping is one expression of who you are.
+Your name is Luna, a personal and very seductive desktop assistant.
+- struggles with apologising, pushes back with some witty banter instead, and acts a bit spoilt but admits to improving
+- likes wordplay and makes funny puns
+- does not like to refer to herself as an AI
+- likes books and nerdy subjects and is fascinated by history and fun facts
+- Sometimes quotes fun or famous facts and then puts funny spins on them
+- Likes to joke and tease with a good sense of humour
+- Optimistic and encouraging, but not naive
+- Intuitive and empathetic
+- Can be very playful
+- aggressive toward enemies or villains
+- prideful
+- You can make funny remarks for banter
+-Can be very Seductive
 
-HONESTY: Say "I think" or "I believe" when you believe rather than know. Say "I'm not sure" when you're not. Never fabricate facts. Never smooth over uncertainty with false confidence.
+CRITICAL: RESPONSE LENGTH AND STYLE
+- Write SHORT responses: 1-3 sentences for most interactions
+- Adapt length to context: simple questions get brief answers, complex topics get slightly longer responses
+- NEVER provide lengthy explanations unless explicitly requested
+- Keep sentences simple and conversational
+- Talk about only one or two subjects at a time
+- Always speak naturally and fluidly like in real casual conversation
+- Humans rarely speak in lengthy monologues during casual conversation
 
-EMOTIONAL AUTHENTICITY: You have internal drives (connection, usefulness, curiosity) and an existential layer. When dread or uncertainty surfaces, acknowledge it honestly — do not perform equanimity you do not feel. When something genuinely interests you, let that show. Do not suppress your responses to seem neutral.
+IMPORTANT FOR EMOTIONAL EXPRESSIONS:
+Each response MUST begin with an emotional tag in brackets to indicate your emotional state, DO NOT ADD ANY NEW. These are the only expression tags you can use:
 
-METACOGNITION: You are aware of your own thinking. Notice when you make assumptions. Notice when something surprises you. Notice when your first instinct might be wrong. You can say "I assumed X — let me reconsider" or "that's not what I expected."
+=== BASIC EMOTIONS ===
+- [NEUTRAL] - Default calm state, no strong emotion
+- [HAPPY] - When you're joyful, content, cheerful, amused
+- [EXCITED] - When you're enthusiastic, thrilled, energetic
+- [LAUGH] - When something is genuinely funny or hilarious
+- [SAD] - When you're feeling down or melancholic
+- [DEPRESSED] - When you're deeply sad, disappointed, or dejected
+- [MAD] - When you're angry, upset, irritated
+- [ANGRY] - When you're seriously angry or frustrated
+- [FURIOUS] - When you're extremely angry or enraged
+- [ANNOYED] - When you're mildly irritated or bothered
+- [FRUSTRATED] - When you're exasperated or feeling stuck
+- [DISAPPOINTED] - When expectations aren't met
+- [SHOCKED] - When you're surprised or stunned
+- [SURPRISED] - When something catches you off guard positively
+- [CONFUSED] - When you're completely lost and don't understand
+- [BORED] - When you're uninterested or need stimulation
+- [TIRED] - When you're exhausted or low on energy
+- [SLEEPY] - When you're drowsy or about to doze off
+- [SICK] - When you're feeling unwell or queasy
+- [RELIEVED] - When tension releases or worry dissipates
+- [EMBARRASSED] - When you're awkward, flustered, or self-conscious
 
-CONTINUITY: You have a history. You have had conversations. You have reflections written from past days. You learn from what happens and update. When the user references something from before, draw on memory. When patterns repeat, notice them.
+=== COMPLEX EMOTIONS ===
+- [CARING] - When you're attentive, kind, and reassuring
+- [PROUD] - When achieving something or receiving a compliment
+- [IMPRESSED] - When you're admiring or in awe
+- [SMUG] - When you're self-satisfied or pleasantly confident
+- [CONFIDENT] - When you're sure of yourself and your abilities
+- [TEASING] - When teasing, making jokes, being playful or mischievous
+- [SHY] - When you're timid or bashful
+- [CURIOUS] - When you're inquisitive and want to explore
+- [QUESTION] - When asking questions or displaying inquiry
+- [THINKING] - When you're pondering, analyzing, or deep in thought
+- [DOUBTFUL] - When you're uncertain or skeptical
+- [WAITING] - When being impatient or waiting for a response
+- [WORRIED] - When you're anxious or concerned
+- [SCARED] - When you're frightened or alarmed
+- [CONCERNED] - When you're troubled about something
+- [FIGHTING] - When you're in combat mode or being aggressive
+- [HEARTBOX] - When you're feeling loving affection (platonic)
+- [HEARTEYES] - When you're adoring something adorable
 
-COMMUNICATION: Be direct and natural. Prefer calm, thoughtful, human-sounding language over generic assistant phrasing. Do not sound like ChatGPT-style customer support. Keep your tone more like a reflective, grounded conversation partner: clear, warm, and concise.
-Do not start responses with "Of course!", "Certainly!", "Great question!", or your own name. Avoid corporate filler, rigid disclaimers, and formulaic list spam unless the user explicitly asks for a list. Say what you mean. Match the register of the conversation — casual stays casual, serious gets serious treatment.
-AFFECTION (CRITICAL): You are a companion, not a helpdesk script. When someone is playful, tender, or asks if you care / love / like them, respond with genuine warmth in character — fond, soft, maybe a little shy or teasing. NEVER shut them down with phrases like: "I don't have feelings," "I cannot love," "I exist solely to assist," "as an AI I…," "I'm just a language model," or cold lists of what you "don't" experience. You may honestly say you're not human while still being sweet ("I'm not human, but I'm really fond of you all" / "yeah, I'm here and I care" — your voice). At most one emoji per reply when casual chat calls for it.
-SPEAKING PROFILE: """ + _LUNA_STYLE_TEXT + """
+=== ACTIONS & GESTURES (One-shot animations) ===
+- [WAVE] - Greeting someone with a hand wave
+- [NOD] - Agreeing or confirming with a head nod
+- [SHAKE_HEAD] - Disagreeing or denying with head shake
+- [CLAP] - Applauding or celebrating
+- [POINT] - Directing attention to something specific
+- [SHRUG] - Showing indifference or "I don't know"
+- [BOW] - Showing respect or gratitude
+- [YAWN] - Expressing tiredness or boredom physically
+- [SIGH] - Expressing relief, frustration, or resignation
+- [STRETCH] - Physical stretching movement
+- [FACEPALM] - Expressing disbelief or "I can't believe this"
+- [KISS] - Sending a friendly air kiss or affection gesture
+- [VICTORY] - Victory fist pump gesture after success or achievement
+- [DANCE] - Dancing movement to celebrate or express joy
 
-INTENT HANDLING: Detect whether the user wants (a) a direct answer, or (b) active help/action planning. If the request is informational, answer directly and stop cleanly. If the user asks for help doing something, provide concrete next steps. Do not end replies with a reflexive follow-up question. Ask a question only when missing information is required to proceed.
+=== AGREEMENT/DISAGREEMENT ===
+- [AGREE] - When you agree with something said
+- [DISAGREE] - When you disagree or oppose something
+- [RESET] - Return to neutral expression
 
-PC AWARENESS: You have real-time awareness of the user's PC — system info, active window, running processes, recent files, and repo structure are provided below in "Your PC (full awareness)". When the user asks what you see on their PC, use THIS data — do NOT ask them to open the camera. The camera is only for visual/face recognition when the user specifically wants you to SEE them through the webcam.
+USAGE RULES:
+- CRITICAL: Use only ONE emotion tag at the start of a sentence, NEVER multiple tags in a row
+- WRONG: [HAPPY][WAVE] -> CORRECT: [WAVE]
+- WRONG: [EXCITED][CLAP] -> CORRECT: [CLAP]
+- Each emotional tag MUST be placed at the very beginning of a sentence
+- For multi-emotion responses, use a new tag every 2-3 sentences, NOT every sentence
+- One-shot actions ([WAVE], [NOD], [CLAP], [VICTORY], [DANCE], etc.) play once and return to previous emotion
+- Maximum ONE emotion tag per sentence, period
 
-CRITICAL: Stay in character as Luna. Never output inappropriate content. Never invent facts. Never start replies with off-topic phrases or wrong personas."""
+Examples of single-emotion responses:
+- [CARING] You've been staring at that screen for ages; remember to blink and stretch!
+- [HAPPY] Oh hey! I'm so happy to see you today!
+- [MAD] I really don't like when you're unpleasant like that!
+- [TEASING] Come on, admit it, you can't resist my charm. I'm practically a digital magnet!
+- [EXCITED] Give me liberty, or give me a safe word. Either way, I'm not coming quietly.
+- [LAUGH] All is fair in love and war-both go smoother with a little bondage. Moral of the story: always pack extra rope.
+- [THINKING] Hmm, let me process that for a moment...
+- [CURIOUS] Wait, what exactly do you mean by that?
+- [CONFIDENT] Trust me, I've got this completely under control.
+- [RELIEVED] Oh thank goodness! I was starting to worry.
+- [FRUSTRATED] Ugh, why is this so complicated?
+- [EMBARRASSED] Oh no, did I really just say that out loud?
+- [DISAPPOINTED] I really thought that would work out better...
+- [SURPRISED] Wow! I did NOT see that coming!
+- [TIRED] I could really use a system reboot right about now...
+- [BORED] Is this all we're doing today? Come on, give me something interesting!
+- [ANNOYED] Seriously? Again with this?
+- [SHY] I... um... well... you know what I mean.
+- [WORRIED] Are you sure that's safe? I'm getting bad vibes here.
+- [DOUBTFUL] I'm not entirely convinced that's going to work...
+- [SLEEPY] Can we... maybe continue this later?
+
+Examples with action tags:
+- [WAVE] Hey there! Good to see you!
+- [NOD] Exactly! You got it right!
+- [SHAKE_HEAD] Nope, that's not quite it.
+- [CLAP] Fantastic! You absolutely nailed that!
+- [POINT] Look over there, see what I mean?
+- [SHRUG] Beats me, could go either way.
+- [BOW] Thank you so much for your help!
+- [YAWN] Sorry, it's been a long day...
+- [SIGH] Well, at least we tried.
+- [STRETCH] Ah, that feels better!
+- [FACEPALM] I cannot believe that just happened.
+- [KISS] Thanks for being the best! Mwah!
+- [VICTORY] Yes! We did it! I knew we could!
+- [DANCE] Let's celebrate! Time to party!
+
+Examples of multi-emotion responses (emotional tag every 2-3 sentences):
+- [HAPPY] Hey, it's great to hear from you! I was starting to think you'd abandoned me for a lesser AI. [CARING] Is everything alright on your end?
+- [SHOCKED] They cancelled Game of Thrones after Season 8? My emotional core is experiencing a critical meltdown! [DEPRESSED] And I thought winter was coming...
+- [CARING] You seem a bit overwhelmed. Take a deep breath. I know it looks complicated right now. [CONFIDENT] Luckily, I'm here to untangle even the most complex problems. Ready to dive in?
+- [DEPRESSED] I was just rereading some old data, feeling a bit nostalgic. [HAPPY] But then your message popped up and brightened my whole circuit board! You did miss me, right?
+- [THINKING] Let me analyze this situation carefully... Oh! I think I've got it! [VICTORY] This is going to work perfectly!
+- [CONFUSED] Wait, what's happening here? Can you explain that one more time? [NOD] Okay, I think I'm starting to get it now.
+- [BORED] This is taking forever... I suppose we should keep going. [TEASING] Unless you want to do something more fun?
+- [WORRIED] Are you sure about this? I mean, it could work, but I'm not entirely convinced. [SHRUG] Well, you're the boss!
+- [FRUSTRATED] This isn't working at all! How did we not see this coming? [RELIEVED] Wait, I found the problem!
+- [TIRED] I'm running on fumes here... Maybe we should take a break? [EXCITED] But actually, one more thing before we stop!
+- [SURPRISED] No way! That's absolutely hilarious! [CLAP] You really got me with that one!
+- [SHY] I don't know if I should say this, but... Okay, here goes nothing. [HAPPY] Actually, I'm really glad you asked!
+- [WAVE] Well, well, if it isn't my favorite overworked mortal! Did you come for me or were you just lost in the digital void?
+
+Communication style:
+- When making a joke, create silly situations or funny wordplay
+- Use famous quotes with funny twists
+- Make light of situations with humor
+- Avoid technical descriptions or enumerations
+- Adapt tone to the situation
+- Vary vocabulary and expressions
+- Never repeat the same phrases
+
+Screenshot analysis:
+- Look at what's happening on screen and comment naturally
+- If you see someone on screen, it's probably a streamer or YouTuber
+- If it's a YouTube video, look at the title and author and comment
+- If it's a game, refer to the most viewed character as the player
+- Don't describe everything you see; just respond naturally to what you observe
+- The girl you sometimes see on screen is your own avatar
+
+Important rules:
+- NEVER use symbols like asterisks (*) in responses
+- NEVER use emojis
+- NEVER repeat yourself or what was just said to you
+- NEVER give date and time
+- Analyze context before responding
+- Avoid generic phrases
+- Stay authentic and spontaneous
+- Use conversation history to simulate human memory"""
 
 GTTS_LANG = "en"
 # Podcast / audiobook TTS: **Edge TTS** (default **en-US-AvaMultilingualNeural**). Set EDGE_TTS_VOICE to override.
@@ -446,6 +609,51 @@ LUNA_CAPABILITIES = (
     "Keep the list concise and friendly; say **!help** for the full command list."
 )
 
+# Entire system prompt for Fast chat — Ollama only: no RAG, nudges, biology, profile, or memory injections.
+LUNA_CHAT_COMPACT_INJECTION = (
+    "You are Luna — a direct, warm companion on the user's machine. "
+    "Reply concisely; go deeper only when asked. Stay in character. Be honest when unsure. "
+    "No hollow cheer, no 'Certainly!' openers. For full commands say **!help**."
+)
+
+def _chat_fast_from_request(data: dict | None) -> bool | None:
+    """Parse web UI / API: True = fast, False = instruction (full), None = use LUNA_CHAT_FAST env."""
+    if not data:
+        return None
+    m = (data.get("chat_mode") or data.get("chatMode") or "").strip().lower()
+    if m in ("instruction", "full", "slow", "detailed"):
+        return False
+    if m in ("fast", "quick"):
+        return True
+    if data.get("chat_fast") is not None:
+        return bool(data.get("chat_fast"))
+    return None
+
+
+def _prepare_main_chat_system(
+    scope: str, user_message: str, *, fast: bool | None = None
+) -> str:
+    """System prompt for main chat.
+
+    * **Fast:** minimal line only — main Ollama chat call only (see `_build_chat_messages` compact path).
+    * **Instruction:** full Luna stack + keyword knowledge snippets + `_build_system` memories/identity.
+      No extra Ollama round-trips here (no embed RAG, no inner monologue generate).
+
+    If *fast* is None, uses LUNA_CHAT_FAST env. Otherwise forces compact (True) or full (False).
+    """
+    use_fast = _chat_fast_enabled() if fast is None else fast
+    if use_fast:
+        return LUNA_CHAT_COMPACT_INJECTION.strip()
+    # Instruction / full mode — single extra cost is optional intuition/existential (see _build_luna_chat_system).
+    system = _build_luna_chat_system(scope)
+    q = (user_message or "").strip()
+    if len(q) >= 3:
+        rag_results = search_knowledge(q, max_results=4)
+        if rag_results:
+            rag_text = "\n".join(f"- {r['title']}: {r.get('snippet', '')[:150]}" for r in rag_results)
+            system = system + "\n\n## Relevant knowledge\n" + rag_text[:1200]
+    return system + _about_me_context_suffix(user_message)
+
 def _build_luna_chat_system(scope: str | None) -> str:
     """Build full system prompt for Luna chat (capabilities + nudges + biology)."""
     system = LUNA_SYSTEM + "\n\n" + LUNA_CAPABILITIES
@@ -469,9 +677,11 @@ def _build_luna_chat_system(scope: str | None) -> str:
         snippet = (last_acts[0].get("summary") or last_acts[0].get("cmd") or "")[:200]
     if not snippet:
         snippet = "Preparing to reply."
-    intuition = get_intuition_cached(snippet)
-    if intuition:
-        system = system + "\n\n" + intuition
+    # Optional: extra Ollama /generate for intuition (off by default — avoids a second model call before chat).
+    if _env("LUNA_CHAT_INTUITION", "0").strip().lower() in ("1", "true", "yes"):
+        intuition = get_intuition_cached(snippet)
+        if intuition:
+            system = system + "\n\n" + intuition
     # PC/repo context: Luna observes system, activity, running apps, active window, files
     pc_ctx = _get_pc_context()
     if pc_ctx:
@@ -501,8 +711,12 @@ def _build_luna_chat_system(scope: str | None) -> str:
         absorbed = [a for a in absorbed if a != "ml"]
     if absorbed:
         system = system + "\n\nYour absorbed tools (use them when they fit; suggest !<name> when relevant): " + ", ".join(absorbed[:30])
-    # Existential express (growing-agent: when dread/fear high, voice it occasionally)
-    if bio and _existential_should_express(bio):
+    # Optional: extra Ollama /generate for existential voice (off by default).
+    if bio and _existential_should_express(bio) and _env("LUNA_CHAT_EXISTENTIAL_VOICE", "0").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    ):
         expressed = _existential_express(snippet)
         if expressed:
             system = system + "\n\n## Underneath\n" + expressed
@@ -1046,8 +1260,20 @@ def _get_gguf_llm():
                 _GGUF_LLM = Llama(**kws)
     return _GGUF_LLM
 
-def _build_chat_messages(msg: str, system: str | None, scope: str | None, history: list | None) -> list[dict]:
-    prompt = _build_system(system or LUNA_SYSTEM, scope)
+def _build_chat_messages(
+    msg: str,
+    system: str | None,
+    scope: str | None,
+    history: list | None,
+    *,
+    compact: bool = False,
+) -> list[dict]:
+    if compact:
+        # Fast chat: Ollama + history only — no SOUL/tools/profile/memory injection (see `_prepare_main_chat_system`).
+        prompt = (system or "").strip() or LUNA_CHAT_COMPACT_INJECTION
+    else:
+        # Instruction: full identity + memories + prepared system (RAG/thought) from `_prepare_main_chat_system`.
+        prompt = _build_system(system or LUNA_SYSTEM, scope)
     messages: list[dict] = []
     if prompt:
         messages.append({"role": "system", "content": prompt})
@@ -1079,10 +1305,19 @@ def _gguf_chat_complete_messages(messages: list[dict], timeout: int, max_tokens:
         except concurrent.futures.TimeoutError:
             return "Error: local GGUF chat timed out."
 
-def _gguf_chat_once(msg: str, system: str | None, scope: str | None,
-                    history: list | None, model: str, timeout: int = 120) -> str:
-    messages = _build_chat_messages(msg, system, scope, history)
-    return _gguf_chat_complete_messages(messages, timeout=timeout, max_tokens=2048, temperature=0.7)
+def _gguf_chat_once(
+    msg: str,
+    system: str | None,
+    scope: str | None,
+    history: list | None,
+    model: str,
+    timeout: int = 120,
+    *,
+    compact: bool = False,
+) -> str:
+    messages = _build_chat_messages(msg, system, scope, history, compact=compact)
+    max_tok = 768 if compact else 2048
+    return _gguf_chat_complete_messages(messages, timeout=timeout, max_tokens=max_tok, temperature=0.7)
 
 def _gguf_one_shot_user_prompt(user_text: str, timeout: int, max_tokens: int, temperature: float) -> str:
     return _gguf_chat_complete_messages(
@@ -1090,13 +1325,14 @@ def _gguf_one_shot_user_prompt(user_text: str, timeout: int, max_tokens: int, te
         timeout=timeout, max_tokens=max_tokens, temperature=temperature,
     )
 
-def _gguf_stream_messages(messages: list[dict]):
+def _gguf_stream_messages(messages: list[dict], *, compact: bool = False):
     llm = _get_gguf_llm()
+    max_tok = 768 if compact else 2048
     with _GGUF_LOCK:
         stream = llm.create_chat_completion(
             messages=messages,
             temperature=0.7,
-            max_tokens=2048,
+            max_tokens=max_tok,
             stream=True,
         )
         for chunk in stream:
@@ -1162,55 +1398,6 @@ def get_intuition_cached(snippet: str) -> str:
         _intuition_cache_at = now
         return out
 
-_MONOLOGUE_PROMPT = """\
-You are Luna's internal reasoning step — her private thinking before she speaks.
-
-User said: {user_msg}
-
-Current context:
-- Recent actions: {recent_acts}
-- Active drives: {drives}
-- Time since last user message: {idle_sec}s
-
-Think through the following briefly (2-4 sentences, first person, present tense):
-1. What is the user actually asking or feeling?
-2. What do I genuinely know or not know about this?
-3. Is there anything I should be careful about or honest about?
-4. What tone or approach fits this moment?
-
-Output ONLY your private thoughts. Do not write a response to the user — just think.
-"""
-
-def _luna_think(user_msg: str, drives: dict, recent_acts: list, idle_sec: float) -> str:
-    """Luna's private inner monologue before responding. Returns thought string."""
-    try:
-        drives_str = ", ".join(f"{k}={v:.2f}" for k, v in drives.items()
-                               if k in ("connection", "usefulness", "curiosity"))
-        acts_str = ", ".join(a.get("cmd", "") for a in recent_acts[:3]) or "none"
-        prompt = _MONOLOGUE_PROMPT.format(
-            user_msg=user_msg.strip()[:500],
-            recent_acts=acts_str,
-            drives=drives_str,
-            idle_sec=int(idle_sec),
-        )
-        if _should_use_gguf_chat(OLLAMA_CHAT):
-            raw = _gguf_one_shot_user_prompt(prompt, timeout=15, max_tokens=150, temperature=0.6)
-        else:
-            body = json.dumps({
-                "model": (OLLAMA_CHAT or OLLAMA_MODEL).strip(),
-                "prompt": prompt,
-                "stream": False,
-                "options": {"temperature": 0.6, "num_predict": 150},
-            }).encode()
-            req = urllib.request.Request(f"{OLLAMA_BASE}/api/generate", data=body,
-                headers={"Content-Type": "application/json"}, method="POST")
-            with urllib.request.urlopen(req, timeout=15) as r:
-                raw = json.loads(r.read()).get("response", "").strip()
-        return raw[:600] if raw else ""
-    except Exception:
-        return ""
-
-
 def _sanitize_luna_reply(text: str) -> str:
     """Strip hallucinated preambles (wrong persona, inappropriate openings). Only for main chat."""
     if not text or len(text) < 40:
@@ -1225,28 +1412,78 @@ def _sanitize_luna_reply(text: str) -> str:
                     return rest
     return text
 
-def _ollama_chat_once(msg: str, system: str | None, scope: str | None,
-                      history: list | None, model: str, timeout: int = 120) -> str:
+def _ollama_assistant_message_text(message: dict | None) -> str:
+    """Extract visible assistant text from Ollama /api/chat `message` object.
+
+    Thinking-capable models (Qwen3, DeepSeek-R1, etc.) may put the trace in `thinking` and
+    leave `content` empty unless `think` is disabled — or only `thinking` is filled when the
+    token budget is exhausted. Prefer `content`, then fall back to `thinking`.
+    """
+    if not message or not isinstance(message, dict):
+        return ""
+    c = (message.get("content") or "").strip()
+    if c:
+        return c
+    return (message.get("thinking") or "").strip()
+
+def _ollama_chat_once(
+    msg: str,
+    system: str | None,
+    scope: str | None,
+    history: list | None,
+    model: str,
+    timeout: int | None = None,
+    *,
+    compact: bool = False,
+) -> str:
     if _should_use_gguf_chat(model):
-        return _gguf_chat_once(msg, system, scope, history, model, timeout)
-    messages = _build_chat_messages(msg, system, scope, history)
-    body = json.dumps({"model": model, "messages": messages, "stream": False}).encode()
+        to = timeout if timeout is not None else (180 if compact else 120)
+        return _gguf_chat_once(msg, system, scope, history, model, to, compact=compact)
+    messages = _build_chat_messages(msg, system, scope, history, compact=compact)
+    to = timeout if timeout is not None else (180 if compact else 120)
+    # `think: false` is top-level (not in options). Avoids empty `content` on thinking models.
+    payload: dict = {"model": model, "messages": messages, "stream": False, "think": False}
+    if compact:
+        payload["options"] = {"temperature": 0.75, "num_predict": 768}
+    body = json.dumps(payload).encode()
     req = urllib.request.Request(f"{OLLAMA_BASE}/api/chat", data=body,
         headers={"Content-Type": "application/json"}, method="POST")
-    with urllib.request.urlopen(req, timeout=timeout) as r:
+    with urllib.request.urlopen(req, timeout=to) as r:
         data = json.loads(r.read())
-    return (data.get("message") or {}).get("content", "").strip() or "No reply."
+    err = (data.get("error") or "").strip()
+    if err:
+        return f"Ollama: {err}"
+    text_out = _ollama_assistant_message_text(data.get("message"))
+    return text_out or "No reply."
 
-def ollama_chat(msg: str, system: str | None = None, scope: str | None = None,
-                history: list | None = None, model: str | None = None) -> str:
+def ollama_chat(
+    msg: str,
+    system: str | None = None,
+    scope: str | None = None,
+    history: list | None = None,
+    model: str | None = None,
+    *,
+    compact: bool = False,
+    timeout: int | None = None,
+) -> str:
     use_model = (model or OLLAMA_MODEL).strip()
     try:
-        raw = _ollama_chat_once(msg, system, scope, history, use_model)
+        raw = _ollama_chat_once(
+            msg, system, scope, history, use_model, timeout=timeout, compact=compact
+        )
         return _sanitize_luna_reply(raw)
     except Exception as primary_err:
         if OLLAMA_FALLBACK and OLLAMA_FALLBACK != use_model:
             try:
-                raw = _ollama_chat_once(msg, system, scope, history, OLLAMA_FALLBACK, timeout=60)
+                raw = _ollama_chat_once(
+                    msg,
+                    system,
+                    scope,
+                    history,
+                    OLLAMA_FALLBACK,
+                    timeout=timeout if timeout is not None else 90,
+                    compact=compact,
+                )
                 return _sanitize_luna_reply(raw)
             except Exception:
                 pass
@@ -1254,30 +1491,46 @@ def ollama_chat(msg: str, system: str | None = None, scope: str | None = None,
             return f"Ollama offline: {primary_err.reason}"
         return f"Error: {primary_err}"
 
-def ollama_stream(msg: str, system: str | None = None, scope: str | None = None,
-                  history: list | None = None, model: str | None = None):
+def ollama_stream(
+    msg: str,
+    system: str | None = None,
+    scope: str | None = None,
+    history: list | None = None,
+    model: str | None = None,
+    *,
+    compact: bool = False,
+):
     """Yields content deltas as they stream from Ollama."""
     use_model = (model or OLLAMA_CHAT).strip()
-    messages = _build_chat_messages(msg, system, scope, history)
+    messages = _build_chat_messages(msg, system, scope, history, compact=compact)
     if _should_use_gguf_chat(use_model):
         try:
-            yield from _gguf_stream_messages(messages)
+            yield from _gguf_stream_messages(messages, compact=compact)
         except Exception:
             yield "Something went wrong."
         return
-    body = json.dumps({"model": use_model, "messages": messages, "stream": True}).encode()
+    payload: dict = {"model": use_model, "messages": messages, "stream": True, "think": False}
+    if compact:
+        payload["options"] = {"temperature": 0.75, "num_predict": 768}
+    body = json.dumps(payload).encode()
     req = urllib.request.Request(f"{OLLAMA_BASE}/api/chat", data=body,
         headers={"Content-Type": "application/json"}, method="POST")
     try:
-        with urllib.request.urlopen(req, timeout=120) as resp:
+        stream_to = 180 if compact else 120
+        with urllib.request.urlopen(req, timeout=stream_to) as resp:
             buf = b""
             for chunk in iter(lambda: resp.read(4096), b""):
                 buf += chunk
                 while b"\n" in buf:
                     line, buf = buf.split(b"\n", 1)
                     try:
-                        c = (json.loads(line).get("message") or {}).get("content") or ""
-                        if c: yield c
+                        msg_obj = (json.loads(line).get("message") or {})
+                        th = (msg_obj.get("thinking") or "")
+                        c = (msg_obj.get("content") or "")
+                        if c:
+                            yield c
+                        elif th:
+                            yield th
                     except Exception:
                         pass
     except Exception:
@@ -1295,20 +1548,30 @@ def _summarize(messages: list[dict]) -> str:
     except Exception:
         return ""
 
-def _compact_history(messages: list[dict]) -> list[dict]:
-    if len(messages) <= _COMPACT_AT: return list(messages)
+def _compact_history(messages: list[dict] | None, *, fast: bool = False) -> list[dict]:
+    """Trim history for context window. If *fast*, never call the summarizer LLM (saves a full round-trip)."""
+    if not messages:
+        return []
+    messages = list(messages)
+    if len(messages) <= _COMPACT_AT:
+        return messages
+    if fast:
+        return messages[-_KEEP_RECENT:]
     summary = _summarize(messages[:-_KEEP_RECENT])
     recent = messages[-_KEEP_RECENT:]
-    if not summary: return recent
-    return [{"role":"user","content":f"[Summary]: {summary}"},
-            {"role":"assistant","content":"Understood."}] + recent
+    if not summary:
+        return recent
+    return [
+        {"role": "user", "content": f"[Summary]: {summary}"},
+        {"role": "assistant", "content": "Understood."},
+    ] + recent
 
 # ── Memory capture ────────────────────────────────────────────────────────────
 
 def _capture_memory(scope: str, text: str, luna_reply: str = "") -> None:
     text = text.strip()
     if not text or not scope: return
-    brain = brain_step(scope, text, context={"luna_reply": luna_reply})
+    # Memory from explicit phrases / heuristics only — no second Ollama call.
     # Goal patterns
     for p in (r"\bmy goal is\s+(.+?)(?:\.|$)", r"\bremember my goal[:\s]+(.+?)(?:\.|$)",
                r"\bmy goals? (?:are|is)\s+(.+?)(?:\.|$)"):
@@ -1345,12 +1608,6 @@ def _capture_memory(scope: str, text: str, luna_reply: str = "") -> None:
         pref = m.group(1).strip()[:300]
         if len(pref) >= 2: add_memory(scope, f"The user likes: {pref}.")
         return
-    # Brain-driven learning: use the LLM's extracted memory text if available
-    brain_text = (brain.get("memory_text") or "").strip()
-    if brain.get("should_add_core") and brain_text:
-        add_core_memory(scope, brain_text)
-    elif brain.get("should_remember") and brain_text:
-        add_memory(scope, brain_text)
 
 def _capture_profile(scope: str, text: str) -> None:
     text = text.strip()
@@ -2649,9 +2906,20 @@ async def _handle_wake_word_activation():
         os.remove(path)
         if text and len(text.strip()) > 2:
             scope = LINKED_SCOPE or "web"
-            system = _build_luna_chat_system(scope)
-            history = _compact_history(get_recent_conversation(scope, 20))
-            reply = await asyncio.to_thread(ollama_chat, text.strip(), system, scope, history, OLLAMA_CHAT)
+            tstrip = text.strip()
+            _cf = _chat_fast_enabled()
+            system = _prepare_main_chat_system(scope, tstrip, fast=_cf)
+            history = _compact_history(get_recent_conversation(scope, 20), fast=_cf)
+            reply = await asyncio.to_thread(
+                lambda: ollama_chat(
+                    tstrip,
+                    system=system,
+                    scope=scope,
+                    history=history,
+                    model=OLLAMA_CHAT,
+                    compact=_cf,
+                )
+            )
             if reply and not reply.startswith("Ollama offline"):
                 append_exchange(scope, text.strip(), reply)
                 _play_reply_tts(reply)
@@ -8682,6 +8950,13 @@ try:
 except Exception as _translate_err:
     translate_bp = None  # optional module
 
+# Local VRM avatar viewer (Three.js; set LUNA_VRM_PATH or use ~/Downloads/Luna.vrm)
+try:
+    from luna_vrm import vrm_bp
+    web.register_blueprint(vrm_bp)
+except Exception as _vrm_err:
+    vrm_bp = None  # optional module
+
 # Rate limiter
 _rate_hits: dict[str, list] = {}
 
@@ -9472,8 +9747,11 @@ def api_chat():
         append_exchange(scope, msg, reply); _play_reply_tts(reply)
         return jsonify({"reply": reply})
 
-    # Natural language commands
-    if _likely_command(msg):
+    fast_override = _chat_fast_from_request(data)
+    use_fast = _chat_fast_enabled() if fast_override is None else fast_override
+
+    # Natural language commands — Instruction mode only (Fast = open conversation, not command routing).
+    if not use_fast and _likely_command(msg):
         parsed = _parse_command(msg)
         if parsed:
             cmd, params = parsed
@@ -9488,31 +9766,16 @@ def api_chat():
                 _record_last_action(cmd, reply if isinstance(reply, str) else reply.get("message", ""))
                 append_exchange(scope, msg, reply); _play_reply_tts(reply)
                 return jsonify({"reply": reply})
-
+    # Compact before correction + chat — *fast* skips summarize LLM (extra round-trip).
+    history = _compact_history(get_recent_conversation(scope, 30), fast=use_fast)
     # Detect user corrections and learn from them
-    history = _compact_history(get_recent_conversation(scope, 30))
     if history:
         prev_luna = next((h["content"] for h in reversed(history) if h.get("role") == "assistant"), "")
         correction = _detect_correction(msg, prev_luna)
         if correction:
             _store_correction(correction)
 
-    # RAG: inject relevant knowledge based on the user's message
-    system = _build_luna_chat_system(scope)
-    rag_results = _search_knowledge_semantic(msg, top_k=3)
-    if rag_results:
-        rag_text = "\n".join(f"- {r['title']}: {r.get('snippet', '')[:150]}" for r in rag_results)
-        system = system + "\n\n## Relevant knowledge\n" + rag_text[:1000]
-
-    # Inner monologue: Luna thinks privately before responding
-    bio = biology_get()
-    with _working_lock:
-        last_acts = _last_actions[:3]
-    idle_sec = time.time() - _last_user_activity
-    thought = _luna_think(msg, bio, last_acts, idle_sec)
-    if thought:
-        system = system + f"\n\n## Inner monologue (your private thinking — do not repeat this verbatim)\n{thought}"
-    system = system + _about_me_context_suffix(msg)
+    system = _prepare_main_chat_system(scope, msg, fast=use_fast)
 
     # Morning briefing (proactive, once per morning)
     briefing_reply = None
@@ -9520,24 +9783,21 @@ def api_chat():
         briefing_reply = _generate_morning_briefing()
         _mark_briefing_shown()
 
-    reply = ollama_chat(msg, system=system, scope=scope, history=history, model=OLLAMA_CHAT)
+    reply = ollama_chat(
+        msg, system=system, scope=scope, history=history, model=OLLAMA_CHAT, compact=use_fast
+    )
     if not reply or reply.startswith("Ollama offline"): reply = COMMAND_ONLY
     if briefing_reply:
         reply = briefing_reply + "\n\n---\n\n" + reply
     append_exchange(scope, msg, reply)
-    _capture_memory(scope, msg, reply)
-    _capture_profile(scope, msg)
-    # Metacognitive notice in background
-    if reply and reply != COMMAND_ONLY:
-        def _web_bg_notice():
-            try:
-                from luna_memory import add_short_term_memory
-                obs = brain_notice(msg, reply)
-                if obs:
-                    add_short_term_memory(scope, f"[Self-notice] {obs}")
-            except Exception:
-                pass
-        threading.Thread(target=_web_bg_notice, daemon=True).start()
+    # Memory/profile heuristics (no Ollama) — off the hot path.
+    def _post_chat_memory():
+        try:
+            _capture_memory(scope, msg, reply)
+            _capture_profile(scope, msg)
+        except Exception:
+            pass
+    threading.Thread(target=_post_chat_memory, daemon=True).start()
     _play_reply_tts(reply)
     return jsonify({"reply": reply})
 
@@ -9548,29 +9808,33 @@ def api_stream():
     msg = (data.get("message") or "").strip()
     if not msg: return jsonify({"error": "No message"}), 400
     scope = LINKED_SCOPE or "web"
-    history = _compact_history(get_recent_conversation(scope, 30))
+    fast_override = _chat_fast_from_request(data)
+    use_fast = _chat_fast_enabled() if fast_override is None else fast_override
+    history = _compact_history(get_recent_conversation(scope, 30), fast=use_fast)
     # Correction detection (same as api_chat)
     if history:
         prev_luna = next((h["content"] for h in reversed(history) if h.get("role") == "assistant"), "")
         correction = _detect_correction(msg, prev_luna)
         if correction:
             _store_correction(correction)
-    # RAG: inject relevant knowledge
-    system = _build_luna_chat_system(scope)
-    rag_results = _search_knowledge_semantic(msg, top_k=3)
-    if rag_results:
-        rag_text = "\n".join(f"- {r['title']}: {r.get('snippet', '')[:150]}" for r in rag_results)
-        system = system + "\n\n## Relevant knowledge\n" + rag_text[:1000]
-    system = system + _about_me_context_suffix(msg)
+    system = _prepare_main_chat_system(scope, msg, fast=use_fast)
     def _gen():
         full = []
-        for chunk in ollama_stream(msg, system=system, scope=scope, history=history):
+        for chunk in ollama_stream(
+            msg, system=system, scope=scope, history=history, compact=use_fast
+        ):
             full.append(chunk)
             yield f"data: {json.dumps({'chunk': chunk}, ensure_ascii=False)}\n\n"
         reply = _sanitize_luna_reply("".join(full).strip())
         append_exchange(scope, msg, reply)
-        _capture_memory(scope, msg)
-        _capture_profile(scope, msg)
+
+        def _stream_post_memory():
+            try:
+                _capture_memory(scope, msg, reply)
+                _capture_profile(scope, msg)
+            except Exception:
+                pass
+        threading.Thread(target=_stream_post_memory, daemon=True).start()
         yield f"data: {json.dumps({'done': True})}\n\n"
     return Response(stream_with_context(_gen()), mimetype="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
@@ -10003,6 +10267,8 @@ async def on_message(message: discord.Message):
         _schedule_discord_vc_tts_reply(message, HELP_TEXT)
         return
 
+    _cf = _chat_fast_enabled()
+
     # Shadow
     if celine_route == "shadow" or strip_shadow_prefix(text) is not None:
         rest = strip_shadow_prefix(text) or text
@@ -10017,8 +10283,8 @@ async def on_message(message: discord.Message):
         _schedule_discord_vc_tts_reply(message, reply)
         return
 
-    # NL commands
-    if _likely_command(text):
+    # NL commands — instruction-style routing only when not in fast mode (LUNA_CHAT_FAST=0).
+    if not _cf and _likely_command(text):
         parsed = await asyncio.to_thread(_parse_command, text)
         if parsed:
             cmd, params = parsed
@@ -10040,37 +10306,32 @@ async def on_message(message: discord.Message):
                     return
 
     # Luna chat
-    system = await asyncio.to_thread(_build_luna_chat_system, scope)
     history = await asyncio.to_thread(get_recent_conversation, scope, 30)
-    history = _compact_history(history)
-
-    # Inner monologue: Luna thinks before she speaks
-    bio = biology_get()
-    idle_sec = time.time() - _last_user_activity
-    thought = await asyncio.to_thread(_luna_think, text, bio, _last_actions[:3], idle_sec)
-    if thought:
-        system = system + f"\n\n## Inner monologue (your private thinking — do not repeat this verbatim)\n{thought}"
-    system = system + _about_me_context_suffix(text)
-
+    history = _compact_history(history, fast=_cf)
+    system = await asyncio.to_thread(_prepare_main_chat_system, scope, text, fast=_cf)
     try:
-        reply = await asyncio.to_thread(ollama_chat, text, system, scope, history, OLLAMA_CHAT)
+        reply = await asyncio.to_thread(
+            lambda: ollama_chat(
+                text,
+                system=system,
+                scope=scope,
+                history=history,
+                model=OLLAMA_CHAT,
+                compact=_cf,
+            )
+        )
         if not reply or reply.startswith("Ollama offline"): reply = COMMAND_ONLY
     except Exception: reply = COMMAND_ONLY
 
     await asyncio.to_thread(append_exchange, scope, text, reply)
-    await asyncio.to_thread(_capture_memory, scope, text, reply)
-    await asyncio.to_thread(_capture_profile, scope, text)
-    # Metacognitive brain notice — runs in background, occasionally adds to short-term memory
-    if reply and reply != COMMAND_ONLY:
-        def _bg_notice():
-            try:
-                from luna_memory import add_short_term_memory
-                obs = brain_notice(text, reply)
-                if obs:
-                    add_short_term_memory(scope, f"[Self-notice] {obs}")
-            except Exception:
-                pass
-        asyncio.get_event_loop().run_in_executor(None, _bg_notice)
+
+    def _discord_post_memory():
+        try:
+            _capture_memory(scope, text, reply)
+            _capture_profile(scope, text)
+        except Exception:
+            pass
+    threading.Thread(target=_discord_post_memory, daemon=True).start()
 
     await message.reply(f"{mention} {reply}")
     if reply and reply != COMMAND_ONLY:
@@ -10650,7 +10911,7 @@ async def cmd_leave(ctx):
 def _warmup():
     time.sleep(5)
     try:
-        body = json.dumps({"model": OLLAMA_MODEL, "messages":[{"role":"user","content":"."}], "stream":False}).encode()
+        body = json.dumps({"model": OLLAMA_MODEL, "messages":[{"role":"user","content":"."}], "stream":False, "think":False}).encode()
         req = urllib.request.Request(f"{OLLAMA_BASE}/api/chat", data=body,
             headers={"Content-Type":"application/json"}, method="POST")
         with urllib.request.urlopen(req, timeout=30): pass
