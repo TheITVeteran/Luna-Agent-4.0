@@ -9556,6 +9556,7 @@ def api_facebook_check_replies():
 def serve_health():
     return send_from_directory(_BASE, "health.html")
 
+
 @web.route("/api/health")
 def api_health():
     """Detailed health data for the health dashboard."""

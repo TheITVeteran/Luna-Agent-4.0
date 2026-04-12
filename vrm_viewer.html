@@ -98,30 +98,21 @@
 <div id="settings-panel" role="dialog" aria-label="Avatar settings">
   <h3>Body motion</h3>
   <div class="status" id="anim-status">Loading…</div>
-  <label for="idle-select">Idle (loop when silent)</label>
+  <label for="idle-select">Idle pool (silent — Luna cycles randomly)</label>
   <select id="idle-select"></select>
-  <label for="talk-select">Talking (while TTS plays)</label>
+  <label for="talk-select">Talking pool (speech — Luna cycles randomly)</label>
   <select id="talk-select"></select>
   <div class="hint">
-    <strong>Luna animations</strong> (or <code style="color:#00d4ff">LUNA_ANIMATIONS_DIR</code>): <code style="color:#00d4ff">.vrma</code> and/or <code style="color:#00d4ff">.fbx</code> (e.g. Mixamo) in the folder or <code style="color:#00d4ff">motion/</code>.
-    Legacy: <code style="color:#00d4ff">data/vrm/animations/</code>. FBX is retargeted in the browser (bone names must map; try Mixamo + VRM). Optional CDN sample below.
+    Default paths: <strong>Luna animations</strong> (<code style="color:#00d4ff">LUNA_ANIMATIONS_DIR</code>) holds body <code style="color:#00d4ff">.vrma</code> / <code style="color:#00d4ff">.fbx</code> in that folder or <code style="color:#00d4ff">motion/</code> — not inside <code style="color:#00d4ff">expressions/</code>.
+    Expression VRMA live in <strong>Luna animations/expressions</strong> (<code style="color:#00d4ff">LUNA_EXPRESSIONS_DIR</code>); listed in <code style="color:#00d4ff">/vrm/api/animations</code> for tools; this page uses <strong>TTS visemes</strong> only for the mouth.
+    Legacy body: <code style="color:#00d4ff">data/vrm/animations/</code>. FBX is retargeted in the browser.
+    Clips labeled <strong>(static pose)</strong> are a single held pose (no motion); replace them if you want idle loops.
+    Clips are sorted into pools by file name (keywords like <strong>talk</strong>, <strong>speak</strong>, <strong>stand</strong>, <strong>walk</strong>, etc.). Override any file: add <code style="color:#00d4ff">motion_roles.json</code> in Luna animations/ (or <code style="color:#00d4ff">data/vrm/</code>) — <code style="color:#88b4cc">{"VRMA_03.vrma":"talk","custom.vrma":"idle"}</code>. Luna picks from each pool on a timer and crossfades; speech uses the talking pool, then blends back to idle.
   </div>
   <div class="bone-map-row">
     <label><input type="checkbox" id="bone-map-toggle"/> Show Mixamo ↔ Luna (VRM) bone map</label>
   </div>
   <div id="bone-map-panel" hidden></div>
-
-  <h3>Expression clips (optional)</h3>
-  <div class="hint" style="margin-top:0">
-    Face / additive clips — e.g. converted for VRM or from Mixamo pipelines. Use folders:
-    <code style="color:#00d4ff">Luna animations/expressions/</code>,
-    <code style="color:#00d4ff">expression/</code>, or <code style="color:#00d4ff">mixamo/</code>.
-    Full-body clips here may fight body motion; prefer lighter face/brow clips if you see fighting.
-  </div>
-  <label for="expr-idle-select">Expression while idle</label>
-  <select id="expr-idle-select"></select>
-  <label for="expr-talk-select">Expression while talking</label>
-  <select id="expr-talk-select"></select>
 
   <h3>Speech</h3>
   <div class="hint" style="margin-top:0">
@@ -204,8 +195,6 @@ const settingsToggle = document.getElementById("settings-toggle");
 const settingsPanel = document.getElementById("settings-panel");
 const idleSelect = document.getElementById("idle-select");
 const talkSelect = document.getElementById("talk-select");
-const exprIdleSelect = document.getElementById("expr-idle-select");
-const exprTalkSelect = document.getElementById("expr-talk-select");
 const animStatus = document.getElementById("anim-status");
 const ttsEngine = document.getElementById("tts-engine");
 const ttsBrowserWrap = document.getElementById("tts-browser-wrap");
@@ -220,9 +209,31 @@ const boneMapPanel = document.getElementById("bone-map-panel");
 
 let vrm = null;
 let mixer = null;
-/** Second layer: expression / face VRMA (optional). */
-let exprMixer = null;
+/** Last body ``AnimationAction`` for ``crossFadeTo`` (avoids T-pose flashes). */
+let motionActionCurrent = null;
+/** Default crossfade (legacy / fallback). */
+const CROSS_FADE_MOTION_SEC = 0.42;
+/** Blends between clips inside the same pool (idle↔idle or talk↔talk). */
+const CROSS_FADE_SEQUENCE_SEC = 0.48;
+/** Longer blend when switching idle ↔ talking (combined smooth motion). */
+const CROSS_FADE_CATEGORY_SEC = 0.62;
+/** Luna rotates idle clips on a random interval (seconds). */
+const IDLE_ROTATE_MIN_SEC = 14;
+const IDLE_ROTATE_MAX_SEC = 38;
+/** Luna rotates talking clips while TTS plays (seconds). */
+const TALK_ROTATE_MIN_SEC = 5;
+const TALK_ROTATE_MAX_SEC = 15;
+
 let animationList = { motion: [], expression: [], local: [], sample: null };
+/** Last body mode for crossfade strength (idle vs talk). */
+let lastBodyMode = null;
+/** Avoid immediate repeat when picking random clips. */
+let lastPlayedIdleKey = "";
+let lastPlayedTalkKey = "";
+let idleRotateTimer = null;
+let talkRotateTimer = null;
+let idleRotateGen = 0;
+let talkRotateGen = 0;
 /** Whether TTS is currently playing (drives talking vs idle clip). */
 let speaking = false;
 /** When true, lipsync follows Web Audio RMS (Edge TTS); else text-timed (browser). */
@@ -473,18 +484,188 @@ loader.register((parser) => new VRMLoaderPlugin(parser));
 loader.register((parser) => new VRMAnimationLoaderPlugin(parser));
 const fbxLoader = new FBXLoader();
 
-function stopMotionMixer() {
+function stopMotionMixerHard() {
   if (mixer) {
     mixer.stopAllAction();
     mixer = null;
   }
+  motionActionCurrent = null;
 }
 
-function stopExpressionMixer() {
-  if (exprMixer) {
-    exprMixer.stopAllAction();
-    exprMixer = null;
+/**
+ * Body motion: reuse one mixer, crossfade from the previous clip instead of stop-all → T-pose.
+ * @param {number} [fadeSec=CROSS_FADE_SEQUENCE_SEC] - blend duration when switching clips.
+ */
+function playBodyClipWithCrossfade(clip, fadeSec = CROSS_FADE_SEQUENCE_SEC) {
+  if (!vrm) return;
+  if (!mixer) mixer = new THREE.AnimationMixer(vrm.scene);
+  const newAction = mixer.clipAction(clip);
+  newAction.setLoop(THREE.LoopRepeat);
+  newAction.clampWhenFinished = false;
+
+  const prev = motionActionCurrent;
+  const canXfade =
+    prev &&
+    prev !== newAction &&
+    typeof prev.isRunning === "function" &&
+    prev.isRunning();
+
+  if (canXfade) {
+    prev.crossFadeTo(newAction, fadeSec, false);
+  } else {
+    // First body clip: fade from 0 so the model does not sit at bind pose (T/A-pose) for ~0.4s.
+    const fadeInSec = motionActionCurrent ? fadeSec : 0;
+    newAction.reset().fadeIn(fadeInSec).play();
   }
+  motionActionCurrent = newAction;
+  primeMixer();
+}
+
+function randBetween(a, b) {
+  return a + Math.random() * (b - a);
+}
+
+/** Pick crossfade duration: stronger blend when switching idle ↔ talk. */
+function fadeSecForBodyMode(mode) {
+  if (!motionActionCurrent) return 0;
+  const categorySwitch = lastBodyMode != null && lastBodyMode !== mode;
+  return categorySwitch ? CROSS_FADE_CATEGORY_SEC : CROSS_FADE_SEQUENCE_SEC;
+}
+
+function clearIdleRotation() {
+  if (idleRotateTimer != null) {
+    clearTimeout(idleRotateTimer);
+    idleRotateTimer = null;
+  }
+  idleRotateGen += 1;
+}
+
+function clearTalkRotation() {
+  if (talkRotateTimer != null) {
+    clearTimeout(talkRotateTimer);
+    talkRotateTimer = null;
+  }
+  talkRotateGen += 1;
+}
+
+function scheduleIdleRotation() {
+  if (idleRotateTimer != null) {
+    clearTimeout(idleRotateTimer);
+    idleRotateTimer = null;
+  }
+  const gen = idleRotateGen;
+  const delay = randBetween(IDLE_ROTATE_MIN_SEC, IDLE_ROTATE_MAX_SEC) * 1000;
+  idleRotateTimer = setTimeout(async () => {
+    idleRotateTimer = null;
+    if (gen !== idleRotateGen || !vrm || speaking) return;
+    try {
+      await playRandomIdleFromPool();
+    } catch (e) {
+      console.warn(e);
+    }
+    scheduleIdleRotation();
+  }, delay);
+}
+
+function scheduleTalkRotation() {
+  if (talkRotateTimer != null) {
+    clearTimeout(talkRotateTimer);
+    talkRotateTimer = null;
+  }
+  const gen = talkRotateGen;
+  const delay = randBetween(TALK_ROTATE_MIN_SEC, TALK_ROTATE_MAX_SEC) * 1000;
+  talkRotateTimer = setTimeout(async () => {
+    talkRotateTimer = null;
+    if (gen !== talkRotateGen || !vrm || !speaking) return;
+    try {
+      await playRandomTalkFromPool();
+    } catch (e) {
+      console.warn(e);
+    }
+    scheduleTalkRotation();
+  }, delay);
+}
+
+async function playRandomIdleFromPool() {
+  const items = idleMotionItems();
+  const keys = items.map((item) => motionOptionValue(item));
+  if (!keys.length) return;
+  let choice = keys[Math.floor(Math.random() * keys.length)];
+  if (keys.length > 1 && lastPlayedIdleKey) {
+    let tries = 0;
+    while (choice === lastPlayedIdleKey && tries++ < 10) {
+      choice = keys[Math.floor(Math.random() * keys.length)];
+    }
+  }
+  lastPlayedIdleKey = choice;
+  if (idleSelect && Array.from(idleSelect.options).some((o) => o.value === choice)) {
+    idleSelect.value = choice;
+  }
+  errEl.hidden = true;
+  try {
+    await playMotionClip(choice, "idle");
+  } catch (e) {
+    console.warn(e);
+  }
+}
+
+async function playRandomTalkFromPool() {
+  const items = talkMotionItems();
+  let key = "";
+  if (items.length) {
+    const keys = items.map((item) => motionOptionValue(item));
+    let choice = keys[Math.floor(Math.random() * keys.length)];
+    if (keys.length > 1 && lastPlayedTalkKey) {
+      let tries = 0;
+      while (choice === lastPlayedTalkKey && tries++ < 10) {
+        choice = keys[Math.floor(Math.random() * keys.length)];
+      }
+    }
+    lastPlayedTalkKey = choice;
+    key = choice;
+    if (talkSelect && talkKeysHasValue(key)) talkSelect.value = key;
+  } else {
+    key = idleSelect?.value || "";
+    lastPlayedTalkKey = key;
+  }
+  if (!key) return;
+  errEl.hidden = true;
+  try {
+    await playMotionClip(key, "talk");
+  } catch (e) {
+    console.warn(e);
+    throw e;
+  }
+}
+
+/** Start / resume idle random sequence (when not speaking). */
+async function resumeIdleSequence() {
+  if (!vrm || speaking) return;
+  clearIdleRotation();
+  clearTalkRotation();
+  try {
+    await playRandomIdleFromPool();
+  } catch (e) {
+    console.warn(e);
+  }
+  scheduleIdleRotation();
+}
+
+/** Start talking random sequence (TTS). @returns {Promise<boolean>} */
+async function startTalkSequence() {
+  clearIdleRotation();
+  clearTalkRotation();
+  try {
+    await playRandomTalkFromPool();
+  } catch (e) {
+    console.warn(e);
+    speaking = false;
+    clearLipMouth();
+    await resumeIdleSequence();
+    return false;
+  }
+  scheduleTalkRotation();
+  return true;
 }
 
 function primeMixer(dt = 1 / 30) {
@@ -493,22 +674,6 @@ function primeMixer(dt = 1 / 30) {
     mixer.update(dt);
     vrm.update(dt);
   }
-}
-
-function primeExprMixer(dt = 1 / 30) {
-  if (!exprMixer || !vrm) return;
-  for (let i = 0; i < 6; i++) {
-    exprMixer.update(dt);
-    vrm.update(dt);
-  }
-}
-
-function animKeyForExprIndex(index) {
-  return `expr:${index}`;
-}
-
-function animKeyForSample() {
-  return "sample:cdn";
 }
 
 function keyToMotionUrl(key) {
@@ -524,9 +689,6 @@ function keyToMotionUrl(key) {
   if (k.startsWith("local:")) {
     const index = parseInt(k.slice(6), 10);
     return new URL(`animation/motion/${index}`, BASE).href;
-  }
-  if (k === animKeyForSample()) {
-    return animationList.sample?.url || null;
   }
   return null;
 }
@@ -714,9 +876,8 @@ function disposeFbxHierarchy(root) {
 /**
  * Mixamo / FBX: retarget onto VRM skeleton, then play on scene mixer.
  */
-async function playFbxMotionClip(fbxIndex, mode) {
+async function playFbxMotionClip(fbxIndex, mode, fadeSec) {
   const url = new URL(`animation/fbx/${fbxIndex}`, BASE).href;
-  stopMotionMixer();
   animStatus.textContent = mode === "talk" ? "FBX (talk)…" : "FBX (idle)…";
 
   const fbx = await fbxLoader.loadAsync(url);
@@ -771,13 +932,9 @@ async function playFbxMotionClip(fbxIndex, mode) {
   }
 
   patchRetargetedTracksForSceneRoot(retargeted);
-  mixer = new THREE.AnimationMixer(vrm.scene);
-  const action = mixer.clipAction(retargeted);
-  action.setLoop(THREE.LoopRepeat);
-  action.clampWhenFinished = false;
-  action.reset().play();
-  primeMixer();
+  playBodyClipWithCrossfade(retargeted, fadeSec);
   disposeFbxHierarchy(fbx);
+  lastBodyMode = mode;
 
   const label =
     mode === "talk"
@@ -786,30 +943,23 @@ async function playFbxMotionClip(fbxIndex, mode) {
   animStatus.textContent = speaking ? `Speaking — ${label || "FBX"}` : `Idle — ${label || "FBX"}`;
 }
 
-function keyToExprUrl(key) {
-  if (!key || !String(key).startsWith("expr:")) return null;
-  const index = parseInt(String(key).slice(5), 10);
-  if (Number.isNaN(index)) return null;
-  return new URL(`animation/expression/${index}`, BASE).href;
-}
-
 /**
  * Body / locomotion VRMA.
  * @param {"idle"|"talk"} mode - for status text only
  */
 async function playMotionClip(key, mode) {
   if (!vrm || !key) return;
+  const fadeSec = fadeSecForBodyMode(mode);
   const ks = String(key);
   if (ks.startsWith("fbx:")) {
     const idx = parseInt(ks.slice(4), 10);
     if (Number.isNaN(idx)) throw new Error("Bad FBX key");
-    return playFbxMotionClip(idx, mode);
+    return playFbxMotionClip(idx, mode, fadeSec);
   }
 
   const url = keyToMotionUrl(key);
   if (!url) throw new Error("No URL for motion clip");
 
-  stopMotionMixer();
   animStatus.textContent = mode === "talk" ? "Talking clip…" : "Idle clip…";
 
   const gltfAnim = await loader.loadAsync(url);
@@ -817,12 +967,16 @@ async function playMotionClip(key, mode) {
   if (!vrmAnimation) throw new Error("No vrmAnimations[0] in VRMA");
 
   const clip = createVRMAnimationClip(vrmAnimation, vrm);
-  mixer = new THREE.AnimationMixer(vrm.scene);
-  const action = mixer.clipAction(clip);
-  action.setLoop(THREE.LoopRepeat);
-  action.clampWhenFinished = false;
-  action.reset().play();
-  primeMixer();
+  const boneTracks = clip.tracks.filter(
+    (t) => /\.(quaternion|position)$/.test(t.name) && !String(t.name).includes("VRMLookAtQuaternionProxy"),
+  );
+  if (boneTracks.length > 0 && boneTracks.length < 14) {
+    console.warn(
+      `[VRM] VRMA produced only ${boneTracks.length} bone tracks — clip may not match this model (T-pose / wrong rig).`,
+    );
+  }
+  playBodyClipWithCrossfade(clip, fadeSec);
+  lastBodyMode = mode;
 
   const label =
     mode === "talk"
@@ -833,87 +987,45 @@ async function playMotionClip(key, mode) {
     : `Idle — ${label || "clip"}`;
 }
 
-/**
- * Expression / face layer (optional). Uses a second mixer on the same scene.
- */
-async function playExpressionClip(key, mode) {
-  stopExpressionMixer();
-  if (!vrm || !key) return;
-  const url = keyToExprUrl(key);
-  if (!url) return;
-
-  const gltfAnim = await loader.loadAsync(url);
-  const vrmAnimation = gltfAnim.userData.vrmAnimations?.[0];
-  if (!vrmAnimation) {
-    console.warn("No vrmAnimations[0] in expression VRMA");
-    return;
-  }
-
-  const clip = createVRMAnimationClip(vrmAnimation, vrm);
-  exprMixer = new THREE.AnimationMixer(vrm.scene);
-  const action = exprMixer.clipAction(clip);
-  action.setLoop(THREE.LoopRepeat);
-  action.clampWhenFinished = false;
-  action.reset().play();
-  primeExprMixer();
-}
-
-async function applyIdleClip() {
+/** User picked an idle clip from the dropdown — play it and keep auto-cycling. */
+async function applyIdleClipManual() {
   if (!vrm || speaking) return;
   const key = idleSelect.value;
   if (!key) return;
+  lastPlayedIdleKey = key;
+  clearIdleRotation();
   errEl.hidden = true;
   try {
     await playMotionClip(key, "idle");
+    scheduleIdleRotation();
   } catch (e) {
     console.warn(e);
     errEl.hidden = false;
     errEl.textContent = String(e?.message || e);
     animStatus.textContent = "Idle clip failed.";
-    return;
-  }
-  try {
-    await playExpressionClip(exprIdleSelect.value, "idle");
-  } catch (e) {
-    console.warn("Expression idle:", e);
   }
 }
 
-async function applyTalkClip() {
-  if (!vrm) return;
-  const key = talkSelect.value || idleSelect.value;
-  if (!key) return;
-  errEl.hidden = true;
-  try {
-    await playMotionClip(key, "talk");
-  } catch (e) {
-    console.warn(e);
-    await applyIdleClip();
-    return;
-  }
-  try {
-    await playExpressionClip(exprTalkSelect.value || exprIdleSelect.value, "talk");
-  } catch (e) {
-    console.warn("Expression talk:", e);
-  }
-}
-
-async function refreshExpressionLayer() {
-  if (!vrm) return;
-  errEl.hidden = true;
-  try {
-    if (speaking) {
-      await playExpressionClip(exprTalkSelect.value || exprIdleSelect.value, "talk");
-    } else {
-      await playExpressionClip(exprIdleSelect.value, "idle");
-    }
-  } catch (e) {
-    console.warn(e);
-  }
-}
-
-function motionItems() {
+/** Full combined list (same order as /vrm/api/animations `motion`). */
+function allMotionItems() {
   return animationList.motion?.length ? animationList.motion : animationList.local || [];
+}
+
+/** Idle menu: non-talking clips (filename stem does not contain “talk”). */
+function idleMotionItems() {
+  if (Array.isArray(animationList.motion_idle)) {
+    if (animationList.motion_idle.length) return animationList.motion_idle;
+    const nonTalk = allMotionItems().filter((it) => (it.role || "idle") !== "talk");
+    if (nonTalk.length) return nonTalk;
+    return [];
+  }
+  return allMotionItems().filter((it) => (it.role || "idle") !== "talk");
+}
+
+/** Talking menu: stems containing “talk” (e.g. talking.vrma, Talk.fbx). */
+function talkMotionItems() {
+  if (Array.isArray(animationList.motion_talk)) return animationList.motion_talk;
+  return allMotionItems().filter((it) => it.role === "talk");
 }
 
 /** VRMA vs FBX: keys must match /vrm/animation/motion/<n> vs /vrm/animation/fbx/<n>. */
@@ -932,76 +1044,47 @@ function motionOptionValue(item) {
   return `vrma:${item.index}`;
 }
 
-function fillClipSelect(selectEl) {
+function fillClipSelect(selectEl, items) {
   selectEl.innerHTML = "";
-  const motion = motionItems();
-  const { sample } = animationList;
-  for (const item of motion) {
+  for (const item of items) {
     const opt = document.createElement("option");
     opt.value = motionOptionValue(item);
     opt.textContent = item.label || item.stem || item.name;
     opt.dataset.motionName = item.name || "";
     selectEl.appendChild(opt);
   }
-  if (sample?.url) {
-    const opt = document.createElement("option");
-    opt.value = animKeyForSample();
-    opt.textContent = sample.label || "Sample (CDN)";
-    selectEl.appendChild(opt);
-  }
-}
-
-function fillExprSelect(selectEl) {
-  selectEl.innerHTML = "";
-  const none = document.createElement("option");
-  none.value = "";
-  none.textContent = "— None —";
-  selectEl.appendChild(none);
-  const expr = animationList.expression || [];
-  for (const item of expr) {
-    const opt = document.createElement("option");
-    opt.value = animKeyForExprIndex(item.index);
-    opt.textContent = item.label || item.name;
-    selectEl.appendChild(opt);
-  }
 }
 
 function defaultMotionKeys() {
-  const motion = motionItems();
-  const { sample } = animationList;
-  const keys = [];
-  for (const item of motion) {
-    keys.push(motionOptionValue(item));
-  }
-  if (sample?.url) keys.push(animKeyForSample());
-  const idleKey = keys[0] || "";
-  const talkKey = keys.length > 1 ? keys[1] : keys[0] || "";
+  const idle = idleMotionItems();
+  const talk = talkMotionItems();
+  const idleKeys = idle.map((item) => motionOptionValue(item));
+  const talkKeys = talk.map((item) => motionOptionValue(item));
+  const idleKey = idleKeys[0] || "";
+  const talkKey = talkKeys[0] || "";
   return { idleKey, talkKey };
 }
 
-function defaultExprKeys() {
-  const expr = animationList.expression || [];
-  if (expr.length === 0) return { idleKey: "", talkKey: "" };
-  const k0 = animKeyForExprIndex(expr[0].index);
-  return {
-    idleKey: expr.length > 1 ? animKeyForExprIndex(expr[1].index) : k0,
-    talkKey: k0,
-  };
-}
-
 function populateClipSelects() {
-  fillClipSelect(idleSelect);
-  fillClipSelect(talkSelect);
-  fillExprSelect(exprIdleSelect);
-  fillExprSelect(exprTalkSelect);
+  fillClipSelect(idleSelect, idleMotionItems());
+  const talkItems = talkMotionItems();
+  fillClipSelect(talkSelect, talkItems);
+  if (!talkItems.length) {
+    const opt = document.createElement("option");
+    opt.value = "";
+    opt.textContent = "— No talking clips —";
+    talkSelect.appendChild(opt);
+  }
   const { idleKey, talkKey } = defaultMotionKeys();
   if (idleKey) {
     idleSelect.value = idleKey;
-    talkSelect.value = talkKey || idleKey;
+    talkSelect.value = talkKeysHasValue(talkKey) ? talkKey : "";
   }
-  const ek = defaultExprKeys();
-  if (ek.idleKey) exprIdleSelect.value = ek.idleKey;
-  if (ek.talkKey) exprTalkSelect.value = ek.talkKey;
+}
+
+function talkKeysHasValue(key) {
+  if (!key || !talkSelect.options.length) return false;
+  return Array.from(talkSelect.options).some((o) => o.value === key);
 }
 
 async function fetchAnimationList() {
@@ -1036,22 +1119,31 @@ function plainTextForVrmSpeech(raw) {
   return s.slice(0, 8000);
 }
 
+/** Remove bracket tags so TTS does not speak “happy”. */
+function stripLunaEmotionTagsForSpeech(text) {
+  return String(text || "")
+    .replace(/\[[A-Z][A-Z0-9_]*\]\s*/gi, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 function speakBrowserTts(text) {
-  const t = (text || "").trim();
-  if (!t) return;
+  const raw = (text || "").trim();
+  if (!raw) return;
 
   stopEdgePlayback();
   speakGen += 1;
   speechSynthesis.cancel();
   lipAudioMode = false;
 
-  lipSync.text = t;
+  const speakText = stripLunaEmotionTagsForSpeech(raw);
+  lipSync.text = speakText || raw;
   lipSync.t0 = performance.now();
-  lipSync.durationSec = estimateSpeechDurationSec(t);
+  lipSync.durationSec = estimateSpeechDurationSec(lipSync.text);
   lipSync.phase = 0;
   for (const k of LIP_NAMES) lipSync.smooth[k] = 0;
 
-  const u = new SpeechSynthesisUtterance(t);
+  const u = new SpeechSynthesisUtterance(speakText || raw);
   const voices = speechSynthesis.getVoices();
   const chosen = ttsVoice.selectedOptions[0];
   if (chosen?.value) {
@@ -1064,25 +1156,25 @@ function speakBrowserTts(text) {
   u.onstart = () => {
     speaking = true;
     lipSync.t0 = performance.now();
-    applyTalkClip();
+    void startTalkSequence();
   };
   u.onend = () => {
     speaking = false;
     clearLipMouth();
-    applyIdleClip();
+    void resumeIdleSequence();
   };
   u.onerror = () => {
     speaking = false;
     clearLipMouth();
-    applyIdleClip();
+    void resumeIdleSequence();
   };
 
   speechSynthesis.speak(u);
 }
 
 async function speakEdgeTts(text, opts = {}) {
-  const t = (text || "").trim();
-  if (!t) return;
+  const raw = (text || "").trim();
+  if (!raw) return;
 
   let twitchIdReserved = null;
   const tid = opts.twitchEventId;
@@ -1100,7 +1192,8 @@ async function speakEdgeTts(text, opts = {}) {
   stopEdgePlayback();
   const myGen = ++speakGen;
 
-  lipSync.text = t;
+  const tSpeak = stripLunaEmotionTagsForSpeech(raw) || raw;
+  lipSync.text = tSpeak;
   lipAudioMode = false;
   errEl.hidden = true;
 
@@ -1108,7 +1201,7 @@ async function speakEdgeTts(text, opts = {}) {
     const r = await fetch(API_TTS, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text: t }),
+      body: JSON.stringify({ text: tSpeak }),
     });
     if (myGen !== speakGen) return;
     if (!r.ok) {
@@ -1141,8 +1234,11 @@ async function speakEdgeTts(text, opts = {}) {
     src.connect(edgeAnalyser);
     edgeAnalyser.connect(edgeAudioCtx.destination);
 
-    await applyTalkClip();
+    const talkOk = await startTalkSequence();
     if (myGen !== speakGen) return;
+    if (!talkOk) {
+      throw new Error("Could not start talking motion");
+    }
 
     speaking = true;
     lipAudioMode = true;
@@ -1155,7 +1251,7 @@ async function speakEdgeTts(text, opts = {}) {
       speaking = false;
       lipAudioMode = false;
       clearLipMouth();
-      applyIdleClip();
+      void resumeIdleSequence();
     };
 
     src.start(0);
@@ -1167,7 +1263,7 @@ async function speakEdgeTts(text, opts = {}) {
     lipAudioMode = false;
     edgePlaybackSource = null;
     clearLipMouth();
-    applyIdleClip();
+    void resumeIdleSequence();
     errEl.hidden = false;
     errEl.textContent = String(e?.message || e);
   }
@@ -1214,19 +1310,23 @@ document.addEventListener("click", (ev) => {
 });
 
 idleSelect.addEventListener("change", () => {
-  if (!speaking) applyIdleClip();
+  if (!speaking) void applyIdleClipManual();
 });
 
-talkSelect.addEventListener("change", () => {
-  if (speaking) applyTalkClip();
-});
-
-exprIdleSelect.addEventListener("change", () => {
-  if (!speaking) refreshExpressionLayer();
-});
-
-exprTalkSelect.addEventListener("change", () => {
-  if (speaking) refreshExpressionLayer();
+talkSelect.addEventListener("change", async () => {
+  if (!speaking) return;
+  const key = talkSelect.value;
+  if (!key) return;
+  lastPlayedTalkKey = key;
+  clearTalkRotation();
+  errEl.hidden = true;
+  try {
+    await playMotionClip(key, "talk");
+    scheduleTalkRotation();
+  } catch (e) {
+    console.warn(e);
+    void resumeIdleSequence();
+  }
 });
 
 function stopAllSpeech() {
@@ -1236,7 +1336,7 @@ function stopAllSpeech() {
   speaking = false;
   lipAudioMode = false;
   clearLipMouth();
-  applyIdleClip();
+  void resumeIdleSequence();
 }
 
 btnSpeak.addEventListener("click", () => {
@@ -1329,13 +1429,12 @@ pollTwitchForVrm();
   try {
     animationList = await fetchAnimationList();
     populateClipSelects();
-    const mc = motionItems().length;
-    const ec = (animationList.expression || []).length;
+    const mc = allMotionItems().length;
     const rootHint = animationList.animations_root ? ` · ${animationList.animations_root}` : "";
     if (mc) {
-      animStatus.textContent = `${mc} body clip(s)${ec ? `, ${ec} expression` : ""}${rootHint}`;
+      animStatus.textContent = `${mc} body clip(s)${rootHint}`;
     } else {
-      animStatus.textContent = `No body clips (.vrma / Mixamo .fbx) in Luna animations/ — using CDN sample if listed.${rootHint}`;
+      animStatus.textContent = `No body clips (.vrma / Mixamo .fbx) in Luna animations/.${rootHint}`;
     }
   } catch (e) {
     animStatus.textContent = "Could not load animation list.";
@@ -1382,7 +1481,7 @@ pollTwitchForVrm();
     frameCameraToVrm();
 
     if (idleSelect.options.length > 0) {
-      await applyIdleClip();
+      await resumeIdleSequence();
     } else {
       animStatus.textContent =
         "Add .vrma or Mixamo .fbx under Luna animations/ (or LUNA_ANIMATIONS_DIR) to animate.";
@@ -1407,7 +1506,6 @@ function animate() {
   requestAnimationFrame(animate);
   const delta = clock.getDelta();
   if (mixer) mixer.update(delta);
-  if (exprMixer) exprMixer.update(delta);
   if (speaking) {
     if (lipAudioMode) updateLipSyncFromAudio(delta);
     else updateLipSync(delta);

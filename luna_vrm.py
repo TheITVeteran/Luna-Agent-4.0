@@ -1,20 +1,32 @@
 """
 VRM avatar viewer for Luna — Three.js r180 + @pixiv/three-vrm (see https://github.com/pixiv/three-vrm ).
 
-Animations:
-  - Body / motion: LUNA_ANIMATIONS_DIR (default: <project>/Luna animations/) — top-level and motion/*.vrma
-  - Expressions: Luna animations/expressions/, expression/, or mixamo/ — optional second layer (face / Mixamo-tuned clips)
-  - Legacy: data/vrm/animations/, data/vrm/idle.vrma
+Animations (default layout next to this repo):
+  - Body / motion VRMA + FBX: LUNA_ANIMATIONS_DIR (default: <project>/Luna animations/) — files in that folder
+    and in motion/ only. Subfolders such as expressions/ are not scanned for body motion.
+  - Expression VRMA (face / blendshapes): LUNA_EXPRESSIONS_DIR or, by default,
+    <Luna animations>/expressions/ — plus optional legacy folders recordings/, expression/, mixamo/ under LUNA_ANIMATIONS_DIR.
+  - Legacy body: data/vrm/animations/, data/vrm/idle.vrma
+
+Recording your own face for clips (offline, then export VRMA):
+  - Capture: iPhone ARKit (Live Link Face) → Unity + UniVRM, webcam + OpenSeeFace / VSeeFace, or VRoid Studio tools.
+  - Export expression clips to Luna animations/expressions/ (or set LUNA_EXPRESSIONS_DIR).
 
 Set LUNA_VRM_PATH for the .vrm model. VRMA files are VRM Animation format (convert pipeline for Mixamo FBX → VRMA as needed).
+
+Optional motion_roles.json in LUNA_ANIMATIONS_DIR or data/vrm/: map basename to "talk" or "idle" when filenames do not match keyword rules (e.g. VRMA_03.vrma → talk).
 
 Mount at /vrm (Blueprint).
 """
 from __future__ import annotations
 
 import asyncio
+import json
+import math
 import os
-from typing import Optional
+import re
+import struct
+from typing import Any, Optional
 
 from flask import Blueprint, Response, jsonify, request, send_file, send_from_directory
 
@@ -87,11 +99,19 @@ def _project_base() -> str:
 
 
 def _luna_animations_root() -> str:
-    """Default: D:\\...\\Luna 5.0\\Luna animations (same folder as this repo)."""
+    """Default: <project>/Luna animations — e.g. D:\\Luna 5.0\\Luna animations when the repo lives there."""
     env = (os.environ.get("LUNA_ANIMATIONS_DIR") or "").strip()
     if env:
         return os.path.abspath(os.path.expanduser(env))
     return os.path.join(_project_base(), "Luna animations")
+
+
+def _expressions_dir() -> str:
+    """Expression VRMA folder: LUNA_EXPRESSIONS_DIR, else <Luna animations>/expressions/."""
+    env = (os.environ.get("LUNA_EXPRESSIONS_DIR") or "").strip()
+    if env:
+        return os.path.abspath(os.path.expanduser(env))
+    return os.path.join(_luna_animations_root(), "expressions")
 
 
 def _list_vrma_files_in_dir(d: str) -> list[str]:
@@ -132,8 +152,107 @@ def _unique_paths(paths: list[str]) -> list[str]:
     return out
 
 
+def _read_glb_json_and_bin(path: str) -> tuple[Optional[dict], bytes]:
+    """Return (gltf JSON dict, BIN chunk bytes) or (None, b'') if not a readable GLB."""
+    try:
+        with open(path, "rb") as f:
+            if f.read(4) != b"glTF":
+                return None, b""
+            f.read(8)
+            json_len, json_type = struct.unpack("<I4s", f.read(8))
+            if json_type != b"JSON":
+                return None, b""
+            json_bytes = f.read(json_len)
+            rest = f.read(8)
+            if len(rest) < 8:
+                return json.loads(json_bytes.decode("utf-8")), b""
+            bin_len, bin_type = struct.unpack("<I4s", rest)
+            bin_chunk = f.read(bin_len) if bin_type == b"BIN\x00" else b""
+        return json.loads(json_bytes.decode("utf-8")), bin_chunk
+    except Exception:
+        return None, b""
+
+
+def _gltf_accessor_items(j: dict, buf: bytes, accessor_index: int) -> list[tuple[float, ...]]:
+    accessors = j.get("accessors") or []
+    views = j.get("bufferViews") or []
+    if accessor_index < 0 or accessor_index >= len(accessors):
+        return []
+    acc = accessors[accessor_index]
+    bv_i = acc.get("bufferView")
+    if bv_i is None or bv_i >= len(views):
+        return []
+    bv = views[bv_i]
+    offset = bv.get("byteOffset", 0) + acc.get("byteOffset", 0)
+    count = int(acc.get("count") or 0)
+    atype = acc.get("type") or "SCALAR"
+    elts = {"SCALAR": 1, "VEC2": 2, "VEC3": 3, "VEC4": 4}.get(atype, 1)
+    stride = elts * 4
+    out: list[tuple[float, ...]] = []
+    for i in range(count):
+        off = offset + i * stride
+        if off + elts * 4 > len(buf):
+            break
+        tup = struct.unpack_from("<" + "f" * elts, buf, off)
+        out.append(tup)
+    return out
+
+
+def _vrma_motion_stats(path: str) -> Optional[dict[str, Any]]:
+    """
+    Inspect a .vrma (GLB) animation: detect pose-only clips (all rotation keys identical)
+    and max joint motion. Used to label clips in /vrm/api/animations.
+    """
+    if not path.lower().endswith(".vrma") or not os.path.isfile(path):
+        return None
+    j, buf = _read_glb_json_and_bin(path)
+    if not j or not buf:
+        return None
+    anims = j.get("animations") or []
+    if not anims:
+        return None
+    a0 = anims[0]
+    channels = a0.get("channels") or []
+    samplers = a0.get("samplers") or []
+    rot_ch = 0
+    all_const = True
+    max_delta = 0.0
+    for ch in channels:
+        if (ch.get("target") or {}).get("path") != "rotation":
+            continue
+        si = ch.get("sampler")
+        if si is None or si >= len(samplers):
+            continue
+        samp = samplers[si]
+        out_i = samp.get("output")
+        if out_i is None:
+            continue
+        rots = _gltf_accessor_items(j, buf, out_i)
+        if len(rots) < 1:
+            continue
+        rot_ch += 1
+        q0 = rots[0]
+        for q in rots[1:]:
+            if any(abs(a - b) > 1e-7 for a, b in zip(q0, q)):
+                all_const = False
+                break
+        for i in range(1, len(rots)):
+            q_a, q_b = rots[i - 1], rots[i]
+            dot = abs(sum(a * b for a, b in zip(q_a, q_b)))
+            dot = min(1.0, max(-1.0, dot))
+            ang = 2.0 * math.acos(dot)
+            max_delta = max(max_delta, ang)
+    if rot_ch == 0:
+        return None
+    return {
+        "rotation_channels": rot_ch,
+        "static_pose": all_const,
+        "max_rotation_delta_rad": round(max_delta, 5),
+    }
+
+
 def motion_vrma_paths() -> list[str]:
-    """Body / locomotion clips: env idle file, Luna animations (root + motion/), legacy data paths."""
+    """Body / locomotion clips: Luna animations root + motion/ only (not expressions/). Legacy data paths."""
     base = _project_base()
     chunks: list[str] = []
     envp = (os.environ.get("LUNA_VRMA_IDLE_PATH") or "").strip()
@@ -161,10 +280,11 @@ def motion_fbx_paths() -> list[str]:
 
 
 def expression_vrma_paths() -> list[str]:
-    """Face / expression / Mixamo-friendly clips in subfolders under Luna animations/."""
+    """Face / expression clips: primary LUNA_EXPRESSIONS_DIR or Luna animations/expressions/, plus legacy subfolders."""
     root = _luna_animations_root()
     chunks: list[str] = []
-    for sub in ("expressions", "expression", "mixamo"):
+    chunks.extend(_list_vrma_files_in_dir(_expressions_dir()))
+    for sub in ("recordings", "expression", "mixamo"):
         chunks.extend(_list_vrma_files_in_dir(os.path.join(root, sub)))
     return _unique_paths(chunks)
 
@@ -177,6 +297,189 @@ def _animation_paths_ordered() -> list[str]:
 def _label_for_vrma_path(path: str) -> str:
     stem = os.path.splitext(os.path.basename(path))[0]
     return stem.replace("_", " ").replace("-", " ").strip().title() or "Animation"
+
+
+# Tokens → talking pool (speech / mouth / dialog cues)
+_MOTION_TALK_TOKENS = frozenset(
+    {
+        "talk",
+        "talking",
+        "speak",
+        "speaking",
+        "speech",
+        "chat",
+        "chats",
+        "dialog",
+        "dialogs",
+        "dialogue",
+        "conversation",
+        "voice",
+        "voices",
+        "tts",
+        "lipsync",
+        "phoneme",
+        "phonemes",
+        "viseme",
+        "visemes",
+        "say",
+        "saying",
+        "narrate",
+        "narration",
+        "phone",
+        "mic",
+        "mics",
+        "microphone",
+        "lip",
+        "lips",
+    }
+)
+# Tokens → idle pool (body / pose / locomotion — checked after talk)
+_MOTION_IDLE_TOKENS = frozenset(
+    {
+        "idle",
+        "stand",
+        "standing",
+        "sit",
+        "sitting",
+        "lay",
+        "laying",
+        "walk",
+        "walking",
+        "run",
+        "running",
+        "jog",
+        "jogging",
+        "catwalk",
+        "bend",
+        "bending",
+        "crouch",
+        "kneel",
+        "jump",
+        "dance",
+        "wave",
+        "bow",
+        "stretch",
+        "yoga",
+        "sleep",
+        "rest",
+        "locomotion",
+        "pose",
+        "poses",
+        "body",
+        "motion",
+        "motions",
+        "loco",
+    }
+)
+# Substrings (lowercase) when tokens are ambiguous e.g. TalkativeClip
+_MOTION_TALK_SUBSTRINGS = (
+    "talk",
+    "speak",
+    "speech",
+    "chat",
+    "dialog",
+    "voice",
+    "conversation",
+    "lipsync",
+    "phoneme",
+    "viseme",
+    "narrat",
+    "say",
+)
+_MOTION_IDLE_SUBSTRINGS = (
+    "idle",
+    "stand",
+    "sit",
+    "lay",
+    "walk",
+    "run",
+    "catwalk",
+    "bend",
+    "crouch",
+    "kneel",
+    "dance",
+    "wave",
+    "locomotion",
+)
+
+_role_override_path: str | None = None
+_role_override_mtime: float = -1.0
+_role_override_map: dict[str, str] = {}
+
+
+def _motion_role_overrides() -> dict[str, str]:
+    """Optional Luna animations/motion_roles.json (or data/vrm/motion_roles.json): {\"file.vrma\": \"talk\"|\"idle\"}."""
+    global _role_override_path, _role_override_mtime, _role_override_map
+    root = _luna_animations_root()
+    candidates = [
+        os.path.join(root, "motion_roles.json"),
+        os.path.join(_project_base(), "data", "vrm", "motion_roles.json"),
+    ]
+    path = next((p for p in candidates if os.path.isfile(p)), None)
+    if path is None:
+        _role_override_path = None
+        _role_override_mtime = -1.0
+        _role_override_map = {}
+        return {}
+    try:
+        mtime = os.path.getmtime(path)
+        if path == _role_override_path and mtime == _role_override_mtime:
+            return _role_override_map
+        with open(path, encoding="utf-8") as f:
+            raw = json.load(f)
+        out: dict[str, str] = {}
+        for k, v in (raw or {}).items():
+            if k is None or v is None:
+                continue
+            kn = os.path.basename(str(k).strip()).lower()
+            if not kn:
+                continue
+            vn = str(v).strip().lower()
+            if vn in ("talk", "speaking", "speech"):
+                out[kn] = "talk"
+            elif vn in ("idle", "body", "locomotion", "pose"):
+                out[kn] = "idle"
+        _role_override_path = path
+        _role_override_mtime = mtime
+        _role_override_map = out
+        return out
+    except Exception:
+        return _role_override_map
+
+
+def _stem_alnum_tokens(stem: str) -> list[str]:
+    return re.findall(r"[a-z0-9]+", stem.lower())
+
+
+def _motion_role_for_path(path: str) -> str:
+    """
+    Classify a clip for the Talking vs Idle pool: overrides file, then tokens/substrings, else idle.
+    Add motion_roles.json to force names like VRMA_03.vrma → talk.
+    """
+    base = os.path.basename(path)
+    base_l = base.lower()
+    ov = _motion_role_overrides()
+    if base_l in ov:
+        return ov[base_l]
+
+    stem = os.path.splitext(base_l)[0]
+    stem_spaced = stem.replace("_", " ").replace("-", " ")
+    tokens = set(_stem_alnum_tokens(stem_spaced))
+
+    if tokens & _MOTION_TALK_TOKENS:
+        return "talk"
+    if tokens & _MOTION_IDLE_TOKENS:
+        return "idle"
+
+    s = stem_spaced.replace(" ", "")
+    for sub in _MOTION_TALK_SUBSTRINGS:
+        if sub in s:
+            return "talk"
+    for sub in _MOTION_IDLE_SUBSTRINGS:
+        if sub in s:
+            return "idle"
+
+    return "idle"
 
 
 def _label_for_anim_path(path: str) -> str:
@@ -319,15 +622,21 @@ def _motion_items_for_api() -> list[dict]:
         label = _label_for_anim_path(p)
         if kind == "fbx":
             label = f"{label} (FBX)"
-        items.append(
-            {
-                "kind": kind,
-                "index": idx,
-                "label": label,
-                "name": base,
-                "stem": stem,
-            }
-        )
+        entry: dict[str, Any] = {
+            "kind": kind,
+            "index": idx,
+            "label": label,
+            "name": base,
+            "stem": stem,
+            "role": _motion_role_for_path(p),
+        }
+        if kind == "vrma":
+            stats = _vrma_motion_stats(p)
+            if stats:
+                entry["vrma_stats"] = stats
+                if stats.get("static_pose"):
+                    entry["label"] = f"{label} (static pose)"
+        items.append(entry)
     return items
 
 
@@ -337,6 +646,8 @@ def api_animations():
     expr = expression_vrma_paths()
     vrma_only = motion_vrma_paths()
     motion_items = _motion_items_for_api()
+    motion_idle = [x for x in motion_items if x.get("role") == "idle"]
+    motion_talk = [x for x in motion_items if x.get("role") == "talk"]
     expression_items = [
         {"index": i, "label": _label_for_vrma_path(p), "name": os.path.basename(p)}
         for i, p in enumerate(expr)
@@ -344,6 +655,8 @@ def api_animations():
     return jsonify(
         {
             "motion": motion_items,
+            "motion_idle": motion_idle,
+            "motion_talk": motion_talk,
             "expression": expression_items,
             "local": [
                 {"index": i, "label": _label_for_vrma_path(p), "name": os.path.basename(p)}
@@ -354,6 +667,7 @@ def api_animations():
             "local_count": len(vrma_only),
             "fbx_count": len(motion_fbx_paths()),
             "animations_root": _luna_animations_root(),
+            "expressions_root": _expressions_dir(),
             "sample": {
                 "label": "Sample — Pixiv test.vrma (CDN)",
                 "url": "https://raw.githubusercontent.com/pixiv/three-vrm/dev/packages/three-vrm-animation/examples/models/test.vrma",
@@ -383,6 +697,7 @@ def api_status():
             "fbx_count": len(motion_f),
             "expression_count": len(expr),
             "animations_root": _luna_animations_root(),
+            "expressions_root": _expressions_dir(),
             "edge_tts": edge_ok,
             "edge_tts_voice": _edge_tts_voice_default() if edge_ok else "",
         }
