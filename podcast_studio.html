@@ -1,0 +1,964 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Luna — Podcast studio</title>
+<style>
+  * { margin: 0; box-sizing: border-box; }
+  html, body { height: 100%; overflow: hidden; background: #050506; font-family: system-ui, "Segoe UI", sans-serif; }
+  #wrap { position: fixed; inset: 0; }
+  canvas { display: block; width: 100%; height: 100%; position: relative; z-index: 1; }
+  #panel {
+    position: relative;
+    width: 300px;
+    max-height: 480px;
+    overflow-x: hidden;
+    overflow-y: auto;
+    padding: 12px 14px 14px;
+    background: linear-gradient(165deg, rgba(22, 26, 38, 0.94), rgba(6, 8, 14, 0.97));
+    backdrop-filter: blur(16px) saturate(1.15);
+    -webkit-backdrop-filter: blur(16px) saturate(1.15);
+    border: 1px solid rgba(100, 140, 220, 0.22);
+    border-radius: 22px;
+    color: #c4d0e5;
+    font-size: 12px;
+    box-shadow:
+      0 0 0 1px rgba(255, 255, 255, 0.05) inset,
+      0 20px 50px rgba(0, 0, 0, 0.65),
+      0 0 40px rgba(80, 120, 255, 0.06);
+    pointer-events: auto;
+  }
+  #panel h1 {
+    font-size: 13px; font-weight: 600; color: #e8f0ff;
+    margin-bottom: 10px; letter-spacing: 0.06em;
+    display: flex; align-items: center; gap: 8px;
+  }
+  #panel h1::before {
+    content: "";
+    width: 8px; height: 8px; border-radius: 50%;
+    background: linear-gradient(135deg, #6a9cff, #3d5a9e);
+    box-shadow: 0 0 10px rgba(100, 160, 255, 0.5);
+  }
+  #panel label { display: block; margin: 8px 0 3px; color: #7a8ca8; font-size: 11px; }
+  #panel select, #panel button {
+    width: 100%; padding: 8px 10px; border-radius: 10px;
+    border: 1px solid rgba(120, 150, 220, 0.2);
+    background: rgba(12, 16, 28, 0.95);
+    color: #e8eef5;
+    font-size: 12px;
+  }
+  #panel select { cursor: pointer; }
+  #panel button { cursor: pointer; margin-top: 8px; font-weight: 600; }
+  #panel button.primary {
+    background: linear-gradient(180deg, rgba(100, 150, 255, 0.35), rgba(60, 100, 200, 0.15));
+    border-color: rgba(140, 180, 255, 0.45);
+    color: #e8f2ff;
+  }
+  #panel button.primary:hover { filter: brightness(1.1); }
+  #panel button.danger {
+    border-color: rgba(255, 100, 120, 0.45);
+    background: rgba(70, 28, 38, 0.55);
+    color: #ffb8c4;
+  }
+  #panel button:disabled { opacity: 0.45; cursor: not-allowed; }
+  #panel .status { font-size: 11px; color: #6a7d98; margin-top: 8px; line-height: 1.45; }
+  #panel .status strong { color: #9ab8e8; }
+  #panel .row { display: flex; gap: 6px; margin-top: 8px; }
+  #panel .row button { margin-top: 0; flex: 1; }
+  #panel .hint { font-size: 10px; color: #4a5a72; margin-top: 8px; line-height: 1.35; }
+  #panel .phone-dock {
+    margin: 10px -4px 8px;
+    padding: 10px 10px 12px;
+    border-radius: 18px;
+    background: rgba(0, 0, 0, 0.35);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+  }
+  #panel .phone-dock-title {
+    font-size: 10px; text-transform: uppercase; letter-spacing: 0.12em;
+    color: #5a6a88; margin-bottom: 8px;
+  }
+  #panel .vol-row {
+    display: flex; align-items: center; gap: 10px;
+    margin-top: 4px;
+  }
+  #panel .vol-row span { font-size: 11px; color: #8aa0c8; white-space: nowrap; }
+  #panel input[type="range"].vol-slider {
+    flex: 1; height: 6px; accent-color: #6a9cff;
+    cursor: pointer;
+  }
+  #panel input[type="range"]#mic-vol { accent-color: #c8a060; }
+  video#hidden-feed { position: fixed; width: 2px; height: 2px; opacity: 0; pointer-events: none; left: -99px; }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.180.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.180.0/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+<div id="wrap"><canvas id="c"></canvas></div>
+<video id="hidden-feed" playsinline muted autoplay></video>
+
+<div id="panel" style="visibility:hidden">
+  <h1>Studio</h1>
+  <div class="phone-dock">
+    <div class="phone-dock-title">Screen — video / tab sound</div>
+    <div class="vol-row">
+      <span title="Video audio">▶</span>
+      <input type="range" id="screen-vol" class="vol-slider" min="0" max="100" value="0" title="Volume for sound from the shared screen or tab (not your mic)"/>
+    </div>
+    <div class="phone-dock-title" style="margin-top:10px">Microphone — monitor</div>
+    <div class="vol-row">
+      <span title="Mic monitor">Mic</span>
+      <input type="range" id="mic-vol" class="vol-slider" min="0" max="100" value="0" title="Hear your own microphone (use headphones to reduce echo)"/>
+    </div>
+  </div>
+  <label for="video-source">Video on the big screen</label>
+  <select id="video-source">
+    <option value="camera">Webcam</option>
+    <option value="display">Screen or window (Discord, Zoom, browser tab…)</option>
+  </select>
+  <label for="cam-select" id="cam-label">Camera</label>
+  <select id="cam-select" disabled>
+    <option value="">— Click Enable first —</option>
+  </select>
+  <button type="button" id="btn-share-again" style="display:none;width:100%;margin-top:8px" title="Pick a different window, tab, or monitor">Share… (pick another window)</button>
+  <label for="mic-select">Microphone (orb + recording)</label>
+  <select id="mic-select" disabled>
+    <option value="">— Same as above —</option>
+  </select>
+  <button type="button" class="primary" id="btn-perm">Enable microphone &amp; video</button>
+  <div class="row">
+    <button type="button" id="btn-rec" disabled>● Record</button>
+    <button type="button" class="danger" id="btn-stop-rec" disabled>■ Stop</button>
+  </div>
+  <div class="status" id="status"><strong>Step 1:</strong> Choose <strong>Webcam</strong> or <strong>Screen or window</strong>, then click <strong>Enable microphone &amp; video</strong>. For screen/window, the browser opens a picker (monitor, app window, or browser tab). Your mic is always from the microphone list.</div>
+  <div class="hint"><strong>Scene:</strong> drag orbit · wheel zoom · middle-drag pan · <strong>arrows</strong> walk. Controls live on the floating panel next to the screen.</div>
+</div>
+
+<script type="module">
+import * as THREE from "three";
+import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { CSS3DRenderer, CSS3DObject } from "three/addons/renderers/CSS3DRenderer.js";
+
+const canvas = document.getElementById("c");
+const clock = new THREE.Clock();
+const hiddenVideo = document.getElementById("hidden-feed");
+const camSelect = document.getElementById("cam-select");
+const micSelect = document.getElementById("mic-select");
+const videoSourceSelect = document.getElementById("video-source");
+const camLabel = document.getElementById("cam-label");
+const btnShareAgain = document.getElementById("btn-share-again");
+const btnPerm = document.getElementById("btn-perm");
+const btnRec = document.getElementById("btn-rec");
+const btnStopRec = document.getElementById("btn-stop-rec");
+const statusEl = document.getElementById("status");
+const screenVol = document.getElementById("screen-vol");
+const micVol = document.getElementById("mic-vol");
+
+let renderer, css3dRenderer, scene, camera, controls, orbMesh, orbBaseScale;
+/** Arrow keys: move camera + orbit target on the floor plane (m/s scale uses dt). */
+const keyMove = { ArrowUp: false, ArrowDown: false, ArrowLeft: false, ArrowRight: false };
+/** Rest position (home); motion wanders around this. */
+let orbHome = new THREE.Vector3();
+let orbPosSmooth = new THREE.Vector3();
+let orbWanderSeed = Math.random() * Math.PI * 2;
+let videoTexture = null;
+let screenGroup = null;
+let micStream = null;
+/** Set when using ``getDisplayMedia`` (window/screen/tab); video track kept while mic may swap. */
+let screenCaptureStream = null;
+let audioCtx = null;
+/** Gain for hearing the microphone through speakers (separate from the video element). */
+let micMonitorGain = null;
+let analyser = null;
+let ampSmooth = 0;
+let mediaRecorder = null;
+let recordedChunks = [];
+let recStart = 0;
+let recTimer = null;
+
+function setStatus(html) {
+  statusEl.innerHTML = html;
+}
+
+function isTypingTarget(el) {
+  if (!el || !el.tagName) return false;
+  const t = el.tagName;
+  return t === "INPUT" || t === "SELECT" || t === "TEXTAREA" || el.isContentEditable;
+}
+
+/** Cool charcoal concrete: soft cloud mottling + fine speckle (reference: matte industrial floor). */
+function createConcreteFloorTexture() {
+  const canvas = document.createElement("canvas");
+  canvas.width = 512;
+  canvas.height = 512;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return null;
+  const base = ctx.createLinearGradient(0, 0, 512, 512);
+  base.addColorStop(0, "#2e3038");
+  base.addColorStop(0.45, "#25262e");
+  base.addColorStop(1, "#1c1d24");
+  ctx.fillStyle = base;
+  ctx.fillRect(0, 0, 512, 512);
+  let seed = 90210;
+  const rnd = () => {
+    seed = (seed * 1103515245 + 12345) >>> 0;
+    return seed / 4294967296;
+  };
+  for (let n = 0; n < 95; n++) {
+    const cx = rnd() * 512;
+    const cy = rnd() * 512;
+    const r = 35 + rnd() * 130;
+    const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, r);
+    const t = rnd();
+    g.addColorStop(
+      0,
+      t > 0.5 ? `rgba(210, 218, 232,${0.025 + rnd() * 0.055})` : `rgba(0,0,0,${0.05 + rnd() * 0.09})`,
+    );
+    g.addColorStop(1, "rgba(0,0,0,0)");
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, 512, 512);
+  }
+  for (let i = 0; i < 11000; i++) {
+    const x = rnd() * 512;
+    const y = rnd() * 512;
+    const a = 0.012 + rnd() * 0.038;
+    ctx.fillStyle = rnd() > 0.5 ? `rgba(190, 198, 215,${a})` : `rgba(0,0,0,${a * 1.25})`;
+    ctx.fillRect(x, y, 1, 1);
+  }
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.wrapS = THREE.RepeatWrapping;
+  tex.wrapT = THREE.RepeatWrapping;
+  tex.repeat.set(16, 16);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+
+/** Vast dark floor + near-black void (exponential fog blends horizon into emptiness). */
+function buildDarkStudioWorld(scene) {
+  const floorTex = createConcreteFloorTexture();
+  const floorMat = new THREE.MeshStandardMaterial({
+    map: floorTex || undefined,
+    color: floorTex ? 0xffffff : 0x282930,
+    roughness: 0.78,
+    metalness: 0.04,
+    envMapIntensity: 0.09,
+  });
+  const floor = new THREE.Mesh(new THREE.PlaneGeometry(160, 160), floorMat);
+  floor.rotation.x = -Math.PI / 2;
+  floor.receiveShadow = true;
+  scene.add(floor);
+}
+
+function pickMime() {
+  const c = [
+    "video/webm;codecs=vp9,opus",
+    "video/webm;codecs=vp8,opus",
+    "video/webm",
+  ];
+  for (const m of c) {
+    if (MediaRecorder.isTypeSupported(m)) return m;
+  }
+  return "";
+}
+
+function stopMicTracksOnly() {
+  if (micStream) micStream.getTracks().forEach((t) => t.stop());
+}
+
+function stopAllMedia() {
+  stopMicTracksOnly();
+  if (screenCaptureStream) {
+    screenCaptureStream.getTracks().forEach((t) => t.stop());
+    screenCaptureStream = null;
+  }
+  micStream = null;
+}
+
+function updateVideoSourceUi() {
+  const display = videoSourceSelect.value === "display";
+  camLabel.textContent = display ? "Screen / window" : "Camera";
+  btnShareAgain.style.display = display ? "block" : "none";
+}
+
+async function fillDeviceLists(stream) {
+  const devices = await navigator.mediaDevices.enumerateDevices();
+  const cams = devices.filter((d) => d.kind === "videoinput");
+  const mics = devices.filter((d) => d.kind === "audioinput");
+  camSelect.innerHTML = "";
+  micSelect.innerHTML = "";
+  for (const d of cams) {
+    const o = document.createElement("option");
+    o.value = d.deviceId;
+    o.textContent = d.label || `Camera ${camSelect.length + 1}`;
+    camSelect.appendChild(o);
+  }
+  for (const d of mics) {
+    const o = document.createElement("option");
+    o.value = d.deviceId;
+    o.textContent = d.label || `Mic ${micSelect.length + 1}`;
+    micSelect.appendChild(o);
+  }
+  const vt = stream.getVideoTracks()[0];
+  const at = stream.getAudioTracks()[0];
+  if (vt?.getSettings?.().deviceId) camSelect.value = vt.getSettings().deviceId;
+  if (at?.getSettings?.().deviceId) micSelect.value = at.getSettings().deviceId;
+  camSelect.disabled = cams.length === 0;
+  micSelect.disabled = mics.length === 0;
+  if (cams.length === 0) {
+    const o = document.createElement("option");
+    o.value = "";
+    o.textContent = "No camera found";
+    camSelect.appendChild(o);
+  }
+  if (mics.length === 0) {
+    const o = document.createElement("option");
+    o.value = "";
+    o.textContent = "No microphone found";
+    micSelect.appendChild(o);
+  }
+}
+
+/** After display capture: only microphone devices need listing. */
+async function fillMicListOnly(micAudioStream) {
+  const devices = await navigator.mediaDevices.enumerateDevices();
+  const mics = devices.filter((d) => d.kind === "audioinput");
+  micSelect.innerHTML = "";
+  for (const d of mics) {
+    const o = document.createElement("option");
+    o.value = d.deviceId;
+    o.textContent = d.label || `Mic ${micSelect.length + 1}`;
+    micSelect.appendChild(o);
+  }
+  const at = micAudioStream.getAudioTracks()[0];
+  if (at?.getSettings?.().deviceId) micSelect.value = at.getSettings().deviceId;
+  micSelect.disabled = mics.length === 0;
+  camSelect.innerHTML = "";
+  const co = document.createElement("option");
+  co.value = "display";
+  co.textContent = "Window / screen (use “Share…” to pick another)";
+  camSelect.appendChild(co);
+  camSelect.disabled = true;
+}
+
+function attachVideoTexture() {
+  if (videoTexture) videoTexture.dispose();
+  videoTexture = new THREE.VideoTexture(hiddenVideo);
+  videoTexture.colorSpace = THREE.SRGBColorSpace;
+  videoTexture.minFilter = THREE.LinearFilter;
+  videoTexture.magFilter = THREE.LinearFilter;
+  if (screenMesh) {
+    screenMesh.material.color.setHex(0xffffff);
+    screenMesh.material.map = videoTexture;
+    screenMesh.material.roughness = 0.22;
+    screenMesh.material.metalness = 0.02;
+    screenMesh.material.envMapIntensity = 0.55;
+    screenMesh.material.transparent = true;
+    screenMesh.material.opacity = 0.78;
+    screenMesh.material.depthWrite = false;
+    screenMesh.material.needsUpdate = true;
+  }
+  applyScreenVolume();
+  applyMicVolume();
+}
+
+function onDisplayTrackEnded() {
+  setStatus(
+    "<span style='color:#e8a088'>Screen/window share ended. Click <strong>Share…</strong> or <strong>Enable microphone &amp; video</strong> again.</span>",
+  );
+  btnRec.disabled = true;
+}
+
+async function applySelectedDevices() {
+  if (videoSourceSelect.value === "camera") {
+    if (!camSelect.value && !micSelect.value) return;
+    const vId = camSelect.value ? { exact: camSelect.value } : true;
+    const aId = micSelect.value ? { exact: micSelect.value } : true;
+    stopAllMedia();
+    const next = await navigator.mediaDevices.getUserMedia({
+      video: vId,
+      audio: aId,
+    });
+    micStream = next;
+    hiddenVideo.srcObject = streamForVideoElementFromWebcam(next);
+    await hiddenVideo.play().catch(() => {});
+    setupAnalyser(new MediaStream(next.getAudioTracks()));
+    attachVideoTexture();
+    setStatus("<strong>Ready.</strong> Orb reacts to your voice. Record captures this 3D view + mic.");
+    return;
+  }
+
+  if (!micSelect.value) return;
+  const vt = screenCaptureStream?.getVideoTracks?.()?.[0];
+  if (!vt || vt.readyState !== "live") {
+    setStatus(
+      "<span style='color:#ff8899'>No active window capture. Click <strong>Share…</strong> or enable again.</span>",
+    );
+    return;
+  }
+  stopMicTracksOnly();
+  const nextMic = await navigator.mediaDevices.getUserMedia({
+    audio: { exact: micSelect.value },
+    video: false,
+  });
+  micStream = nextMic;
+  hiddenVideo.srcObject = streamForVideoElementFromDisplay(vt, screenCaptureStream);
+  await hiddenVideo.play().catch(() => {});
+  setupAnalyser(nextMic);
+  attachVideoTexture();
+  setStatus("<strong>Mic updated.</strong> Video still from your shared window.");
+}
+
+let screenMesh = null;
+
+/** Big screen plane: video track + display/tab audio only (never the mic). */
+function streamForVideoElementFromWebcam(fullStream) {
+  return new MediaStream(fullStream.getVideoTracks());
+}
+
+function streamForVideoElementFromDisplay(videoTrack, displayStream) {
+  const ats = displayStream.getAudioTracks().filter((t) => t.kind === "audio" && t.readyState === "live");
+  return new MediaStream([videoTrack, ...ats]);
+}
+
+/**
+ * Organic idle drift + voice “aliveness”: offset from home (metres).
+ * Feels like a small floating presence, not a static scale-only ball.
+ */
+function orbWanderOffset(t, level) {
+  const w = orbWanderSeed;
+  const slow = 0.38;
+  const mid = 0.72;
+  const x =
+    Math.sin(t * slow + w) * 0.26 +
+    Math.sin(t * mid + w * 1.7) * 0.11 +
+    Math.sin(t * 1.85 + 2.1) * 0.05;
+  const y =
+    Math.sin(t * 0.55 + w * 0.4) * 0.1 +
+    Math.sin(t * 0.31) * 0.045 +
+    level * 0.11;
+  const z =
+    Math.cos(t * 0.48 + w * 0.9) * 0.2 +
+    Math.sin(t * 0.67 + 1.3) * 0.09 +
+    level * 0.07;
+  const talkPulse = level * level;
+  return new THREE.Vector3(
+    x + talkPulse * Math.sin(t * 7.2) * 0.06,
+    y + talkPulse * 0.04,
+    z + talkPulse * Math.cos(t * 6.8) * 0.05,
+  );
+}
+
+function setupAnalyser(stream) {
+  if (audioCtx) {
+    try {
+      audioCtx.close();
+    } catch {
+      /* */
+    }
+  }
+  micMonitorGain = null;
+  audioCtx = new AudioContext();
+  if (audioCtx.state === "suspended") void audioCtx.resume();
+  const src = audioCtx.createMediaStreamSource(stream);
+  analyser = audioCtx.createAnalyser();
+  analyser.fftSize = 512;
+  analyser.smoothingTimeConstant = 0.65;
+  src.connect(analyser);
+  const silent = audioCtx.createGain();
+  silent.gain.value = 0;
+  analyser.connect(silent);
+  silent.connect(audioCtx.destination);
+
+  micMonitorGain = audioCtx.createGain();
+  micMonitorGain.gain.value = Number(micVol?.value ?? 0) / 100;
+  src.connect(micMonitorGain);
+  micMonitorGain.connect(audioCtx.destination);
+
+  ampSmooth = 0;
+}
+
+function getMicLevel() {
+  if (!analyser) return 0;
+  const buf = new Float32Array(analyser.fftSize);
+  analyser.getFloatTimeDomainData(buf);
+  let s = 0;
+  for (let i = 0; i < buf.length; i++) s += buf[i] * buf[i];
+  const rms = Math.sqrt(s / buf.length);
+  const n = Math.min(1, rms * 5.5);
+  ampSmooth = ampSmooth * 0.82 + n * 0.18;
+  return ampSmooth;
+}
+
+function initThree() {
+  scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x050506);
+  scene.fog = new THREE.FogExp2(0x050506, 0.0175);
+
+  camera = new THREE.PerspectiveCamera(42, 1, 0.1, 160);
+  camera.position.set(0, 1.72, 7.1);
+
+  renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false, powerPreference: "high-performance" });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  renderer.outputColorSpace = THREE.SRGBColorSpace;
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.toneMappingExposure = 0.78;
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+  try {
+    const pmrem = new THREE.PMREMGenerator(renderer);
+    scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.035).texture;
+    pmrem.dispose();
+  } catch (err) {
+    console.warn("[Podcast studio] PMREM / RoomEnvironment:", err);
+  }
+
+  controls = new OrbitControls(camera, canvas);
+  controls.target.set(0, 1.55, -2.4);
+  controls.enableDamping = true;
+  controls.dampingFactor = 0.055;
+  controls.minDistance = 3.8;
+  controls.maxDistance = 18;
+  controls.minPolarAngle = 0.28;
+  controls.maxPolarAngle = Math.PI / 2 - 0.06;
+  controls.maxAzimuthAngle = Infinity;
+  controls.minAzimuthAngle = -Infinity;
+  controls.enablePan = true;
+  controls.panSpeed = 0.65;
+  controls.update();
+
+  window.addEventListener(
+    "keydown",
+    (e) => {
+      if (keyMove[e.code] === undefined) return;
+      if (isTypingTarget(e.target)) return;
+      e.preventDefault();
+      keyMove[e.code] = true;
+    },
+    { passive: false },
+  );
+  window.addEventListener("keyup", (e) => {
+    if (keyMove[e.code] !== undefined) keyMove[e.code] = false;
+  });
+
+  const hemi = new THREE.HemisphereLight(0x3a4450, 0x08090a, 0.28);
+  scene.add(hemi);
+
+  const spot = new THREE.SpotLight(0xd4dae6, 1.35, 120, Math.PI / 4.2, 0.52, 1);
+  spot.position.set(0.5, 26, 5);
+  spot.castShadow = true;
+  spot.shadow.mapSize.set(2048, 2048);
+  spot.shadow.bias = -0.00015;
+  spot.target.position.set(0, 0, 0);
+  scene.add(spot);
+  scene.add(spot.target);
+
+  const key = new THREE.DirectionalLight(0xc8ccd4, 0.22);
+  key.position.set(8, 14, 12);
+  key.castShadow = false;
+  scene.add(key);
+
+  const fill = new THREE.DirectionalLight(0x586878, 0.06);
+  fill.position.set(-12, 4, -8);
+  scene.add(fill);
+
+  buildDarkStudioWorld(scene);
+
+  const orbGeo = new THREE.SphereGeometry(0.4, 96, 96);
+  const orbMat = new THREE.MeshPhysicalMaterial({
+    color: 0xc4a574,
+    emissive: new THREE.Color(0x5c4a30),
+    emissiveIntensity: 0.14,
+    metalness: 0.22,
+    roughness: 0.58,
+    envMapIntensity: 0.88,
+    clearcoat: 0.62,
+    clearcoatRoughness: 0.28,
+    sheen: 0.35,
+    sheenRoughness: 0.55,
+    sheenColor: new THREE.Color(0xffe8c8),
+  });
+  orbMesh = new THREE.Mesh(orbGeo, orbMat);
+  orbHome.set(0, 1.28, 0.38);
+  orbMesh.position.copy(orbHome);
+  orbPosSmooth.copy(orbHome);
+  orbMesh.castShadow = true;
+  orbBaseScale = 1;
+  scene.add(orbMesh);
+
+  const orbGlow = new THREE.PointLight(0xf5d4a0, 1.55, 14, 2.1);
+  orbGlow.position.copy(orbMesh.position);
+  orbGlow.castShadow = false;
+  scene.add(orbGlow);
+  orbMesh.userData.glow = orbGlow;
+
+  screenGroup = new THREE.Group();
+  screenGroup.position.set(0, 3.68, -10.8);
+  screenGroup.rotation.order = "YXZ";
+  screenGroup.rotation.y = -0.07;
+  screenGroup.rotation.x = 0.055;
+  scene.add(screenGroup);
+
+  const sw = 11.2;
+  const sh = 6.25;
+  const haloGeo = new THREE.PlaneGeometry(sw * 1.12, sh * 1.12);
+  const haloMat = new THREE.MeshBasicMaterial({
+    color: 0x5070c0,
+    transparent: true,
+    opacity: 0.08,
+    side: THREE.DoubleSide,
+    depthWrite: false,
+  });
+  const screenHalo = new THREE.Mesh(haloGeo, haloMat);
+  screenHalo.position.z = -0.14;
+  screenGroup.add(screenHalo);
+
+  const screenGeo = new THREE.PlaneGeometry(sw, sh);
+  const screenMat = new THREE.MeshPhysicalMaterial({
+    color: 0x101018,
+    roughness: 0.85,
+    metalness: 0,
+    envMapIntensity: 0.35,
+    clearcoat: 0.35,
+    clearcoatRoughness: 0.4,
+    side: THREE.FrontSide,
+    transparent: true,
+    opacity: 0.78,
+    depthWrite: false,
+  });
+  screenMesh = new THREE.Mesh(screenGeo, screenMat);
+  screenMesh.position.z = 0.04;
+  screenGroup.add(screenMesh);
+
+  const bezelMat = new THREE.MeshPhysicalMaterial({
+    color: 0x141820,
+    metalness: 0.9,
+    roughness: 0.2,
+    envMapIntensity: 1.1,
+    clearcoat: 0.9,
+    clearcoatRoughness: 0.15,
+  });
+  const t = 0.09;
+  const d = 0.06;
+  const bw = sw + t * 2;
+  const bh = sh + t * 2;
+  const top = new THREE.Mesh(new THREE.BoxGeometry(bw, t, d), bezelMat);
+  top.position.set(0, sh / 2 + t / 2, -d / 2);
+  const bot = new THREE.Mesh(new THREE.BoxGeometry(bw, t, d), bezelMat);
+  bot.position.set(0, -sh / 2 - t / 2, -d / 2);
+  const left = new THREE.Mesh(new THREE.BoxGeometry(t, sh, d), bezelMat);
+  left.position.set(-sw / 2 - t / 2, 0, -d / 2);
+  const right = new THREE.Mesh(new THREE.BoxGeometry(t, sh, d), bezelMat);
+  right.position.set(sw / 2 + t / 2, 0, -d / 2);
+  screenGroup.add(top, bot, left, right);
+
+  css3dRenderer = new CSS3DRenderer();
+  const wrap = document.getElementById("wrap");
+  css3dRenderer.domElement.style.position = "absolute";
+  css3dRenderer.domElement.style.left = "0";
+  css3dRenderer.domElement.style.top = "0";
+  css3dRenderer.domElement.style.width = "100%";
+  css3dRenderer.domElement.style.height = "100%";
+  css3dRenderer.domElement.style.pointerEvents = "none";
+  css3dRenderer.domElement.style.zIndex = "5";
+  wrap.appendChild(css3dRenderer.domElement);
+
+  const panelEl = document.getElementById("panel");
+  panelEl.style.visibility = "visible";
+  const panelObj = new CSS3DObject(panelEl);
+  panelObj.position.set(-7.2, 0.02, 0.38);
+  panelObj.scale.set(0.01, 0.01, 0.01);
+  screenGroup.add(panelObj);
+
+  function resize() {
+    const w = canvas.clientWidth || window.innerWidth;
+    const h = canvas.clientHeight || window.innerHeight;
+    camera.aspect = w / Math.max(h, 1);
+    camera.updateProjectionMatrix();
+    renderer.setSize(w, h, false);
+    if (css3dRenderer) css3dRenderer.setSize(w, h);
+  }
+  window.addEventListener("resize", resize);
+  resize();
+  requestAnimationFrame(() => resize());
+}
+
+function animate() {
+  requestAnimationFrame(animate);
+  const dt = clock.getDelta();
+  const t = clock.getElapsedTime();
+  const level = getMicLevel();
+
+  if (orbMesh) {
+    const wander = orbWanderOffset(t, level);
+    const target = orbHome.clone().add(wander);
+    const smooth = Math.min(1, 4.2 * dt);
+    orbPosSmooth.lerp(target, smooth);
+    orbMesh.position.copy(orbPosSmooth);
+
+    const s = orbBaseScale * (1 + level * 0.42);
+    orbMesh.scale.setScalar(s);
+
+    const breathe = 0.08 * Math.sin(t * 1.9 + orbWanderSeed);
+    orbMesh.rotation.x = Math.sin(t * 0.33 + 0.5) * 0.14 + level * 0.22 + breathe;
+    orbMesh.rotation.y = Math.sin(t * 0.27 + 1.1) * 0.22 + t * 0.045 + level * 0.18;
+    orbMesh.rotation.z = Math.cos(t * 0.36 + 0.8) * 0.1 + Math.sin(t * 0.61) * 0.06;
+
+    orbMesh.material.emissiveIntensity = 0.1 + level * 2.15 + Math.abs(breathe) * 0.12;
+    const g = orbMesh.userData.glow;
+    if (g) {
+      g.position.copy(orbMesh.position);
+      g.intensity = 1.05 + level * 3.6 + 0.18 * Math.sin(t * 2.4);
+      g.color.setRGB(0.98, 0.86 + level * 0.08, 0.62 + level * 0.12);
+    }
+  }
+  if (videoTexture) videoTexture.needsUpdate = true;
+
+  if (controls && camera) {
+    const typing = isTypingTarget(document.activeElement);
+    if (!typing) {
+      const speed = 5.4 * dt;
+      const forward = new THREE.Vector3();
+      camera.getWorldDirection(forward);
+      forward.y = 0;
+      if (forward.lengthSq() < 1e-8) forward.set(0, 0, -1);
+      else forward.normalize();
+      const right = new THREE.Vector3().crossVectors(forward, new THREE.Vector3(0, 1, 0)).normalize();
+      const move = new THREE.Vector3();
+      if (keyMove.ArrowUp) move.add(forward);
+      if (keyMove.ArrowDown) move.sub(forward);
+      if (keyMove.ArrowLeft) move.sub(right);
+      if (keyMove.ArrowRight) move.add(right);
+      if (move.lengthSq() > 0) {
+        move.normalize().multiplyScalar(speed);
+        camera.position.add(move);
+        controls.target.add(move);
+      }
+    }
+  }
+
+  if (controls) controls.update();
+  renderer.render(scene, camera);
+  if (css3dRenderer) css3dRenderer.render(scene, camera);
+}
+
+let deviceListenersAttached = false;
+
+function applyScreenVolume() {
+  if (!screenVol) return;
+  const v = Math.min(1, Math.max(0, Number(screenVol.value) / 100));
+  hiddenVideo.volume = v;
+  hiddenVideo.muted = v < 0.0001;
+}
+
+function applyMicVolume() {
+  if (!micMonitorGain) return;
+  micMonitorGain.gain.value = Math.min(1, Math.max(0, Number(micVol?.value ?? 0) / 100));
+}
+
+screenVol.addEventListener("input", applyScreenVolume);
+micVol.addEventListener("input", applyMicVolume);
+
+videoSourceSelect.addEventListener("change", () => {
+  updateVideoSourceUi();
+  if (!btnRec.disabled) {
+    setStatus(
+      "Video mode changed — click <strong>Enable microphone &amp; video</strong> again to use webcam or screen/window.",
+    );
+  }
+});
+
+function wireDisplayVideoTrack(track) {
+  track.removeEventListener("ended", onDisplayTrackEnded);
+  track.addEventListener("ended", onDisplayTrackEnded);
+}
+
+btnShareAgain.addEventListener("click", async () => {
+  if (videoSourceSelect.value !== "display") return;
+  setStatus("Choose a monitor, window, or browser tab in the dialog…");
+  try {
+    if (screenCaptureStream) screenCaptureStream.getTracks().forEach((t) => t.stop());
+    if (!navigator.mediaDevices?.getDisplayMedia) {
+      throw new Error("getDisplayMedia not supported");
+    }
+    screenCaptureStream = await navigator.mediaDevices.getDisplayMedia({
+      video: true,
+      audio: true,
+    });
+    const vt = screenCaptureStream.getVideoTracks()[0];
+    wireDisplayVideoTrack(vt);
+    if (!micStream?.getAudioTracks?.()?.[0]) {
+      setStatus("<span style='color:#ff8899'>Enable microphone first (main button), then use Share…</span>");
+      return;
+    }
+    hiddenVideo.srcObject = streamForVideoElementFromDisplay(vt, screenCaptureStream);
+    await hiddenVideo.play().catch(() => {});
+    attachVideoTexture();
+    btnRec.disabled = false;
+    btnShareAgain.disabled = false;
+    setStatus("<strong>Window updated.</strong> Orb still follows your mic.");
+  } catch (e) {
+    const name = e?.name || "";
+    if (name !== "NotAllowedError" && name !== "AbortError") console.warn(e);
+    setStatus(name === "AbortError" ? "Share cancelled." : `Could not share: ${String(e.message || e)}`);
+  }
+});
+
+btnPerm.addEventListener("click", async () => {
+  btnPerm.disabled = true;
+  btnShareAgain.disabled = true;
+  try {
+    if (!navigator.mediaDevices?.getUserMedia) {
+      throw new Error("This page needs a modern browser with getUserMedia (use Chrome or Edge).");
+    }
+    const useDisplay = videoSourceSelect.value === "display";
+
+    if (useDisplay) {
+      if (!navigator.mediaDevices.getDisplayMedia) {
+        throw new Error("Screen/window capture is not supported in this browser.");
+      }
+      stopAllMedia();
+      setStatus("Pick a <strong>monitor</strong>, <strong>window</strong> (Discord, Zoom, etc.), or <strong>browser tab</strong>…");
+      screenCaptureStream = await navigator.mediaDevices.getDisplayMedia({
+        video: true,
+        audio: true,
+      });
+      const vt = screenCaptureStream.getVideoTracks()[0];
+      wireDisplayVideoTrack(vt);
+
+      setStatus("Now allowing microphone…");
+      const micOnly = await navigator.mediaDevices.getUserMedia({
+        audio: true,
+        video: false,
+      });
+      micStream = micOnly;
+      hiddenVideo.srcObject = streamForVideoElementFromDisplay(vt, screenCaptureStream);
+      await hiddenVideo.play().catch((err) => console.warn(err));
+
+      await fillMicListOnly(micStream);
+      if (!deviceListenersAttached) {
+        deviceListenersAttached = true;
+        camSelect.addEventListener("change", () => void applySelectedDevices());
+        micSelect.addEventListener("change", () => void applySelectedDevices());
+      }
+      setupAnalyser(micStream);
+      attachVideoTexture();
+      btnRec.disabled = false;
+      btnShareAgain.disabled = false;
+      setStatus(
+        "<strong>Live — window capture.</strong> Change mic above; use <strong>Share…</strong> to pick another window. Orb uses your microphone.",
+      );
+    } else {
+      stopAllMedia();
+      setStatus("Requesting camera and microphone…");
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: true,
+        audio: true,
+      });
+      micStream = stream;
+      hiddenVideo.srcObject = streamForVideoElementFromWebcam(stream);
+      await hiddenVideo.play().catch((err) => {
+        console.warn(err);
+      });
+      await fillDeviceLists(stream);
+      camSelect.disabled = false;
+      if (!deviceListenersAttached) {
+        deviceListenersAttached = true;
+        camSelect.addEventListener("change", () => void applySelectedDevices());
+        micSelect.addEventListener("change", () => void applySelectedDevices());
+      }
+      setupAnalyser(new MediaStream(stream.getAudioTracks()));
+      attachVideoTexture();
+      btnRec.disabled = false;
+      setStatus("<strong>Live — webcam.</strong> Change camera/mic above. Orb follows voice level.");
+    }
+  } catch (e) {
+    const msg = String(e.message || e);
+    const name = e?.name || "";
+    stopAllMedia();
+    setStatus(
+      `<span style="color:#ff8899">Could not start: ${msg}</span><br/><span style="font-size:11px;color:#7a8fa8">Allow camera/mic/screen in the address bar. For screen share, pick a window in the system dialog. Brave: lower Shields. Use <code>http://127.0.0.1</code> or <code>localhost</code>.</span>`,
+    );
+    if (name !== "NotAllowedError" && name !== "AbortError") console.warn(e);
+    btnPerm.disabled = false;
+    return;
+  }
+  btnPerm.disabled = false;
+});
+
+updateVideoSourceUi();
+
+function formatTime(ms) {
+  const s = Math.floor(ms / 1000);
+  const m = Math.floor(s / 60);
+  const r = s % 60;
+  return `${m}:${r.toString().padStart(2, "0")}`;
+}
+
+btnRec.addEventListener("click", () => {
+  const mime = pickMime();
+  if (!mime) {
+    setStatus("<span style='color:#ff8899'>Recording not supported in this browser.</span>");
+    return;
+  }
+  const canvasStream = renderer.domElement.captureStream(30);
+  const out = new MediaStream();
+  canvasStream.getVideoTracks().forEach((t) => out.addTrack(t));
+  if (micStream) {
+    micStream.getAudioTracks().forEach((t) => out.addTrack(t));
+  }
+  recordedChunks = [];
+  try {
+    mediaRecorder = new MediaRecorder(out, { mimeType: mime, videoBitsPerSecond: 8000000 });
+  } catch {
+    mediaRecorder = new MediaRecorder(out);
+  }
+  mediaRecorder.ondataavailable = (ev) => {
+    if (ev.data.size) recordedChunks.push(ev.data);
+  };
+  mediaRecorder.onstop = () => {
+    const blob = new Blob(recordedChunks, { type: mediaRecorder.mimeType || "video/webm" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `luna-podcast-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-")}.webm`;
+    a.click();
+    URL.revokeObjectURL(url);
+    setStatus("<strong>Saved download.</strong> Ready to record again.");
+    btnRec.disabled = false;
+    btnStopRec.disabled = true;
+    btnPerm.disabled = false;
+  };
+  mediaRecorder.start(200);
+  recStart = performance.now();
+  btnRec.disabled = true;
+  btnStopRec.disabled = false;
+  btnPerm.disabled = true;
+  recTimer = setInterval(() => {
+    setStatus(`<strong>Recording</strong> ${formatTime(performance.now() - recStart)} — Stop when finished.`);
+  }, 500);
+  setStatus("<strong>Recording…</strong> Stop when finished.");
+});
+
+btnStopRec.addEventListener("click", () => {
+  if (mediaRecorder && mediaRecorder.state !== "inactive") {
+    mediaRecorder.stop();
+  }
+  if (recTimer) {
+    clearInterval(recTimer);
+    recTimer = null;
+  }
+});
+
+initThree();
+animate();
+</script>
+</body>
+</html>

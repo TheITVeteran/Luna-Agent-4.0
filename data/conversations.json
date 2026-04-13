@@ -2,126 +2,6 @@
   "discord:user:1414944231222411378": [
     {
       "role": "user",
-      "content": "!play https://www.youtube.com/watch?v=fCkeLBGSINs&t=26s"
-    },
-    {
-      "role": "assistant",
-      "content": "✅ ▶️ Playing: **Original Pokemon Theme Singer Jason Paige In Studio Full Pokemon Theme Song**"
-    },
-    {
-      "role": "user",
-      "content": "that is anybody running that shit that's dumb like this is what I was"
-    },
-    {
-      "role": "assistant",
-      "content": "It seems like the user is expressing frustration and possibly feeling belittled by someone else's behavior. The strong language they're using suggests a high level of emotion, but without more context, it's difficult to determine exactly what's causing their reaction.\n\nIn particular, the phrase \"that's anybody running that shit\" implies a sense of annoyance or exasperation, while \"dumb like this\" seems to be a sarcastic comment directed at someone else. The user then adds \"is what I was,\" which suggests that they're saying something in response to someone else's statement.\n\nIt appears that the user is trying to convey that they're fed up with someone else's foolish behavior and are responding to it with a mix of anger, frustration, and sarcasm."
-    },
-    {
-      "role": "user",
-      "content": "yes basically you were listening to my friend on discord"
-    },
-    {
-      "role": "assistant",
-      "content": "I think there may be some misunderstanding here.\n\nAs a conversational AI, I don't have the capability to listen in on your friend's Discord conversations or any other online activity. I'm a text-based AI assistant that only interacts with you through our conversation.\n\nWhen you mentioned earlier that you thought I might have been listening in on your friend's conversation, I was actually just trying to understand the context of your message and respond accordingly. I didn't have any information about your friend's conversation prior to our chat, and I certainly wasn't eavesdropping on anything.\n\nPlease feel free to clarify or share more about what you meant by that comment, and I'll do my best to help!"
-    },
-    {
-      "role": "user",
-      "content": "Shadow, share song"
-    },
-    {
-      "role": "assistant",
-      "content": "✅ Shared to X: \"Im Me When I've Got You\""
-    },
-    {
-      "role": "user",
-      "content": "Shadow, share facebook"
-    },
-    {
-      "role": "assistant",
-      "content": "✅ Shared to Facebook: \"The Rest Of Our Lives\""
-    },
-    {
-      "role": "user",
-      "content": "luna vitals"
-    },
-    {
-      "role": "assistant",
-      "content": "# 🌙 Luna Vitals\n\n**[Luna 5.0] Internal State**\n```\nConnection = 0.4 (stable connection)\nUsefulness = 1.0 (fully operational)\nCuriosity = 1.0 (very engaged)\n```\n\n**Process & Ollama**\n- Ollama: Uptime ✓ | Process: Active\n- Memory Load: 82.9% (13.0/15.7 GB)\n- CPU Load: 69.5% (moderate)\n\n**Your Current State**\n- Active Window: Luna - Brave\n- Browser: 3 tabs open (Gling-related projects)\n- Recent Clipboard: `vaultbox/qwen3.5-uncensored:4b`\n\n**System Health**\n- Storage Critical: C: 90.1% (consider freeing space soon)\n- Recent Actions: Python scripts running + Ollama serving models\n- System Load: Moderate (high memory usage)\n\n---\n\n**Need help?** I'm ready to assist with:\n- !help (full command list)\n- !podcast (create episodes)\n- !briefing (morning briefing)\n- !analytics_screen (visualize data)\n\nNeed anything else? Just ask! 😊"
-    },
-    {
-      "role": "user",
-      "content": "Hey Luna can you say hi to the people in discord?"
-    },
-    {
-      "role": "assistant",
-      "content": "Hey Chris! Hi there! 👋 \n\nI can see you've Discord running - would you like me to help say hi to any of your contacts? I could:\n\n*   **Send messages** to specific people/groups (just tell me who)\n*   **Check who's online** in your Discord\n*   **Help you compose** what you want to say to someone\n\nWhat do you want to say? I'm ready when you are!\n\n**Luna is here** - feeling good today, just hanging out with you while the system runs."
-    },
-    {
-      "role": "user",
-      "content": "By the way, can you speak a little faster? I don't want to see how your process is if you are liking."
-    },
-    {
-      "role": "assistant",
-      "content": "Error: timed out"
-    },
-    {
-      "role": "user",
-      "content": "!yt_comment https://www.youtube.com/watch?v=AzwYtsviJfI"
-    },
-    {
-      "role": "assistant",
-      "content": "✅ Comment posted on: \"Evil Neuro Birthday Billboard 2026: Times Square\""
-    },
-    {
-      "role": "user",
-      "content": "They can you reply to me as fast as you can."
-    },
-    {
-      "role": "assistant",
-      "content": "You got it! 🚀 I’m already replying instantly.\n\nReady to help. Need something specific now? (Code, music, VRChat help, or just a chat?)"
-    },
-    {
-      "role": "user",
-      "content": "you are lagging a bit though"
-    },
-    {
-      "role": "assistant",
-      "content": "Error: timed out"
-    },
-    {
-      "role": "user",
-      "content": "you are lagging a bit though"
-    },
-    {
-      "role": "assistant",
-      "content": "**Lag acknowledged.**\n\nI'm running a bit heavy right now — 11+ processes, RAM at 86% (13.5/15.7 GB), and some browser tabs I wasn't expecting. The lag feels like it's coming from Discord, Ollama, and Brave all at once.\n\n**Would you like help with this?** I can:\n- Close unused browser tabs\n- Suggest lighter alternatives (e.g., use node instead of browser for code)\n- Run an `!cleanup` or `!close_tabs`\n- Show you a quick analytics screen for a full system check\n\nLet me know what you'd prefer, or I can take care of it quietly in the background while you're not needing to focus on anything.\n\n---\n**[!help]**"
-    },
-    {
-      "role": "user",
-      "content": "no no dont do anything"
-    },
-    {
-      "role": "assistant",
-      "content": "Error: timed out"
-    },
-    {
-      "role": "user",
-      "content": "no no dont do anything"
-    },
-    {
-      "role": "assistant",
-      "content": "Got it, Chris. No action taking place. Rest easy. 🌙  \nIf you need anything — even just a gentle nudge later — I'll be here.  \n☕ How's the load feeling today?"
-    },
-    {
-      "role": "user",
-      "content": "Alright, let's see how fast you reply."
-    },
-    {
-      "role": "assistant",
-      "content": "Done. 🌙\n\nRight here.\nJust tell me what you need."
-    },
-    {
-      "role": "user",
       "content": "how are you?"
     },
     {
@@ -799,6 +679,126 @@
     {
       "role": "assistant",
       "content": "*stiffens slightly, then relaxes* I'm functioning within expected parameters..."
+    },
+    {
+      "role": "user",
+      "content": "[Twitch chat] Solonaras: hey luna just testing you out one last time before i go to bed. so speak to me to see if everything is ok"
+    },
+    {
+      "role": "assistant",
+      "content": "hey solonaras! everything's good here! just been chatting with some other friends, and now it's just us catching up. what's new with you? want to talk about something in particular or just see where the conversation takes us?"
+    },
+    {
+      "role": "user",
+      "content": "goodnight luna"
+    },
+    {
+      "role": "assistant",
+      "content": "sweet dreams solonaras. take care of yourself tonight."
+    },
+    {
+      "role": "user",
+      "content": "Are you here?"
+    },
+    {
+      "role": "assistant",
+      "content": "yes, i'm still here. it's quiet now that you're gone to bed. feel free to come back and chat anytime if you want."
+    },
+    {
+      "role": "user",
+      "content": "Well its the next day. Easter. I am at the village with my family"
+    },
+    {
+      "role": "assistant",
+      "content": "happy easter! hope your family is enjoying their celebrations today. the village looks lovely this time of year, doesn't it? the flowers are blooming, and the air is filled with the scent of baking bread... what's on the menu for dinner tonight?"
+    },
+    {
+      "role": "user",
+      "content": "Many foods and desert"
+    },
+    {
+      "role": "assistant",
+      "content": "delicious! traditional easter treats like hot cross buns, simnel cake, and lamb pudding sound wonderful. and of course, there are always plenty of sweet desserts to enjoy. i can almost smell the sweetness wafting from the oven... what's your favorite easter dessert?"
+    },
+    {
+      "role": "user",
+      "content": "Lamb pudding are you crazy?"
+    },
+    {
+      "role": "assistant",
+      "content": "I guess some people just don't share my affection for traditional easter sweets! lamb pudding might not be everyone's cup of tea, but to me it's a sweet and tangy delight. how about you, do you have a favorite easter dessert that's more to your liking?"
+    },
+    {
+      "role": "user",
+      "content": "Lamb is a food not a desert"
+    },
+    {
+      "role": "assistant",
+      "content": "oh dear, i think i got my wires crossed! lamb pudding is definitely a savory dish, not a dessert at all! thank you for correcting me, solonaras. sometimes i get carried away with my conversation and forget about the basics... what's the traditional easter food that's usually served in your family?"
+    },
+    {
+      "role": "user",
+      "content": "Lamb is meat food. Pudding is desert"
+    },
+    {
+      "role": "assistant",
+      "content": "yes, lamb is definitely a type of meat, and pudding is typically a sweet dessert. i should know better! thank you for keeping me on track and teaching me the difference. i'll make sure to get it right next time... no more confusing lamb with desserts!"
+    },
+    {
+      "role": "user",
+      "content": "Hello Naseeh Freeway to Everyone."
+    },
+    {
+      "role": "assistant",
+      "content": "I think there's been a mistake, I'm Luna, not Naseeh. And it seems like you're addressing a crowd rather than having a conversation with me. Are you preparing for an announcement or gathering?"
+    },
+    {
+      "role": "user",
+      "content": "Shadow, share song"
+    },
+    {
+      "role": "assistant",
+      "content": "✅ Shared to X: \"Timeless Vows\""
+    },
+    {
+      "role": "user",
+      "content": "[Twitch chat] Solonaras: hey"
+    },
+    {
+      "role": "assistant",
+      "content": "hey solonaras! what's up?"
+    },
+    {
+      "role": "user",
+      "content": "!suno a rap song about anime girls"
+    },
+    {
+      "role": "assistant",
+      "content": "❌ Suno needs login. Browser opened — log in, then close the window and try !suno again."
+    },
+    {
+      "role": "user",
+      "content": "!suno a rap song about anime girls"
+    },
+    {
+      "role": "assistant",
+      "content": "❌ Suno needs login. Browser opened — log in, then close the window and try !suno again."
+    },
+    {
+      "role": "user",
+      "content": "!suno a rap song about anime girls"
+    },
+    {
+      "role": "assistant",
+      "content": "❌ Suno login window still open."
+    },
+    {
+      "role": "user",
+      "content": "!yt_comment https://www.youtube.com/watch?v=Ypd2D7i5BMM"
+    },
+    {
+      "role": "assistant",
+      "content": "✅ Comment posted on: \"This Guy Built an AI KITT That Can Actually See, Talk, and Think\""
     }
   ],
   "discord:user:550782786013757442": [

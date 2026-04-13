@@ -9026,6 +9026,11 @@ def serve_mind():
 def serve_evolution():
     return send_from_directory(_BASE, "evolution.html")
 
+@web.route("/podcast")
+@web.route("/podcast/")
+def serve_podcast_studio():
+    return send_from_directory(_BASE, "podcast_studio.html")
+
 @web.route("/api/status")
 def api_status():
     ollama_ok = False

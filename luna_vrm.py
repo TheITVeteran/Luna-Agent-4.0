@@ -2,10 +2,9 @@
 VRM avatar viewer for Luna — Three.js r180 + @pixiv/three-vrm (see https://github.com/pixiv/three-vrm ).
 
 Animations (default layout next to this repo):
-  - Body / motion VRMA + FBX: LUNA_ANIMATIONS_DIR (default: <project>/Luna animations/) — files in that folder
-    and in motion/ only. Subfolders such as expressions/ are not scanned for body motion.
-  - Expression VRMA (face / blendshapes): LUNA_EXPRESSIONS_DIR or, by default,
-    <Luna animations>/expressions/ — plus optional legacy folders recordings/, expression/, mixamo/ under LUNA_ANIMATIONS_DIR.
+  - Idle body: LUNA_ANIMATIONS_DIR (default: <project>/Luna animations/) — .vrma / .fbx in that folder only (not subfolders).
+  - Talking body: <Luna animations>/talking/ (or LUNA_TALKING_DIR).
+  - Expression VRMA: LUNA_EXPRESSIONS_DIR or <Luna animations>/expressions/.
   - Legacy body: data/vrm/animations/, data/vrm/idle.vrma
 
 Recording your own face for clips (offline, then export VRMA):
@@ -14,7 +13,7 @@ Recording your own face for clips (offline, then export VRMA):
 
 Set LUNA_VRM_PATH for the .vrm model. VRMA files are VRM Animation format (convert pipeline for Mixamo FBX → VRMA as needed).
 
-Optional motion_roles.json in LUNA_ANIMATIONS_DIR or data/vrm/: map basename to "talk" or "idle" when filenames do not match keyword rules (e.g. VRMA_03.vrma → talk).
+Body-motion .vrma with almost no joint movement (T-pose / frozen) are omitted unless LUNA_VRMA_MIN_MOTION_RAD=0 (default min peak delta ~0.035 rad between keyframes).
 
 Mount at /vrm (Blueprint).
 """
@@ -24,7 +23,6 @@ import asyncio
 import json
 import math
 import os
-import re
 import struct
 from typing import Any, Optional
 
@@ -112,6 +110,14 @@ def _expressions_dir() -> str:
     if env:
         return os.path.abspath(os.path.expanduser(env))
     return os.path.join(_luna_animations_root(), "expressions")
+
+
+def _talking_dir() -> str:
+    """Talking body clips: LUNA_TALKING_DIR or <Luna animations>/talking/."""
+    env = (os.environ.get("LUNA_TALKING_DIR") or "").strip()
+    if env:
+        return os.path.abspath(os.path.expanduser(env))
+    return os.path.join(_luna_animations_root(), "talking")
 
 
 def _list_vrma_files_in_dir(d: str) -> list[str]:
@@ -251,8 +257,49 @@ def _vrma_motion_stats(path: str) -> Optional[dict[str, Any]]:
     }
 
 
-def motion_vrma_paths() -> list[str]:
-    """Body / locomotion clips: Luna animations root + motion/ only (not expressions/). Legacy data paths."""
+def _min_body_motion_radians() -> float:
+    """Skip VRMA that barely move (look like T-pose / frozen). Set LUNA_VRMA_MIN_MOTION_RAD=0 to disable."""
+    raw = (os.environ.get("LUNA_VRMA_MIN_MOTION_RAD") or "").strip()
+    if raw.lower() in ("0", "0.0", "off", "false", "no"):
+        return 0.0
+    try:
+        return float(raw) if raw else 0.035
+    except ValueError:
+        return 0.035
+
+
+def _vrma_passes_body_motion_minimum(path: str) -> bool:
+    """
+    Exclude .vrma with no per-frame joint motion (static pose clips) or peak motion below threshold
+    (consecutive-keyframe max rotation delta across channels).
+    """
+    if not path.lower().endswith(".vrma"):
+        return True
+    stats = _vrma_motion_stats(path)
+    if not stats:
+        return True
+    if stats.get("static_pose"):
+        return False
+    min_rad = _min_body_motion_radians()
+    if min_rad <= 0.0:
+        return True
+    peak = float(stats.get("max_rotation_delta_rad") or 0.0)
+    return peak >= min_rad
+
+
+def _filter_body_vrma_paths(paths: list[str]) -> list[str]:
+    out = [p for p in paths if _vrma_passes_body_motion_minimum(p)]
+    if not out and paths:
+        print(
+            "[Luna VRM] All .vrma were below LUNA_VRMA_MIN_MOTION_RAD; using full list. "
+            "Set LUNA_VRMA_MIN_MOTION_RAD=0 to always include low-motion clips.",
+        )
+        return paths
+    return out
+
+
+def idle_vrma_paths() -> list[str]:
+    """Idle body: .vrma in Luna animations root only + legacy data paths (not talking/, expressions/, etc.)."""
     base = _project_base()
     chunks: list[str] = []
     envp = (os.environ.get("LUNA_VRMA_IDLE_PATH") or "").strip()
@@ -262,31 +309,44 @@ def motion_vrma_paths() -> list[str]:
             chunks.append(p)
     root = _luna_animations_root()
     chunks.extend(_list_vrma_files_in_dir(root))
-    chunks.extend(_list_vrma_files_in_dir(os.path.join(root, "motion")))
     chunks.extend(_list_vrma_files_in_dir(os.path.join(base, "data", "vrm", "animations")))
     idle_legacy = os.path.join(base, "data", "vrm", "idle.vrma")
     if os.path.isfile(idle_legacy):
         chunks.append(os.path.abspath(idle_legacy))
-    return _unique_paths(chunks)
+    chunks = _unique_paths(chunks)
+    return _filter_body_vrma_paths(chunks)
+
+
+def talk_vrma_paths() -> list[str]:
+    """Talking body: .vrma in talking/ only."""
+    chunks = _list_vrma_files_in_dir(_talking_dir())
+    return _filter_body_vrma_paths(_unique_paths(chunks))
+
+
+def motion_vrma_paths() -> list[str]:
+    """All body VRMA (idle + talking); for legacy routes."""
+    return _unique_paths(idle_vrma_paths() + talk_vrma_paths())
+
+
+def idle_fbx_paths() -> list[str]:
+    """Idle body FBX in Luna animations root only."""
+    root = _luna_animations_root()
+    return _unique_paths(_list_fbx_files_in_dir(root))
+
+
+def talk_fbx_paths() -> list[str]:
+    """Talking body FBX in talking/."""
+    return _unique_paths(_list_fbx_files_in_dir(_talking_dir()))
 
 
 def motion_fbx_paths() -> list[str]:
-    """Mixamo / FBX clips: Luna animations root + motion/ (same folders as VRMA)."""
-    root = _luna_animations_root()
-    chunks: list[str] = []
-    chunks.extend(_list_fbx_files_in_dir(root))
-    chunks.extend(_list_fbx_files_in_dir(os.path.join(root, "motion")))
-    return _unique_paths(chunks)
+    """All body FBX (idle + talking)."""
+    return _unique_paths(idle_fbx_paths() + talk_fbx_paths())
 
 
 def expression_vrma_paths() -> list[str]:
-    """Face / expression clips: primary LUNA_EXPRESSIONS_DIR or Luna animations/expressions/, plus legacy subfolders."""
-    root = _luna_animations_root()
-    chunks: list[str] = []
-    chunks.extend(_list_vrma_files_in_dir(_expressions_dir()))
-    for sub in ("recordings", "expression", "mixamo"):
-        chunks.extend(_list_vrma_files_in_dir(os.path.join(root, sub)))
-    return _unique_paths(chunks)
+    """Expression / face VRMA in expressions/ only."""
+    return _unique_paths(_list_vrma_files_in_dir(_expressions_dir()))
 
 
 def _animation_paths_ordered() -> list[str]:
@@ -297,189 +357,6 @@ def _animation_paths_ordered() -> list[str]:
 def _label_for_vrma_path(path: str) -> str:
     stem = os.path.splitext(os.path.basename(path))[0]
     return stem.replace("_", " ").replace("-", " ").strip().title() or "Animation"
-
-
-# Tokens → talking pool (speech / mouth / dialog cues)
-_MOTION_TALK_TOKENS = frozenset(
-    {
-        "talk",
-        "talking",
-        "speak",
-        "speaking",
-        "speech",
-        "chat",
-        "chats",
-        "dialog",
-        "dialogs",
-        "dialogue",
-        "conversation",
-        "voice",
-        "voices",
-        "tts",
-        "lipsync",
-        "phoneme",
-        "phonemes",
-        "viseme",
-        "visemes",
-        "say",
-        "saying",
-        "narrate",
-        "narration",
-        "phone",
-        "mic",
-        "mics",
-        "microphone",
-        "lip",
-        "lips",
-    }
-)
-# Tokens → idle pool (body / pose / locomotion — checked after talk)
-_MOTION_IDLE_TOKENS = frozenset(
-    {
-        "idle",
-        "stand",
-        "standing",
-        "sit",
-        "sitting",
-        "lay",
-        "laying",
-        "walk",
-        "walking",
-        "run",
-        "running",
-        "jog",
-        "jogging",
-        "catwalk",
-        "bend",
-        "bending",
-        "crouch",
-        "kneel",
-        "jump",
-        "dance",
-        "wave",
-        "bow",
-        "stretch",
-        "yoga",
-        "sleep",
-        "rest",
-        "locomotion",
-        "pose",
-        "poses",
-        "body",
-        "motion",
-        "motions",
-        "loco",
-    }
-)
-# Substrings (lowercase) when tokens are ambiguous e.g. TalkativeClip
-_MOTION_TALK_SUBSTRINGS = (
-    "talk",
-    "speak",
-    "speech",
-    "chat",
-    "dialog",
-    "voice",
-    "conversation",
-    "lipsync",
-    "phoneme",
-    "viseme",
-    "narrat",
-    "say",
-)
-_MOTION_IDLE_SUBSTRINGS = (
-    "idle",
-    "stand",
-    "sit",
-    "lay",
-    "walk",
-    "run",
-    "catwalk",
-    "bend",
-    "crouch",
-    "kneel",
-    "dance",
-    "wave",
-    "locomotion",
-)
-
-_role_override_path: str | None = None
-_role_override_mtime: float = -1.0
-_role_override_map: dict[str, str] = {}
-
-
-def _motion_role_overrides() -> dict[str, str]:
-    """Optional Luna animations/motion_roles.json (or data/vrm/motion_roles.json): {\"file.vrma\": \"talk\"|\"idle\"}."""
-    global _role_override_path, _role_override_mtime, _role_override_map
-    root = _luna_animations_root()
-    candidates = [
-        os.path.join(root, "motion_roles.json"),
-        os.path.join(_project_base(), "data", "vrm", "motion_roles.json"),
-    ]
-    path = next((p for p in candidates if os.path.isfile(p)), None)
-    if path is None:
-        _role_override_path = None
-        _role_override_mtime = -1.0
-        _role_override_map = {}
-        return {}
-    try:
-        mtime = os.path.getmtime(path)
-        if path == _role_override_path and mtime == _role_override_mtime:
-            return _role_override_map
-        with open(path, encoding="utf-8") as f:
-            raw = json.load(f)
-        out: dict[str, str] = {}
-        for k, v in (raw or {}).items():
-            if k is None or v is None:
-                continue
-            kn = os.path.basename(str(k).strip()).lower()
-            if not kn:
-                continue
-            vn = str(v).strip().lower()
-            if vn in ("talk", "speaking", "speech"):
-                out[kn] = "talk"
-            elif vn in ("idle", "body", "locomotion", "pose"):
-                out[kn] = "idle"
-        _role_override_path = path
-        _role_override_mtime = mtime
-        _role_override_map = out
-        return out
-    except Exception:
-        return _role_override_map
-
-
-def _stem_alnum_tokens(stem: str) -> list[str]:
-    return re.findall(r"[a-z0-9]+", stem.lower())
-
-
-def _motion_role_for_path(path: str) -> str:
-    """
-    Classify a clip for the Talking vs Idle pool: overrides file, then tokens/substrings, else idle.
-    Add motion_roles.json to force names like VRMA_03.vrma → talk.
-    """
-    base = os.path.basename(path)
-    base_l = base.lower()
-    ov = _motion_role_overrides()
-    if base_l in ov:
-        return ov[base_l]
-
-    stem = os.path.splitext(base_l)[0]
-    stem_spaced = stem.replace("_", " ").replace("-", " ")
-    tokens = set(_stem_alnum_tokens(stem_spaced))
-
-    if tokens & _MOTION_TALK_TOKENS:
-        return "talk"
-    if tokens & _MOTION_IDLE_TOKENS:
-        return "idle"
-
-    s = stem_spaced.replace(" ", "")
-    for sub in _MOTION_TALK_SUBSTRINGS:
-        if sub in s:
-            return "talk"
-    for sub in _MOTION_IDLE_SUBSTRINGS:
-        if sub in s:
-            return "idle"
-
-    return "idle"
 
 
 def _label_for_anim_path(path: str) -> str:
@@ -499,7 +376,7 @@ def _vrm_path() -> str:
 
 
 def _vrma_idle_path() -> Optional[str]:
-    paths = motion_vrma_paths()
+    paths = idle_vrma_paths()
     return paths[0] if paths else None
 
 
@@ -550,8 +427,8 @@ def serve_vrm():
 
 @vrm_bp.route("/animation")
 def serve_vrma():
-    """Legacy: first motion VRMA."""
-    paths = motion_vrma_paths()
+    """Legacy: first idle VRMA."""
+    paths = idle_vrma_paths()
     if not paths:
         return (
             jsonify(
@@ -565,9 +442,41 @@ def serve_vrma():
     return _send_vrma_file(paths[0])
 
 
+@vrm_bp.route("/animation/idle/vrma/<int:index>")
+def serve_idle_vrma(index: int):
+    paths = idle_vrma_paths()
+    if index < 0 or index >= len(paths):
+        return jsonify({"error": "Invalid idle VRMA index", "count": len(paths)}), 404
+    return _send_vrma_file(paths[index])
+
+
+@vrm_bp.route("/animation/idle/fbx/<int:index>")
+def serve_idle_fbx(index: int):
+    paths = idle_fbx_paths()
+    if index < 0 or index >= len(paths):
+        return jsonify({"error": "Invalid idle FBX index", "count": len(paths)}), 404
+    return _send_fbx_file(paths[index])
+
+
+@vrm_bp.route("/animation/talking/vrma/<int:index>")
+def serve_talking_vrma(index: int):
+    paths = talk_vrma_paths()
+    if index < 0 or index >= len(paths):
+        return jsonify({"error": "Invalid talking VRMA index", "count": len(paths)}), 404
+    return _send_vrma_file(paths[index])
+
+
+@vrm_bp.route("/animation/talking/fbx/<int:index>")
+def serve_talking_fbx(index: int):
+    paths = talk_fbx_paths()
+    if index < 0 or index >= len(paths):
+        return jsonify({"error": "Invalid talking FBX index", "count": len(paths)}), 404
+    return _send_fbx_file(paths[index])
+
+
 @vrm_bp.route("/animation/motion/<int:index>")
 def serve_vrma_motion(index: int):
-    paths = motion_vrma_paths()
+    paths = idle_vrma_paths()
     if index < 0 or index >= len(paths):
         return jsonify({"error": "Invalid motion index", "count": len(paths)}), 404
     return _send_vrma_file(paths[index])
@@ -591,17 +500,15 @@ def serve_vrma_expression(index: int):
 
 @vrm_bp.route("/animation/<int:index>")
 def serve_vrma_by_index(index: int):
-    """Legacy alias: motion index (same as /animation/motion/<index>)."""
-    paths = motion_vrma_paths()
+    """Legacy alias: idle VRMA index (same as /animation/motion/<index>)."""
+    paths = idle_vrma_paths()
     if index < 0 or index >= len(paths):
         return jsonify({"error": "Invalid animation index", "count": len(paths)}), 404
     return _send_vrma_file(paths[index])
 
 
-def _motion_items_for_api() -> list[dict]:
-    """Body dropdown: VRMA + Mixamo FBX, sorted by file stem so names match the on-disk files."""
-    vrma_paths = motion_vrma_paths()
-    fbx_paths = motion_fbx_paths()
+def _build_motion_pool_items(vrma_paths: list[str], fbx_paths: list[str], pool: str) -> list[dict[str, Any]]:
+    """One pool (idle or talk): VRMA + FBX rows sorted by stem."""
     rows: list[tuple[str, int, str]] = []
     for i, p in enumerate(vrma_paths):
         rows.append(("vrma", i, p))
@@ -615,7 +522,7 @@ def _motion_items_for_api() -> list[dict]:
         return (stem.lower(), tie, idx)
 
     rows.sort(key=sort_key)
-    items: list[dict] = []
+    items: list[dict[str, Any]] = []
     for kind, idx, p in rows:
         base = os.path.basename(p)
         stem = os.path.splitext(base)[0]
@@ -628,7 +535,8 @@ def _motion_items_for_api() -> list[dict]:
             "label": label,
             "name": base,
             "stem": stem,
-            "role": _motion_role_for_path(p),
+            "pool": pool,
+            "role": pool,
         }
         if kind == "vrma":
             stats = _vrma_motion_stats(p)
@@ -640,23 +548,40 @@ def _motion_items_for_api() -> list[dict]:
     return items
 
 
+def _expression_items_for_api() -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for i, p in enumerate(expression_vrma_paths()):
+        base = os.path.basename(p)
+        stem = os.path.splitext(base)[0]
+        out.append(
+            {
+                "kind": "vrma",
+                "index": i,
+                "label": _label_for_vrma_path(p),
+                "name": base,
+                "stem": stem,
+                "pool": "expression",
+                "role": "expression",
+            }
+        )
+    return out
+
+
 @vrm_bp.route("/api/animations")
 def api_animations():
-    """Motion clips (vrma + fbx) + expression VRMA; legacy `local` = vrma-only list."""
-    expr = expression_vrma_paths()
+    """Idle / talking / expression pools; legacy `motion` = idle + talk; `local` = all body VRMA paths."""
     vrma_only = motion_vrma_paths()
-    motion_items = _motion_items_for_api()
-    motion_idle = [x for x in motion_items if x.get("role") == "idle"]
-    motion_talk = [x for x in motion_items if x.get("role") == "talk"]
-    expression_items = [
-        {"index": i, "label": _label_for_vrma_path(p), "name": os.path.basename(p)}
-        for i, p in enumerate(expr)
-    ]
+    motion_idle = _build_motion_pool_items(idle_vrma_paths(), idle_fbx_paths(), "idle")
+    motion_talk = _build_motion_pool_items(talk_vrma_paths(), talk_fbx_paths(), "talk")
+    motion_expression = _expression_items_for_api()
+    motion_items = motion_idle + motion_talk
+    expression_items = motion_expression
     return jsonify(
         {
             "motion": motion_items,
             "motion_idle": motion_idle,
             "motion_talk": motion_talk,
+            "motion_expression": motion_expression,
             "expression": expression_items,
             "local": [
                 {"index": i, "label": _label_for_vrma_path(p), "name": os.path.basename(p)}
@@ -667,6 +592,7 @@ def api_animations():
             "local_count": len(vrma_only),
             "fbx_count": len(motion_fbx_paths()),
             "animations_root": _luna_animations_root(),
+            "talking_root": _talking_dir(),
             "expressions_root": _expressions_dir(),
             "sample": {
                 "label": "Sample — Pixiv test.vrma (CDN)",
@@ -683,7 +609,8 @@ def api_status():
     motion_v = motion_vrma_paths()
     motion_f = motion_fbx_paths()
     expr = expression_vrma_paths()
-    vrma_path = motion_v[0] if motion_v else None
+    idle_v = idle_vrma_paths()
+    vrma_path = idle_v[0] if idle_v else None
     edge_ok = _edge_tts_enabled() and _edge_tts_import_ok()
     return jsonify(
         {
@@ -697,6 +624,7 @@ def api_status():
             "fbx_count": len(motion_f),
             "expression_count": len(expr),
             "animations_root": _luna_animations_root(),
+            "talking_root": _talking_dir(),
             "expressions_root": _expressions_dir(),
             "edge_tts": edge_ok,
             "edge_tts_voice": _edge_tts_voice_default() if edge_ok else "",

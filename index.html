@@ -1818,6 +1818,9 @@
       <a class="cmd-btn" href="/vrm/" target="_blank" rel="noopener" style="text-decoration:none;color:inherit;display:inline-flex;align-items:center;gap:6px;" title="3D VRM avatar viewer (Three.js; set LUNA_VRM_PATH if needed)">
         <span class="cmd-icon">🎭</span> VRM viewer
       </a>
+      <a class="cmd-btn" href="/podcast/" target="_blank" rel="noopener" style="text-decoration:none;color:inherit;display:inline-flex;align-items:center;gap:6px;" title="3D podcast studio: voice-reactive orb, camera screen, record WebM">
+        <span class="cmd-icon">📹</span> Podcast studio
+      </a>
         </div>
       </div>
     </div>
@@ -2980,6 +2983,7 @@ const MORE_COMMANDS = {
     title: 'Tools — more',
     items: [
       { label: 'VRM viewer', icon: '🎭', desc: 'Open 3D avatar page (/vrm/)', run: function() { window.open('/vrm/', '_blank'); } },
+      { label: 'Podcast studio', icon: '📹', desc: '3D orb + camera + record (/podcast/)', run: function() { window.open('/podcast/', '_blank'); } },
       { label: 'Remember', icon: '🧠', desc: 'Store a memory (!remember)', run: function() { insertCommand('!remember ', 'fact to remember'); } },
       { label: 'Always remember', icon: '⭐', desc: 'Core memory (!always_remember)', run: function() { insertCommand('!always_remember ', 'fact'); } },
       { label: 'Profile', icon: '👤', desc: 'View or set profile (!profile)', run: function() { sendQuick('!profile'); } },
