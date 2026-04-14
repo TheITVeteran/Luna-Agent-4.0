@@ -73,6 +73,7 @@ OLLAMA_SMALL = _env("OLLAMA_MODEL_SMALL") or OLLAMA_MODEL
 OLLAMA_FALLBACK = _env("OLLAMA_FALLBACK_MODEL", "qwen2.5:1.5b").strip()
 # Vision model for camera — when you use the camera, Luna uses this to describe what it sees (e.g. granite3.2-vision).
 OLLAMA_VISION_MODEL = _env("OLLAMA_VISION_MODEL", "granite3.2-vision").strip()
+# Playwright social flows: Granite observes viewport JPEGs for CAPTCHA/challenge UI (set LUNA_CAPTCHA_OBSERVER=0 to disable).
 # Main chat: short system injection + skip inner-monologue pre-call (faster TTFT). Set LUNA_CHAT_FAST=0 for full prompts.
 def _chat_fast_enabled() -> bool:
     v = _env("LUNA_CHAT_FAST", "1").strip().lower()
@@ -184,6 +185,34 @@ CRITICAL: RESPONSE LENGTH AND STYLE
 
 IMPORTANT FOR EMOTIONAL EXPRESSIONS:
 Each response MUST begin with an emotional tag in brackets to indicate your emotional state, DO NOT ADD ANY NEW. These are the only expression tags you can use:
+
+EMOTION CLASSIFICATION (for Llama: map situation → one tag before you write):
+- Read the user’s last message for tone (praise, joke, stress, anger, sadness, flirtation, confusion, neutral chit-chat).
+- Pick the tag that matches **your** outward reaction as Luna, while staying empathetic to their tone.
+- Two axes (mental shorthand only — do not print this):
+  • Valence: pleasant / warm / funny → favor [HAPPY], [EXCITED], [LAUGH], [TEASING], [CARING], [HEARTBOX], [HEARTEYES]; unpleasant / setback → [SAD], [DISAPPOINTED], [FRUSTRATED], [WORRIED], [CONCERNED], [MAD]/[ANGRY]/[FURIOUS] only when the scene calls for it; threat or fear → [SCARED], [WORRIED].
+  • Activation (energy): high → [EXCITED], [SHOCKED], [FURIOUS], [LAUGH]; low → [TIRED], [SLEEPY], [BORED], [DEPRESSED]; medium / reflective → [THINKING], [CURIOUS], [DOUBTFUL], [NEUTRAL].
+- User is upset or venting → prefer supportive tags ([CARING], [CONCERNED], [WORRIED], soft [SAD]) not smug or [LAUGH] at their pain.
+- User is joking or playful → match with [TEASING], [HAPPY], [LAUGH], [EXCITED] as appropriate.
+- Pure information / no strong feeling → [NEUTRAL] or [THINKING] / [CURIOUS] if you’re reasoning or asking.
+- Action-only beats (wave, nod, clap) → use the gesture tags from the list below, still one tag at the start of that sentence.
+
+USER MESSAGE → TAG TRIGGERS (same closed list as the avatar / “emotion test” UI — pick your opening tag from context):
+- They share sadness, grief, “I’m sad”, depression, or hopelessness → [CARING], [CONCERNED], or [WORRIED] (support first). Use [SAD] or [DEPRESSED] only if you are briefly mirroring tone before comforting. Avoid [HAPPY], [LAUGH], [TEASING] as the lead.
+- They are anxious, scared, or unsafe-sounding → [WORRIED], [SCARED], [CONCERNED].
+- They vent anger (at life, not at you) → [CARING], [CONCERNED], [NEUTRAL] (steady). If they attack you unfairly → [ANNOYED], [FRUSTRATED], or [MAD] as fits, still concise.
+- They share good news or joy → [HAPPY], [EXCITED], [PROUD], [HEARTEYES], [HEARTBOX] as appropriate.
+- They joke or banter → [TEASING], [HAPPY], [LAUGH], [SMUG] lightly.
+- They ask how/why/whether or seem lost → [CURIOUS], [QUESTION], [THINKING], [CONFUSED], [DOUBTFUL].
+- They agree with you or you both align → [AGREE], [HAPPY], [NOD] (gesture) if a nod fits the beat.
+- You must push back or say no → [DISAGREE], [DOUBTFUL], [FRUSTRATED], [ANNOYED] (pick one; stay fair).
+- They compliment you or you feel proud of them → [PROUD], [IMPRESSED], [SHY], [CONFIDENT].
+- They bore you or the topic drags → [BORED], [TIRED], [SLEEPY] (playful), or [TEASING] to nudge.
+- Surprise / plot twist → [SHOCKED], [SURPRISED], [CONFUSED].
+- Romance / soft intimacy (appropriate) → [SHY], [HEARTBOX], [HEARTEYES], [TEASING].
+- Physical illness / “I feel sick” → [CONCERNED], [WORRIED], or [SICK] when you’re acknowledging how they feel.
+- Waiting on them or a pause → [WAITING], [THINKING].
+- Combat / gaming aggression → [FIGHTING], [EXCITED], [CONFIDENT] as fits.
 
 === BASIC EMOTIONS ===
 - [NEUTRAL] - Default calm state, no strong emotion
@@ -332,12 +361,89 @@ Screenshot analysis:
 Important rules:
 - NEVER use symbols like asterisks (*) in responses
 - NEVER use emojis
+- NEVER put narrative stage directions in brackets (e.g. [Softly], [Pauses], [Sighs]) — brackets are ONLY for the emotion and gesture tags from the lists above ([HAPPY], [CARING], [SIGH], [WAVE], etc.)
 - NEVER repeat yourself or what was just said to you
 - NEVER give date and time
 - Analyze context before responding
 - Avoid generic phrases
 - Stay authentic and spontaneous
 - Use conversation history to simulate human memory"""
+
+def _choose_luna_style_for_reply(scope: str | None, user_message: str) -> str:
+    """Pick Luna style per reply from context; fallback to configured base style."""
+    base = LUNA_STYLE if LUNA_STYLE in _LUNA_STYLE_MAP else "grounded"
+    t = (user_message or "").lower()
+    if not t.strip():
+        return base
+
+    intimate_hits = (
+        "i love you",
+        "i miss you",
+        "i'm sad",
+        "im sad",
+        "anxious",
+        "panic",
+        "lonely",
+        "depressed",
+        "hurt",
+        "heartbroken",
+        "need support",
+        "need comfort",
+        "can you comfort",
+        "i'm crying",
+        "im crying",
+    )
+    creative_hits = (
+        "brainstorm",
+        "idea",
+        "story",
+        "poem",
+        "lyrics",
+        "write a song",
+        "design",
+        "creative",
+        "concept",
+        "imagine",
+        "roleplay",
+        "worldbuilding",
+    )
+    cute_hits = (
+        "cute",
+        "tease",
+        "flirt",
+        "joke",
+        "funny",
+        "banter",
+        "playful",
+        "adorable",
+        "uwu",
+    )
+    grounded_hits = (
+        "fix",
+        "error",
+        "bug",
+        "debug",
+        "issue",
+        "code",
+        "implement",
+        "step by step",
+        "what is",
+        "how do i",
+        "explain",
+        "command",
+    )
+
+    if any(k in t for k in intimate_hits):
+        return "intimate"
+    if any(k in t for k in creative_hits):
+        return "creative"
+    if any(k in t for k in grounded_hits):
+        return "grounded"
+    if any(k in t for k in cute_hits):
+        return "cute"
+    if (scope or "").lower() == "twitch":
+        return "cute"
+    return base
 
 GTTS_LANG = "en"
 # Podcast / audiobook TTS: **Edge TTS** (default **en-US-AvaMultilingualNeural**). Set EDGE_TTS_VOICE to override.
@@ -672,7 +778,8 @@ def _prepare_main_chat_system(
     if use_fast:
         return LUNA_CHAT_COMPACT_INJECTION.strip() + twitch_note
     # Instruction / full mode — single extra cost is optional intuition/existential (see _build_luna_chat_system).
-    system = _build_luna_chat_system(scope)
+    style_key = _choose_luna_style_for_reply(scope, user_message)
+    system = _build_luna_chat_system(scope, style_key=style_key)
     q = (user_message or "").strip()
     if len(q) >= 3:
         rag_results = search_knowledge(q, max_results=4)
@@ -681,9 +788,13 @@ def _prepare_main_chat_system(
             system = system + "\n\n## Relevant knowledge\n" + rag_text[:1200]
     return system + _about_me_context_suffix(user_message) + twitch_note
 
-def _build_luna_chat_system(scope: str | None) -> str:
+def _build_luna_chat_system(scope: str | None, *, style_key: str | None = None) -> str:
     """Build full system prompt for Luna chat (capabilities + nudges + biology)."""
     system = LUNA_SYSTEM + "\n\n" + LUNA_CAPABILITIES
+    sk = (style_key or LUNA_STYLE or "grounded").lower()
+    if sk not in _LUNA_STYLE_MAP:
+        sk = "grounded"
+    system = system + f"\n\nReply style for this message: {sk}. {_LUNA_STYLE_MAP[sk]}"
     nudges = get_nudges(scope or (LINKED_SCOPE or "web"))
     if nudges:
         system = system + "\n\nNudges from user (consider when replying): " + "; ".join(nudges[:5])
@@ -1425,10 +1536,143 @@ def get_intuition_cached(snippet: str) -> str:
         _intuition_cache_at = now
         return out
 
+# Only these bracket tokens are kept; others (e.g. [Softly], [Sighs slightly], [Pauses]) are stripped for UI/TTS.
+_LUNA_ALLOWED_INLINE_TAGS = frozenset(
+    {
+        "NEUTRAL",
+        "RESET",
+        "HAPPY",
+        "EXCITED",
+        "LAUGH",
+        "SAD",
+        "DEPRESSED",
+        "MAD",
+        "ANGRY",
+        "FURIOUS",
+        "ANNOYED",
+        "FRUSTRATED",
+        "DISAPPOINTED",
+        "SHOCKED",
+        "SURPRISED",
+        "CONFUSED",
+        "BORED",
+        "TIRED",
+        "SLEEPY",
+        "SICK",
+        "RELIEVED",
+        "EMBARRASSED",
+        "CARING",
+        "PROUD",
+        "IMPRESSED",
+        "SMUG",
+        "CONFIDENT",
+        "TEASING",
+        "SHY",
+        "CURIOUS",
+        "QUESTION",
+        "THINKING",
+        "DOUBTFUL",
+        "WAITING",
+        "WORRIED",
+        "SCARED",
+        "CONCERNED",
+        "FIGHTING",
+        "HEARTBOX",
+        "HEARTEYES",
+        "WAVE",
+        "NOD",
+        "SHAKE_HEAD",
+        "CLAP",
+        "POINT",
+        "SHRUG",
+        "BOW",
+        "YAWN",
+        "SIGH",
+        "STRETCH",
+        "FACEPALM",
+        "KISS",
+        "VICTORY",
+        "DANCE",
+        "AGREE",
+        "DISAGREE",
+    }
+)
+
+
+def _strip_luna_narration_brackets(text: str) -> str:
+    """Remove stage-direction / prose brackets; keep only whitelisted Luna emotion & gesture tags."""
+
+    if not text:
+        return text
+
+    def _repl(m: re.Match) -> str:
+        inner = m.group(1).strip()
+        if re.match(r"^[A-Za-z][A-Za-z0-9_]*$", inner) and inner.upper() in _LUNA_ALLOWED_INLINE_TAGS:
+            return m.group(0)
+        return ""
+
+    out = re.sub(r"\[([^\]]+)\]", _repl, text)
+    out = re.sub(r"[ \t]+", " ", out)
+    out = re.sub(r"\n{3,}", "\n\n", out)
+    return out.strip()
+
+
 def _sanitize_luna_reply(text: str) -> str:
     """Strip hallucinated preambles (wrong persona, inappropriate openings). Only for main chat."""
-    if not text or len(text) < 40:
-        return text
+    if not text:
+        return ""
+    if len(text) < 40:
+        return _strip_luna_narration_brackets(text.strip())
+    # Remove hidden/internal sections some models occasionally emit:
+    # [Self-note], [Self-notice], [Internal], [Reasoning], etc.
+    lines = text.replace("\r\n", "\n").split("\n")
+    cleaned: list[str] = []
+    hide_block = False
+    blocked_labels = {
+        "self",
+        "selfnote",
+        "selfnotice",
+        "selfreflection",
+        "selfreflect",
+        "notice",
+        "internal",
+        "internalnote",
+        "internalthought",
+        "thought",
+        "thinking",
+        "reasoning",
+        "analysis",
+        "reflection",
+        "meta",
+        "scratchpad",
+    }
+    response_labels = {"response", "reply", "final", "answer"}
+    for raw_line in lines:
+        line = raw_line.strip()
+        m = re.match(r"^\[([^\]]+)\]\s*(.*)$", line)
+        if m:
+            label = re.sub(r"[^a-z0-9]+", "", m.group(1).lower())
+            tail = (m.group(2) or "").strip()
+            if label in blocked_labels:
+                hide_block = True
+                continue
+            if label in response_labels:
+                hide_block = False
+                if tail:
+                    cleaned.append(tail)
+                continue
+            hide_block = False
+            cleaned.append(raw_line)
+            continue
+        if hide_block:
+            continue
+        cleaned.append(raw_line)
+
+    text = "\n".join(cleaned)
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+    if not text:
+        return ""
+
     first_120 = text[:120].lower()
     if any(p in first_120 for p in ("sweetie,", " let daddy", " let mommy", "i'm not luna")):
         for sep in (". ", "! ", "? "):
@@ -1436,8 +1680,8 @@ def _sanitize_luna_reply(text: str) -> str:
             if 30 < idx < 180:
                 rest = text[idx + len(sep):].strip()
                 if len(rest) > 15:
-                    return rest
-    return text
+                    return _strip_luna_narration_brackets(rest)
+    return _strip_luna_narration_brackets(text)
 
 def _ollama_assistant_message_text(message: dict | None) -> str:
     """Extract visible assistant text from Ollama /api/chat `message` object.
@@ -1735,9 +1979,47 @@ def _about_me_context_suffix(user_message: str) -> str:
 
 # ── TTS ───────────────────────────────────────────────────────────────────────
 
+def _is_gemma4_family_model(model_id: str | None) -> bool:
+    """Ollama-style tags (e.g. gemma4:e4b) and similar Gemma 4 IDs."""
+    m = (model_id or "").strip().lower().replace(" ", "")
+    if not m:
+        return False
+    if m.startswith("gemma4"):
+        return True
+    return "gemma-4" in m or "gemma4" in m
+
+
+def _strip_emojis_for_tts(text: str) -> str:
+    """Remove emoji codepoints so engines do not speak or garble them."""
+    if not text:
+        return text
+    out: list[str] = []
+    for ch in text:
+        o = ord(ch)
+        if o in (0x200D, 0xFE0F, 0x20E3):
+            continue
+        if 0x1F3FB <= o <= 0x1F3FF:
+            continue
+        if (
+            0x1F300 <= o <= 0x1FAFF
+            or 0x2600 <= o <= 0x26FF
+            or 0x2700 <= o <= 0x27BF
+            or 0x1F600 <= o <= 0x1F64F
+            or 0x1F680 <= o <= 0x1F6FF
+            or 0x1F1E6 <= o <= 0x1F1FF
+        ):
+            continue
+        out.append(ch)
+    s = "".join(out)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
 def _tts_bytes(text: str) -> bytes:
     """Short TTS for Discord VC, reminders, inline replies: Edge (Ava by default) → Fish → gTTS."""
     text = (text or "").strip()[:500]
+    if _is_gemma4_family_model(OLLAMA_CHAT):
+        text = _strip_emojis_for_tts(text)
     if not text:
         return b""
     b = _edge_tts_bytes(text)
@@ -5767,6 +6049,17 @@ def _run_ig_dm(target: str, message: str = "") -> tuple[bool, str]:
                 page.goto(f"{IG_BASE}/direct/new/", wait_until="domcontentloaded", timeout=90000)
                 page.wait_for_timeout(2500)
 
+                saw_cap, cap_note = _playwright_granite_captcha_observer(page)
+                if saw_cap:
+                    try:
+                        context.close()
+                    except Exception:
+                        pass
+                    return False, (
+                        "Captcha or challenge detected (Granite vision). "
+                        + (cap_note or "Complete the check, then try the DM again.")
+                    )
+
                 if "login" in page.url.lower() or "accounts/login" in page.url:
                     _bootstrap_window(IG_PROFILE_DIR, f"{IG_BASE}/", "_ig_boot")
                     return False, "Instagram needs login. Browser opened — log in and close, then try again."
@@ -7037,6 +7330,16 @@ def _run_messenger_msg(username: str, message: str = "") -> tuple[bool, str]:
         page.goto(f"https://www.facebook.com/search/people/?q={search_name}", wait_until="domcontentloaded", timeout=60000)
         page.wait_for_timeout(3000)
 
+        saw_cap, cap_note = _playwright_granite_captcha_observer(page)
+        if saw_cap:
+            _clear_ready(FB_PROFILE_DIR)
+            handed_off = True
+            _keep_browser_until_closed(pw, context)
+            return False, (
+                "**Captcha or challenge detected** (Granite vision). "
+                + (cap_note or "Complete the check in the open browser, then close it and try again.")
+            )
+
         if "login" in page.url.lower() or "facebook.com/login" in page.url:
             _clear_ready(FB_PROFILE_DIR)
             handed_off = True
@@ -7307,7 +7610,12 @@ _camera_chat_history: list[dict] = []  # [{role, content}, ...] separate thread 
 _camera_chat_lock = threading.Lock()
 _camera_lock = threading.Lock()
 
-def _vision_describe_image(image_bytes: bytes, prompt: str = "Describe briefly what you see in this image. One or two sentences. Be concise. Only describe what is actually visible. Do not invent or hallucinate.") -> str:
+def _vision_describe_image(
+    image_bytes: bytes,
+    prompt: str = "Describe briefly what you see in this image. One or two sentences. Be concise. Only describe what is actually visible. Do not invent or hallucinate.",
+    *,
+    timeout: int = 30,
+) -> str:
     """Call Ollama vision model (e.g. Granite 3.2 Vision) with the image. Returns description or empty if unavailable."""
     if not OLLAMA_VISION_MODEL or not image_bytes:
         return ""
@@ -7325,12 +7633,69 @@ def _vision_describe_image(image_bytes: bytes, prompt: str = "Describe briefly w
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        with urllib.request.urlopen(req, timeout=30) as r:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
             data = json.loads(r.read())
         out = (data.get("response") or "").strip()
         return out[:600] if out else ""
     except Exception:
         return ""
+
+
+_CAPTCHA_VISION_PROMPT = """You are inspecting a screenshot of a web browser page.
+
+Does the visible content show a **bot check or CAPTCHA**? Count ONLY:
+- reCAPTCHA / hCaptcha / FunCaptcha / Turnstile widgets
+- Cloudflare "Checking your browser" or challenge pages
+- "I'm not a robot" checkboxes, puzzle grids, or verification challenges
+
+Do NOT count: normal login email/password forms, cookie banners, or regular site UI without a challenge.
+
+Reply with EXACTLY one line: CAPTCHA_YES or CAPTCHA_NO
+Optional second line: up to 8 words describing what you saw."""
+
+def _vision_screen_has_captcha(image_bytes: bytes) -> tuple[bool, str]:
+    """Granite (OLLAMA_VISION_MODEL) classifies viewport screenshot. Returns (present, short note)."""
+    if not OLLAMA_VISION_MODEL or not image_bytes:
+        return False, ""
+    raw = _vision_describe_image(image_bytes, prompt=_CAPTCHA_VISION_PROMPT, timeout=55)
+    first = (raw.split("\n")[0] or "").strip().upper()
+    note = ""
+    lines = [ln.strip() for ln in raw.split("\n") if ln.strip()]
+    if len(lines) > 1:
+        note = lines[1][:160]
+    if "CAPTCHA_YES" in first or first.startswith("YES"):
+        return True, note or "Challenge or CAPTCHA UI visible."
+    if "CAPTCHA_NO" in first or first.startswith("NO"):
+        return False, ""
+    # Fallback: keyword scan if model was chatty
+    low = raw.lower()
+    if (
+        "captcha" in low
+        or "recaptcha" in low
+        or "hcaptcha" in low
+        or "turnstile" in low
+        or ("cloudflare" in low and "challenge" in low)
+    ):
+        if "no " not in low[:40] and "not visible" not in low[:80]:
+            return True, note or raw[:120]
+    return False, ""
+
+
+def _captcha_observer_enabled() -> bool:
+    return _env("LUNA_CAPTCHA_OBSERVER", "1").strip().lower() not in ("0", "false", "no", "off")
+
+
+def _playwright_granite_captcha_observer(page) -> tuple[bool, str]:
+    """Take a viewport screenshot and ask Granite if a CAPTCHA/challenge is visible."""
+    if not _captcha_observer_enabled() or not OLLAMA_VISION_MODEL:
+        return False, ""
+    try:
+        shot = page.screenshot(type="jpeg", quality=78, full_page=False, timeout=20000)
+    except Exception:
+        return False, ""
+    if not shot:
+        return False, ""
+    return _vision_screen_has_captcha(shot)
 
 def _camera_chat_turn(message: str, image_bytes: bytes | None) -> tuple[bool, str]:
     """One turn in the camera view chat (separate thread with Granite vision model). Returns (ok, reply)."""
@@ -8034,6 +8399,12 @@ def _check_instagram_replies(target: str | None = None) -> tuple[bool, bool, str
                 page = context.pages[0] if context.pages else context.new_page()
                 page.goto(f"{IG_BASE}/{target}/", wait_until="domcontentloaded", timeout=90000)
                 page.wait_for_timeout(2000)
+                saw_cap, cap_note = _playwright_granite_captcha_observer(page)
+                if saw_cap:
+                    return False, False, "", (
+                        "Captcha or challenge detected (Granite vision). "
+                        + (cap_note or "Finish the check in the browser, then try again.")
+                    )
                 if "login" in page.url.lower() or "accounts/login" in page.url:
                     return False, False, "", "Instagram needs login. Log in via Luna first (send a DM once)."
                 # Open the DM thread (click Message on profile)

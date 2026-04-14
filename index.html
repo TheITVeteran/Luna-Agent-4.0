@@ -2499,7 +2499,8 @@ function notifyVrmViewerFromChat(markdownOrPlain, vrmOpts) {
     if (!window.__lunaVrmSpeechBc) {
       window.__lunaVrmSpeechBc = new BroadcastChannel('luna-vrm-speech');
     }
-    const payload = { type: 'speak', text: plain, engine: 'edge' };
+    /** Full reply text (leading [TAG]s) for the viewer’s emotion timeline; TTS still strips tags server-side in the viewer. */
+    const payload = { type: 'speak', text: t, engine: 'edge' };
     if (vrmOpts && vrmOpts.twitchEventId != null) payload.twitchEventId = vrmOpts.twitchEventId;
     window.__lunaVrmSpeechBc.postMessage(payload);
   } catch (_) {}
@@ -2603,7 +2604,25 @@ function appendStatus(text) {
   return div;
 }
 
+/** Match bot_main._LUNA_ALLOWED_INLINE_TAGS — strip [Softly], [Pauses], … keep [HAPPY], [SIGH], … */
+const LUNA_ALLOWED_BRACKET_TAGS = new Set([
+  'NEUTRAL','RESET','HAPPY','EXCITED','LAUGH','SAD','DEPRESSED','MAD','ANGRY','FURIOUS','ANNOYED','FRUSTRATED','DISAPPOINTED','SHOCKED','SURPRISED','CONFUSED','BORED','TIRED','SLEEPY','SICK','RELIEVED','EMBARRASSED','CARING','PROUD','IMPRESSED','SMUG','CONFIDENT','TEASING','SHY','CURIOUS','QUESTION','THINKING','DOUBTFUL','WAITING','WORRIED','SCARED','CONCERNED','FIGHTING','HEARTBOX','HEARTEYES',
+  'WAVE','NOD','SHAKE_HEAD','CLAP','POINT','SHRUG','BOW','YAWN','SIGH','STRETCH','FACEPALM','KISS','VICTORY','DANCE','AGREE','DISAGREE'
+]);
+function stripLunaNarrationBrackets(raw) {
+  let s = String(raw || '');
+  s = s.replace(/\[([^\]]+)\]/g, (full, inner) => {
+    const t = inner.trim();
+    if (/^[A-Za-z][A-Za-z0-9_]*$/.test(t) && LUNA_ALLOWED_BRACKET_TAGS.has(t.toUpperCase())) return full;
+    return '';
+  });
+  s = s.replace(/[ \t]+/g, ' ');
+  s = s.replace(/\n{3,}/g, '\n\n');
+  return s.trim();
+}
+
 function formatMessage(text) {
+  text = stripLunaNarrationBrackets(text);
   text = text.replace(/```(\w*)\n?([\s\S]*?)```/g, (_, lang, code) => {
     const cls = lang ? 'language-' + lang : 'language-plaintext';
     return `<pre><code class="${cls}">${escapeHtml(code.trim())}</code></pre>`;

@@ -67,6 +67,12 @@
   #panel .row { display: flex; gap: 6px; margin-top: 8px; }
   #panel .row button { margin-top: 0; flex: 1; }
   #panel .hint { font-size: 10px; color: #4a5a72; margin-top: 8px; line-height: 1.35; }
+  #panel .embed-url-input {
+    width: 100%; margin-top: 4px; padding: 8px 10px; border-radius: 8px;
+    border: 1px solid rgba(120, 150, 220, 0.25);
+    background: rgba(10, 14, 24, 0.95); color: #e0e8f5; font-size: 12px;
+  }
+  #panel .embed-hint { font-size: 10px; color: #6a7a90; margin-top: 8px; line-height: 1.4; }
   #panel .phone-dock {
     margin: 10px -4px 8px;
     padding: 10px 10px 12px;
@@ -94,7 +100,9 @@
 {
   "imports": {
     "three": "https://cdn.jsdelivr.net/npm/three@0.180.0/build/three.module.js",
-    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.180.0/examples/jsm/"
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.180.0/examples/jsm/",
+    "@pixiv/three-vrm": "https://cdn.jsdelivr.net/npm/@pixiv/three-vrm@3.5.1/lib/three-vrm.module.min.js",
+    "@pixiv/three-vrm-animation": "https://cdn.jsdelivr.net/npm/@pixiv/three-vrm-animation@3.5.1/lib/three-vrm-animation.module.min.js"
   }
 }
 </script>
@@ -109,7 +117,7 @@
     <div class="phone-dock-title">Screen — video / tab sound</div>
     <div class="vol-row">
       <span title="Video audio">▶</span>
-      <input type="range" id="screen-vol" class="vol-slider" min="0" max="100" value="0" title="Volume for sound from the shared screen or tab (not your mic)"/>
+      <input type="range" id="screen-vol" class="vol-slider" min="0" max="100" value="80" title="Hear shared screen/tab in your speakers (recording always includes tab/system audio when the picker offers it)"/>
     </div>
     <div class="phone-dock-title" style="margin-top:10px">Microphone — monitor</div>
     <div class="vol-row">
@@ -121,7 +129,14 @@
   <select id="video-source">
     <option value="camera">Webcam</option>
     <option value="display">Screen or window (Discord, Zoom, browser tab…)</option>
+    <option value="embed">Browser tab in studio (paste URL — interactive)</option>
   </select>
+  <div id="embed-row" style="display:none;margin-top:8px">
+    <label for="embed-url">Tab URL to show on the big screen</label>
+    <input type="text" id="embed-url" class="embed-url-input" placeholder="https://… (copy from the tab you want)" autocomplete="off" spellcheck="false"/>
+    <button type="button" class="primary" id="btn-embed-load" style="margin-top:8px">Load page on screen</button>
+    <p class="embed-hint">Sharing a tab only mirrors pixels — browsers don’t expose its address. Copy the tab’s URL here to open the same page <strong>inside</strong> the studio and click, scroll, and type there. Some sites block embedding.</p>
+  </div>
   <label for="cam-select" id="cam-label">Camera</label>
   <select id="cam-select" disabled>
     <option value="">— Click Enable first —</option>
@@ -137,7 +152,7 @@
     <button type="button" class="danger" id="btn-stop-rec" disabled>■ Stop</button>
   </div>
   <div class="status" id="status"><strong>Step 1:</strong> Choose <strong>Webcam</strong> or <strong>Screen or window</strong>, then click <strong>Enable microphone &amp; video</strong>. For screen/window, the browser opens a picker (monitor, app window, or browser tab). Your mic is always from the microphone list.</div>
-  <div class="hint"><strong>Scene:</strong> drag orbit · wheel zoom · middle-drag pan · <strong>arrows</strong> walk. Controls live on the floating panel next to the screen.</div>
+  <div class="hint"><strong>Scene:</strong> drag orbit · wheel zoom · middle-drag pan · <strong>arrows</strong> move view.</div>
 </div>
 
 <script type="module">
@@ -145,6 +160,21 @@ import * as THREE from "three";
 import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { CSS3DRenderer, CSS3DObject } from "three/addons/renderers/CSS3DRenderer.js";
+import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+import { VRMLoaderPlugin, VRMUtils } from "@pixiv/three-vrm";
+import {
+  createVRMAnimationClip,
+  VRMAnimationLoaderPlugin,
+  VRMLookAtQuaternionProxy,
+} from "@pixiv/three-vrm-animation";
+
+/** GLTFLoader instance used for Luna after ``loadStudioLunaAvatar`` (idle sequence VRMA). */
+let studioAnimLoader = null;
+/** Ordered clips from ``Luna animations/fbx animations`` (API: ``motion_idle_sequence``). */
+let studioIdleSequenceItems = [];
+let studioIdleSeqIdx = 0;
+/** @type {((e: { action: THREE.AnimationAction }) => void) | null} */
+let studioIdleSeqFinishedHandler = null;
 
 const canvas = document.getElementById("c");
 const clock = new THREE.Clock();
@@ -160,6 +190,9 @@ const btnStopRec = document.getElementById("btn-stop-rec");
 const statusEl = document.getElementById("status");
 const screenVol = document.getElementById("screen-vol");
 const micVol = document.getElementById("mic-vol");
+const embedRow = document.getElementById("embed-row");
+const embedUrlInput = document.getElementById("embed-url");
+const btnEmbedLoad = document.getElementById("btn-embed-load");
 
 let renderer, css3dRenderer, scene, camera, controls, orbMesh, orbBaseScale;
 /** Arrow keys: move camera + orbit target on the floor plane (m/s scale uses dt). */
@@ -170,6 +203,8 @@ let orbPosSmooth = new THREE.Vector3();
 let orbWanderSeed = Math.random() * Math.PI * 2;
 let videoTexture = null;
 let screenGroup = null;
+/** CSS3D iframe placed on the virtual screen (interactive embed mode). */
+let screenEmbedObject = null;
 let micStream = null;
 /** Set when using ``getDisplayMedia`` (window/screen/tab); video track kept while mic may swap. */
 let screenCaptureStream = null;
@@ -182,6 +217,343 @@ let mediaRecorder = null;
 let recordedChunks = [];
 let recStart = 0;
 let recTimer = null;
+/** Dedicated graph for mixing mic + virtual-screen audio into one recording track. */
+let recordingAudioCtx = null;
+
+const VRM_BASE = new URL("/vrm/", window.location.origin).href;
+const STUDIO_LUNA_MODEL_URL = new URL("model", VRM_BASE).href;
+/** Luna VRM (``@pixiv/three-vrm``). */
+let studioLunaVrm = null;
+let studioLunaMixer = null;
+/** @type {THREE.AnimationAction | null} */
+let studioLunaActIdle = null;
+/** @type {THREE.AnimationAction | null} */
+let studioLunaActTalk = null;
+/** True: Standing Arguing (mic “speech”); false: VRMA_01 standing idle. */
+let studioLunaAnimArguing = false;
+let studioLunaTalkGate = false;
+const studioLunaPos = new THREE.Vector3(2.4, 0, 1.0);
+let studioLunaYaw = 0;
+const studioLunaAutoTarget = new THREE.Vector3();
+let studioLunaAutoRetargetAt = 0;
+const keyLuna = { KeyW: false, KeyA: false, KeyS: false, KeyD: false };
+
+function getStudioLunaMode() {
+  const el = document.getElementById("luna-mode");
+  return el?.value || "manual";
+}
+
+/** ``Luna animations/expressions/VRMA_01.vrma`` — standing idle in studio. */
+function pickStudioStandingIdleVrma(motionExpression) {
+  const list = motionExpression || [];
+  const byName = list.find(
+    (x) =>
+      x.kind === "vrma" &&
+      (/vrma_01|vrma01/i.test(x.stem || "") || /vrma_01/i.test(x.name || "") || /vrma\s*01/i.test(x.label || "")),
+  );
+  return (
+    byName ||
+    list.find((x) => x.kind === "vrma") ||
+    null
+  );
+}
+
+function pickFallbackIdleBodyVrma(motionIdle) {
+  const list = motionIdle || [];
+  return list.find((x) => x.kind === "vrma") || null;
+}
+
+/** ``Luna animations/talking/Standing Arguing.vrma`` — when mic picks up speech. */
+function pickStudioArguingVrma(motionTalk) {
+  const list = motionTalk || [];
+  const byName = list.find(
+    (x) =>
+      x.kind === "vrma" &&
+      /standing\s*arguing/i.test(`${x.stem || ""} ${x.label || ""} ${x.name || ""}`),
+  );
+  return byName || list.find((x) => x.kind === "vrma") || null;
+}
+
+function studioVrmaUrl(item) {
+  if (!item || item.kind !== "vrma") return "";
+  if (item.pool === "expression") {
+    return new URL(`animation/expression/${item.index}`, VRM_BASE).href;
+  }
+  const folder = item.pool === "talk" ? "talking" : "idle";
+  return new URL(`animation/${folder}/vrma/${item.index}`, VRM_BASE).href;
+}
+
+/** Same VRMA slot in the API (pool + index), not object identity. */
+function studioVrmaItemsSameClip(a, b) {
+  if (!a || !b) return false;
+  if (a.kind !== b.kind) return false;
+  return String(a.pool || "") === String(b.pool || "") && Number(a.index) === Number(b.index);
+}
+
+async function loadVrmaClipForStudio(loader, url, vrm) {
+  const gltfAnim = await loader.loadAsync(url);
+  const vrmAnimation = gltfAnim.userData.vrmAnimations?.[0];
+  if (!vrmAnimation) throw new Error("No vrmAnimations[0] in VRMA");
+  return createVRMAnimationClip(vrmAnimation, vrm);
+}
+
+function detachStudioIdleSeqHandler() {
+  if (studioLunaMixer && studioIdleSeqFinishedHandler) {
+    studioLunaMixer.removeEventListener("finished", studioIdleSeqFinishedHandler);
+    studioIdleSeqFinishedHandler = null;
+  }
+}
+
+function attachStudioIdleSeqHandler(action) {
+  detachStudioIdleSeqHandler();
+  if (!studioLunaMixer || !action) return;
+  studioIdleSeqFinishedHandler = (e) => {
+    if (e.action !== action || studioLunaAnimArguing) return;
+    detachStudioIdleSeqHandler();
+    if (!studioIdleSequenceItems.length) return;
+    studioIdleSeqIdx = (studioIdleSeqIdx + 1) % studioIdleSequenceItems.length;
+    void studioPlayIdleSequenceAt(studioIdleSeqIdx);
+  };
+  studioLunaMixer.addEventListener("finished", studioIdleSeqFinishedHandler);
+}
+
+/**
+ * Play one ordered idle clip from ``/vrm/animation/idle/sequence/<i>`` once (VRMA; FBX logs and skips).
+ */
+async function studioPlayIdleSequenceAt(idx) {
+  if (!studioLunaVrm || !studioLunaMixer || !studioAnimLoader || !studioIdleSequenceItems.length) return;
+  const item = studioIdleSequenceItems[idx];
+  if (!item) return;
+  studioIdleSeqIdx = idx;
+  detachStudioIdleSeqHandler();
+  const url = new URL(`animation/idle/sequence/${item.index}`, VRM_BASE).href;
+  try {
+    if (item.kind === "fbx") {
+      console.warn(
+        "[Podcast studio] FBX in fbx animations/ is supported in the VRM viewer; studio uses VRMA in this folder only. Skipping:",
+        item.name,
+      );
+      const next = (idx + 1) % studioIdleSequenceItems.length;
+      if (next !== idx) await studioPlayIdleSequenceAt(next);
+      return;
+    }
+    const clip = await loadVrmaClipForStudio(studioAnimLoader, url, studioLunaVrm);
+    const prev = studioLunaActIdle;
+    const act = studioLunaMixer.clipAction(clip);
+    act.setLoop(THREE.LoopOnce, 1);
+    act.clampWhenFinished = true;
+    if (prev && prev !== act && typeof prev.isRunning === "function" && prev.isRunning()) {
+      prev.crossFadeTo(act, 0.42, false);
+    } else {
+      act.reset().fadeIn(0.22).play();
+    }
+    studioLunaActIdle = act;
+    if (!studioLunaAnimArguing) attachStudioIdleSeqHandler(act);
+  } catch (e) {
+    console.warn("[Podcast studio] Idle sequence clip failed:", e);
+  }
+}
+
+function setStudioLunaTalkMotion(wantArguing) {
+  if (!studioLunaMixer || !studioLunaActIdle) return;
+  if (wantArguing) detachStudioIdleSeqHandler();
+  const arguing = studioLunaActTalk || studioLunaActIdle;
+  const idle = studioLunaActIdle;
+  if (arguing === idle) {
+    studioLunaAnimArguing = wantArguing;
+    return;
+  }
+  if (studioLunaAnimArguing === wantArguing) return;
+  const fade = 0.35;
+  studioLunaAnimArguing = wantArguing;
+  if (wantArguing) idle.crossFadeTo(arguing, fade, false);
+  else {
+    arguing.crossFadeTo(idle, fade, false);
+    if (studioIdleSequenceItems.length > 0) void studioPlayIdleSequenceAt(studioIdleSeqIdx);
+  }
+}
+
+async function loadStudioLunaAvatar() {
+  try {
+    const loader = new GLTFLoader();
+    studioAnimLoader = loader;
+    loader.register((parser) => new VRMLoaderPlugin(parser));
+    loader.register((parser) => new VRMAnimationLoaderPlugin(parser));
+
+    const gltf = await loader.loadAsync(STUDIO_LUNA_MODEL_URL);
+    const vrm = gltf.userData.vrm;
+    if (!vrm) {
+      console.warn("[Podcast studio] Model has no VRM extension");
+      return;
+    }
+    try {
+      VRMUtils.removeUnnecessaryVertices(vrm.scene);
+      VRMUtils.removeUnnecessaryJoints(vrm.scene);
+    } catch {
+      /* */
+    }
+    vrm.scene.traverse((o) => {
+      o.frustumCulled = false;
+      if (o.isMesh) {
+        o.castShadow = true;
+        o.receiveShadow = false;
+      }
+    });
+    if (vrm.lookAt) {
+      const lap = new VRMLookAtQuaternionProxy(vrm.lookAt);
+      lap.name = "lookAtQuaternionProxy";
+      vrm.scene.add(lap);
+    }
+
+    studioLunaVrm = vrm;
+    studioLunaMixer = new THREE.AnimationMixer(vrm.scene);
+    scene.add(vrm.scene);
+    vrm.scene.position.copy(studioLunaPos);
+    vrm.scene.rotation.y = studioLunaYaw;
+
+    let animData = { motion_expression: [], motion_talk: [], motion_idle: [], motion_idle_sequence: [] };
+    try {
+      const r = await fetch(new URL("api/animations", VRM_BASE).href);
+      if (r.ok) animData = await r.json();
+    } catch {
+      /* */
+    }
+    studioIdleSequenceItems = Array.isArray(animData.motion_idle_sequence) ? animData.motion_idle_sequence : [];
+    const talkItem = pickStudioArguingVrma(animData.motion_talk);
+
+    if (studioIdleSequenceItems.length > 0) {
+      studioIdleSeqIdx = 0;
+      await studioPlayIdleSequenceAt(0);
+      if (talkItem && !studioVrmaItemsSameClip(studioIdleSequenceItems[0], talkItem) && talkItem.kind === "vrma") {
+        const uw = studioVrmaUrl(talkItem);
+        if (uw) {
+          try {
+            const clipTalk = await loadVrmaClipForStudio(loader, uw, vrm);
+            studioLunaActTalk = studioLunaMixer.clipAction(clipTalk);
+            studioLunaActTalk.setLoop(THREE.LoopRepeat, Infinity);
+            studioLunaActTalk.reset().play();
+            studioLunaActTalk.setEffectiveWeight(0);
+          } catch (e) {
+            console.warn("[Podcast studio] Talk VRMA load failed:", e);
+            studioLunaActTalk = null;
+          }
+        }
+      }
+      if (!studioLunaActTalk) studioLunaActTalk = studioLunaActIdle;
+      studioLunaAutoTarget.copy(studioLunaPos);
+      studioLunaAutoRetargetAt = performance.now() / 1000 + 0.5;
+      console.log("[Podcast studio] Luna VRM ready (idle: fbx animations sequence · talk: mic)");
+      return;
+    }
+
+    const idleItem =
+      pickStudioStandingIdleVrma(animData.motion_expression) ||
+      pickFallbackIdleBodyVrma(animData.motion_idle);
+
+    if (idleItem) {
+      const u = studioVrmaUrl(idleItem);
+      if (u) {
+        const clipIdle = await loadVrmaClipForStudio(loader, u, vrm);
+        studioLunaActIdle = studioLunaMixer.clipAction(clipIdle);
+        studioLunaActIdle.setLoop(THREE.LoopRepeat, Infinity);
+        studioLunaActIdle.reset().fadeIn(0.2).play();
+      }
+    }
+    if (talkItem && !studioVrmaItemsSameClip(idleItem, talkItem) && talkItem.kind === "vrma") {
+      const uw = studioVrmaUrl(talkItem);
+      if (uw) {
+        try {
+          const clipTalk = await loadVrmaClipForStudio(loader, uw, vrm);
+          studioLunaActTalk = studioLunaMixer.clipAction(clipTalk);
+          studioLunaActTalk.setLoop(THREE.LoopRepeat, Infinity);
+          /* Must stay *active* (playing) so the mixer runs fadeIn during crossFadeTo. stop() deactivates the action and crossfades never apply. */
+          studioLunaActTalk.reset().play();
+          studioLunaActTalk.setEffectiveWeight(0);
+        } catch (e) {
+          console.warn("[Podcast studio] Talk VRMA load failed:", e);
+          studioLunaActTalk = null;
+        }
+      }
+    }
+    if (!studioLunaActTalk) studioLunaActTalk = studioLunaActIdle;
+
+    studioLunaAutoTarget.copy(studioLunaPos);
+    studioLunaAutoRetargetAt = performance.now() / 1000 + 0.5;
+    console.log("[Podcast studio] Luna VRM ready (idle: VRMA_01 · talk: Standing Arguing when mic active)");
+  } catch (e) {
+    console.warn("[Podcast studio] Luna VRM load failed (optional):", e);
+  }
+}
+
+function updateStudioLunaAuto(dt, nowSec) {
+  if (studioLunaPos.distanceTo(studioLunaAutoTarget) < 0.42 || nowSec >= studioLunaAutoRetargetAt) {
+    studioLunaAutoTarget.set((Math.random() - 0.5) * 26, 0, (Math.random() - 0.5) * 26);
+    studioLunaAutoRetargetAt = nowSec + 3.5 + Math.random() * 7;
+  }
+  const dx = studioLunaAutoTarget.x - studioLunaPos.x;
+  const dz = studioLunaAutoTarget.z - studioLunaPos.z;
+  const dist = Math.hypot(dx, dz);
+  if (dist < 0.04) return false;
+  const speed = 1.05;
+  const step = Math.min(speed * dt, dist);
+  studioLunaPos.x += (dx / dist) * step;
+  studioLunaPos.z += (dz / dist) * step;
+  studioLunaYaw = Math.atan2(dx, dz);
+  return true;
+}
+
+function updateStudioLunaManual(dt) {
+  if (isTypingTarget(document.activeElement)) return false;
+  const forward = new THREE.Vector3();
+  camera.getWorldDirection(forward);
+  forward.y = 0;
+  if (forward.lengthSq() < 1e-8) forward.set(0, 0, -1);
+  else forward.normalize();
+  const right = new THREE.Vector3().crossVectors(forward, new THREE.Vector3(0, 1, 0)).normalize();
+  const move = new THREE.Vector3();
+  if (keyLuna.KeyW) move.add(forward);
+  if (keyLuna.KeyS) move.sub(forward);
+  if (keyLuna.KeyA) move.sub(right);
+  if (keyLuna.KeyD) move.add(right);
+  if (move.lengthSq() < 1e-8) return false;
+  move.normalize().multiplyScalar(2.75 * dt);
+  studioLunaPos.x += move.x;
+  studioLunaPos.z += move.z;
+  studioLunaYaw = Math.atan2(move.x, move.z);
+  return true;
+}
+
+function clampStudioLunaPos() {
+  const lim = 52;
+  studioLunaPos.x = Math.max(-lim, Math.min(lim, studioLunaPos.x));
+  studioLunaPos.z = Math.max(-lim, Math.min(lim, studioLunaPos.z));
+}
+
+function updateStudioLuna(dt) {
+  if (!studioLunaVrm) return;
+  const mode = getStudioLunaMode();
+  if (mode === "hidden") {
+    studioLunaVrm.scene.visible = false;
+    return;
+  }
+  studioLunaVrm.scene.visible = true;
+
+  if (mode === "manual") updateStudioLunaManual(dt);
+  else if (mode === "auto") updateStudioLunaAuto(dt, performance.now() / 1000);
+
+  clampStudioLunaPos();
+  studioLunaVrm.scene.position.set(studioLunaPos.x, 0, studioLunaPos.z);
+  studioLunaVrm.scene.rotation.y = studioLunaYaw;
+
+  const level = getMicLevel();
+  /* Hysteresis; thresholds tuned for typical headset mics (see getMicLevel RMS scale). */
+  if (!studioLunaTalkGate && level > 0.055) studioLunaTalkGate = true;
+  else if (studioLunaTalkGate && level < 0.028) studioLunaTalkGate = false;
+  setStudioLunaTalkMotion(studioLunaTalkGate);
+
+  studioLunaVrm.update(dt);
+  if (studioLunaMixer) studioLunaMixer.update(dt);
+}
 
 function setStatus(html) {
   statusEl.innerHTML = html;
@@ -256,16 +628,28 @@ function buildDarkStudioWorld(scene) {
   scene.add(floor);
 }
 
+/** Prefer MP4 (H.264 + AAC) when the browser’s MediaRecorder supports it; else WebM. */
 function pickMime() {
-  const c = [
+  const candidates = [
+    "video/mp4;codecs=avc1.42E01E,mp4a.40.2",
+    "video/mp4;codecs=avc1.4D401E,mp4a.40.2",
+    "video/mp4;codecs=avc1,mp4a.40.2",
+    "video/mp4",
     "video/webm;codecs=vp9,opus",
     "video/webm;codecs=vp8,opus",
     "video/webm",
   ];
-  for (const m of c) {
+  for (const m of candidates) {
     if (MediaRecorder.isTypeSupported(m)) return m;
   }
   return "";
+}
+
+function fileExtensionForMime(mime) {
+  const m = (mime || "").toLowerCase();
+  if (m.includes("mp4")) return "mp4";
+  if (m.includes("webm")) return "webm";
+  return "webm";
 }
 
 function stopMicTracksOnly() {
@@ -273,6 +657,7 @@ function stopMicTracksOnly() {
 }
 
 function stopAllMedia() {
+  removeScreenEmbed();
   stopMicTracksOnly();
   if (screenCaptureStream) {
     screenCaptureStream.getTracks().forEach((t) => t.stop());
@@ -283,8 +668,87 @@ function stopAllMedia() {
 
 function updateVideoSourceUi() {
   const display = videoSourceSelect.value === "display";
-  camLabel.textContent = display ? "Screen / window" : "Camera";
+  const embed = videoSourceSelect.value === "embed";
+  camLabel.textContent = display ? "Screen / window" : embed ? "—" : "Camera";
+  camLabel.style.display = embed ? "none" : "block";
+  camSelect.style.display = embed ? "none" : "block";
   btnShareAgain.style.display = display ? "block" : "none";
+  embedRow.style.display = embed ? "block" : "none";
+}
+
+function removeScreenEmbed() {
+  if (screenEmbedObject && screenGroup) {
+    screenGroup.remove(screenEmbedObject);
+    screenEmbedObject = null;
+  }
+  if (screenMesh) screenMesh.visible = true;
+}
+
+/**
+ * Interactive page on the big screen (same aspect as the WebGL plane: 1120×625 px → 11.2×6.25 world units).
+ */
+function loadEmbedPageFromUrl(raw) {
+  let url = String(raw || "").trim();
+  if (!url) {
+    setStatus("<span style='color:#ff8899'>Enter a URL first.</span>");
+    return;
+  }
+  if (!/^https?:\/\//i.test(url)) url = `https://${url}`;
+  try {
+    void new URL(url);
+  } catch {
+    setStatus("<span style='color:#ff8899'>That doesn’t look like a valid URL.</span>");
+    return;
+  }
+  if (!screenGroup) return;
+
+  removeScreenEmbed();
+  const shell = document.createElement("div");
+  shell.style.width = "1120px";
+  shell.style.height = "625px";
+  shell.style.overflow = "hidden";
+  shell.style.borderRadius = "14px";
+  shell.style.background = "#0a0c10";
+  shell.style.boxShadow = "0 0 0 2px rgba(90, 130, 200, 0.35)";
+  shell.style.pointerEvents = "auto";
+
+  const iframe = document.createElement("iframe");
+  iframe.style.width = "100%";
+  iframe.style.height = "100%";
+  iframe.style.border = "none";
+  iframe.referrerPolicy = "no-referrer-when-downgrade";
+  iframe.allow =
+    "accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; fullscreen; microphone; camera";
+  iframe.sandbox =
+    "allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-presentation allow-downloads allow-modals";
+  iframe.src = url;
+  iframe.title = "Embedded page";
+  shell.appendChild(iframe);
+
+  const obj = new CSS3DObject(shell);
+  obj.position.set(0, 0, 0.09);
+  obj.scale.set(0.01, 0.01, 0.01);
+  screenGroup.add(obj);
+  screenEmbedObject = obj;
+  if (screenMesh) screenMesh.visible = false;
+
+  setStatus(
+    "<strong>Page loaded on screen.</strong> Click and scroll on the screen. If you see a blank area, that site blocks embedding — try another page or use Screen/window capture instead.",
+  );
+}
+
+function clearVideoScreenPlaceholder() {
+  if (videoTexture) {
+    videoTexture.dispose();
+    videoTexture = null;
+  }
+  if (screenMesh) {
+    screenMesh.visible = true;
+    screenMesh.material.map = null;
+    screenMesh.material.color.setHex(0x0a0c12);
+    screenMesh.material.opacity = 0.5;
+    screenMesh.material.needsUpdate = true;
+  }
 }
 
 async function fillDeviceLists(stream) {
@@ -348,6 +812,7 @@ async function fillMicListOnly(micAudioStream) {
 }
 
 function attachVideoTexture() {
+  if (videoSourceSelect.value === "embed") return;
   if (videoTexture) videoTexture.dispose();
   videoTexture = new THREE.VideoTexture(hiddenVideo);
   videoTexture.colorSpace = THREE.SRGBColorSpace;
@@ -376,6 +841,19 @@ function onDisplayTrackEnded() {
 }
 
 async function applySelectedDevices() {
+  if (videoSourceSelect.value === "embed") {
+    if (!micSelect.value) return;
+    stopMicTracksOnly();
+    const nextMic = await navigator.mediaDevices.getUserMedia({
+      audio: { exact: micSelect.value },
+      video: false,
+    });
+    micStream = nextMic;
+    setupAnalyser(nextMic);
+    setStatus("<strong>Mic updated.</strong> Embedded page unchanged.");
+    return;
+  }
+
   if (videoSourceSelect.value === "camera") {
     if (!camSelect.value && !micSelect.value) return;
     const vId = camSelect.value ? { exact: camSelect.value } : true;
@@ -491,9 +969,95 @@ function getMicLevel() {
   let s = 0;
   for (let i = 0; i < buf.length; i++) s += buf[i] * buf[i];
   const rms = Math.sqrt(s / buf.length);
-  const n = Math.min(1, rms * 5.5);
+  const n = Math.min(1, rms * 7.25);
   ampSmooth = ampSmooth * 0.82 + n * 0.18;
   return ampSmooth;
+}
+
+function closeRecordingAudioCtx() {
+  if (!recordingAudioCtx) return;
+  try {
+    recordingAudioCtx.close();
+  } catch {
+    /* */
+  }
+  recordingAudioCtx = null;
+}
+
+/**
+ * One mixed track: mic + virtual screen/tab audio.
+ * Uses ``getDisplayMedia`` audio tracks when in screen mode (reliable). Fallback: ``captureStream()``
+ * from the video element (webcam path, or embed quirks).
+ * Slightly ducks each source when both are present so the mix is less likely to clip.
+ */
+async function buildMixedRecordingAudioStream() {
+  closeRecordingAudioCtx();
+  recordingAudioCtx = new AudioContext();
+  if (recordingAudioCtx.state === "suspended") {
+    await recordingAudioCtx.resume();
+  }
+  const dest = recordingAudioCtx.createMediaStreamDestination();
+
+  let hasMic = false;
+  let hasScreen = false;
+  /** @type {GainNode | null} */
+  let micGain = null;
+  /** @type {GainNode | null} */
+  let screenGain = null;
+
+  if (micStream?.getAudioTracks?.()?.length) {
+    const micSrc = recordingAudioCtx.createMediaStreamSource(new MediaStream(micStream.getAudioTracks()));
+    micGain = recordingAudioCtx.createGain();
+    micGain.gain.value = 1;
+    micSrc.connect(micGain);
+    micGain.connect(dest);
+    hasMic = true;
+  }
+
+  const mode = videoSourceSelect?.value;
+  if (mode === "display" && screenCaptureStream?.getAudioTracks) {
+    const sysTracks = screenCaptureStream
+      .getAudioTracks()
+      .filter((t) => t.kind === "audio" && t.readyState === "live");
+    if (sysTracks.length) {
+      const sysSrc = recordingAudioCtx.createMediaStreamSource(new MediaStream(sysTracks));
+      screenGain = recordingAudioCtx.createGain();
+      screenGain.gain.value = 1;
+      sysSrc.connect(screenGain);
+      screenGain.connect(dest);
+      hasScreen = true;
+    }
+  }
+
+  if (!hasScreen) {
+    try {
+      const cap = hiddenVideo.captureStream();
+      const vTracks = cap.getAudioTracks().filter((t) => t.kind === "audio" && t.readyState === "live");
+      if (vTracks.length) {
+        const vidSrc = recordingAudioCtx.createMediaStreamSource(new MediaStream(vTracks));
+        screenGain = recordingAudioCtx.createGain();
+        screenGain.gain.value = 1;
+        vidSrc.connect(screenGain);
+        screenGain.connect(dest);
+        hasScreen = true;
+      }
+    } catch (e) {
+      console.warn("[Podcast studio] captureStream for recording:", e);
+    }
+  }
+
+  if (!hasMic && !hasScreen) {
+    closeRecordingAudioCtx();
+    return null;
+  }
+
+  if (hasMic && hasScreen) {
+    const duck = 0.82;
+    if (micGain) micGain.gain.value = duck;
+    if (screenGain) screenGain.gain.value = duck;
+  }
+
+  return dest.stream;
 }
 
 function initThree() {
@@ -546,6 +1110,20 @@ function initThree() {
   );
   window.addEventListener("keyup", (e) => {
     if (keyMove[e.code] !== undefined) keyMove[e.code] = false;
+  });
+
+  window.addEventListener(
+    "keydown",
+    (e) => {
+      if (keyLuna[e.code] === undefined) return;
+      if (isTypingTarget(e.target)) return;
+      e.preventDefault();
+      keyLuna[e.code] = true;
+    },
+    { passive: false },
+  );
+  window.addEventListener("keyup", (e) => {
+    if (keyLuna[e.code] !== undefined) keyLuna[e.code] = false;
   });
 
   const hemi = new THREE.HemisphereLight(0x3a4450, 0x08090a, 0.28);
@@ -688,6 +1266,8 @@ function initThree() {
   window.addEventListener("resize", resize);
   resize();
   requestAnimationFrame(() => resize());
+
+  // Luna avatar intentionally disabled in studio.
 }
 
 function animate() {
@@ -744,6 +1324,8 @@ function animate() {
     }
   }
 
+  // Studio Luna avatar update disabled.
+
   if (controls) controls.update();
   renderer.render(scene, camera);
   if (css3dRenderer) css3dRenderer.render(scene, camera);
@@ -768,11 +1350,18 @@ micVol.addEventListener("input", applyMicVolume);
 
 videoSourceSelect.addEventListener("change", () => {
   updateVideoSourceUi();
+  if (videoSourceSelect.value !== "embed") {
+    removeScreenEmbed();
+  }
   if (!btnRec.disabled) {
     setStatus(
-      "Video mode changed — click <strong>Enable microphone &amp; video</strong> again to use webcam or screen/window.",
+      "Video mode changed — click <strong>Enable microphone &amp; video</strong> again to use webcam, screen, or embed.",
     );
   }
+});
+
+btnEmbedLoad.addEventListener("click", () => {
+  loadEmbedPageFromUrl(embedUrlInput?.value);
 });
 
 function wireDisplayVideoTrack(track) {
@@ -818,9 +1407,32 @@ btnPerm.addEventListener("click", async () => {
     if (!navigator.mediaDevices?.getUserMedia) {
       throw new Error("This page needs a modern browser with getUserMedia (use Chrome or Edge).");
     }
-    const useDisplay = videoSourceSelect.value === "display";
+    const mode = videoSourceSelect.value;
 
-    if (useDisplay) {
+    if (mode === "embed") {
+      stopAllMedia();
+      setStatus("Requesting microphone…");
+      const micOnly = await navigator.mediaDevices.getUserMedia({
+        audio: true,
+        video: false,
+      });
+      micStream = micOnly;
+      hiddenVideo.srcObject = null;
+      await hiddenVideo.pause().catch(() => {});
+      await fillMicListOnly(micStream);
+      if (!deviceListenersAttached) {
+        deviceListenersAttached = true;
+        camSelect.addEventListener("change", () => void applySelectedDevices());
+        micSelect.addEventListener("change", () => void applySelectedDevices());
+      }
+      setupAnalyser(micOnly);
+      clearVideoScreenPlaceholder();
+      btnRec.disabled = false;
+      btnShareAgain.disabled = true;
+      setStatus(
+        "<strong>Mic ready.</strong> Paste the <strong>same URL as your tab</strong> (copy from the address bar), then click <strong>Load page on screen</strong> to use it here without switching windows.",
+      );
+    } else if (mode === "display") {
       if (!navigator.mediaDevices.getDisplayMedia) {
         throw new Error("Screen/window capture is not supported in this browser.");
       }
@@ -853,9 +1465,10 @@ btnPerm.addEventListener("click", async () => {
       btnRec.disabled = false;
       btnShareAgain.disabled = false;
       setStatus(
-        "<strong>Live — window capture.</strong> Change mic above; use <strong>Share…</strong> to pick another window. Orb uses your microphone.",
+        "<strong>Live — window capture.</strong> Change mic above; use <strong>Share…</strong> to pick another window. Orb uses your microphone. " +
+          "When sharing a <strong>Chrome / Edge tab</strong>, check <strong>Share tab audio</strong> in the picker so recordings include that sound.",
       );
-    } else {
+    } else if (mode === "camera") {
       stopAllMedia();
       setStatus("Requesting camera and microphone…");
       const stream = await navigator.mediaDevices.getUserMedia({
@@ -902,54 +1515,78 @@ function formatTime(ms) {
   return `${m}:${r.toString().padStart(2, "0")}`;
 }
 
-btnRec.addEventListener("click", () => {
+btnRec.addEventListener("click", async () => {
   const mime = pickMime();
   if (!mime) {
     setStatus("<span style='color:#ff8899'>Recording not supported in this browser.</span>");
     return;
   }
-  const canvasStream = renderer.domElement.captureStream(30);
-  const out = new MediaStream();
-  canvasStream.getVideoTracks().forEach((t) => out.addTrack(t));
-  if (micStream) {
-    micStream.getAudioTracks().forEach((t) => out.addTrack(t));
-  }
-  recordedChunks = [];
   try {
-    mediaRecorder = new MediaRecorder(out, { mimeType: mime, videoBitsPerSecond: 8000000 });
-  } catch {
-    mediaRecorder = new MediaRecorder(out);
-  }
-  mediaRecorder.ondataavailable = (ev) => {
-    if (ev.data.size) recordedChunks.push(ev.data);
-  };
-  mediaRecorder.onstop = () => {
-    const blob = new Blob(recordedChunks, { type: mediaRecorder.mimeType || "video/webm" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `luna-podcast-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-")}.webm`;
-    a.click();
-    URL.revokeObjectURL(url);
-    setStatus("<strong>Saved download.</strong> Ready to record again.");
+    const canvasStream = renderer.domElement.captureStream(30);
+    const out = new MediaStream();
+    canvasStream.getVideoTracks().forEach((t) => out.addTrack(t));
+
+    const mixedAudio = await buildMixedRecordingAudioStream();
+    if (mixedAudio?.getAudioTracks?.()?.length) {
+      mixedAudio.getAudioTracks().forEach((t) => out.addTrack(t));
+    } else if (micStream?.getAudioTracks?.()?.length) {
+      micStream.getAudioTracks().forEach((t) => out.addTrack(t));
+    }
+
+    recordedChunks = [];
+    try {
+      mediaRecorder = new MediaRecorder(out, { mimeType: mime, videoBitsPerSecond: 8000000 });
+    } catch {
+      mediaRecorder = new MediaRecorder(out);
+    }
+    mediaRecorder.ondataavailable = (ev) => {
+      if (ev.data.size) recordedChunks.push(ev.data);
+    };
+    mediaRecorder.onstop = () => {
+      closeRecordingAudioCtx();
+      const mt = mediaRecorder.mimeType || mime || "video/webm";
+      const blob = new Blob(recordedChunks, { type: mt });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      const ext = fileExtensionForMime(mt);
+      a.download = `luna-podcast-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-")}.${ext}`;
+      a.click();
+      URL.revokeObjectURL(url);
+      setStatus("<strong>Saved download.</strong> Ready to record again.");
+      btnRec.disabled = false;
+      btnStopRec.disabled = true;
+      btnPerm.disabled = false;
+    };
+    mediaRecorder.start(200);
+    recStart = performance.now();
+    btnRec.disabled = true;
+    btnStopRec.disabled = false;
+    btnPerm.disabled = true;
+    recTimer = setInterval(() => {
+      setStatus(`<strong>Recording</strong> ${formatTime(performance.now() - recStart)} — Stop when finished.`);
+    }, 500);
+    setStatus(
+      "<strong>Recording…</strong> Stop when finished." +
+        (videoSourceSelect.value === "display"
+          ? " Mic + shared window/tab audio (if you enabled audio in the share dialog)."
+          : ""),
+    );
+  } catch (e) {
+    console.warn("[Podcast studio] Record:", e);
+    closeRecordingAudioCtx();
+    setStatus(`<span style='color:#ff8899'>Could not start recording: ${String(e.message || e)}</span>`);
     btnRec.disabled = false;
     btnStopRec.disabled = true;
     btnPerm.disabled = false;
-  };
-  mediaRecorder.start(200);
-  recStart = performance.now();
-  btnRec.disabled = true;
-  btnStopRec.disabled = false;
-  btnPerm.disabled = true;
-  recTimer = setInterval(() => {
-    setStatus(`<strong>Recording</strong> ${formatTime(performance.now() - recStart)} — Stop when finished.`);
-  }, 500);
-  setStatus("<strong>Recording…</strong> Stop when finished.");
+  }
 });
 
 btnStopRec.addEventListener("click", () => {
   if (mediaRecorder && mediaRecorder.state !== "inactive") {
     mediaRecorder.stop();
+  } else {
+    closeRecordingAudioCtx();
   }
   if (recTimer) {
     clearInterval(recTimer);

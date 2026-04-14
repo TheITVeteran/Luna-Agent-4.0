@@ -5,6 +5,7 @@ Animations (default layout next to this repo):
   - Idle body: LUNA_ANIMATIONS_DIR (default: <project>/Luna animations/) — .vrma / .fbx in that folder only (not subfolders).
   - Talking body: <Luna animations>/talking/ (or LUNA_TALKING_DIR).
   - Expression VRMA: LUNA_EXPRESSIONS_DIR or <Luna animations>/expressions/.
+  - Idle sequence (viewer + podcast): <Luna animations>/fbx animations/ — ``.fbx`` and ``.vrma`` ordered by filename (one at a time, looped). Override with LUNA_FBX_ANIMATIONS_DIR.
   - Legacy body: data/vrm/animations/, data/vrm/idle.vrma
 
 Recording your own face for clips (offline, then export VRMA):
@@ -118,6 +119,31 @@ def _talking_dir() -> str:
     if env:
         return os.path.abspath(os.path.expanduser(env))
     return os.path.join(_luna_animations_root(), "talking")
+
+
+def _fbx_animations_dir() -> str:
+    """Ordered idle sequence: LUNA_FBX_ANIMATIONS_DIR or ``<Luna animations>/fbx animations``."""
+    env = (os.environ.get("LUNA_FBX_ANIMATIONS_DIR") or "").strip()
+    if env:
+        return os.path.abspath(os.path.expanduser(env))
+    return os.path.join(_luna_animations_root(), "fbx animations")
+
+
+def idle_sequence_folder_paths_ordered() -> list[str]:
+    """``.fbx`` and ``.vrma`` under ``fbx animations/``, sorted by filename (case-insensitive)."""
+    d = _fbx_animations_dir()
+    if not os.path.isdir(d):
+        return []
+    names = sorted(
+        [f for f in os.listdir(d) if f.lower().endswith((".fbx", ".vrma"))],
+        key=str.lower,
+    )
+    out: list[str] = []
+    for fn in names:
+        p = os.path.join(d, fn)
+        if os.path.isfile(p):
+            out.append(os.path.abspath(p))
+    return out
 
 
 def _list_vrma_files_in_dir(d: str) -> list[str]:
@@ -498,6 +524,18 @@ def serve_vrma_expression(index: int):
     return _send_vrma_file(paths[index])
 
 
+@vrm_bp.route("/animation/idle/sequence/<int:index>")
+def serve_idle_sequence(index: int):
+    """Single ordered list: ``fbx animations/*.fbx`` and ``*.vrma`` (see ``idle_sequence_folder_paths_ordered``)."""
+    paths = idle_sequence_folder_paths_ordered()
+    if index < 0 or index >= len(paths):
+        return jsonify({"error": "Invalid idle sequence index", "count": len(paths)}), 404
+    path = paths[index]
+    if path.lower().endswith(".fbx"):
+        return _send_fbx_file(path)
+    return _send_vrma_file(path)
+
+
 @vrm_bp.route("/animation/<int:index>")
 def serve_vrma_by_index(index: int):
     """Legacy alias: idle VRMA index (same as /animation/motion/<index>)."""
@@ -567,6 +605,32 @@ def _expression_items_for_api() -> list[dict[str, Any]]:
     return out
 
 
+def _idle_sequence_items_for_api() -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for i, p in enumerate(idle_sequence_folder_paths_ordered()):
+        base = os.path.basename(p)
+        stem = os.path.splitext(base)[0]
+        low = base.lower()
+        kind: str = "fbx" if low.endswith(".fbx") else "vrma"
+        label = _label_for_anim_path(p)
+        if kind == "fbx":
+            label = f"{label} (FBX · idle seq)"
+        else:
+            label = f"{label} (VRMA · idle seq)"
+        out.append(
+            {
+                "kind": kind,
+                "index": i,
+                "label": label,
+                "name": base,
+                "stem": stem,
+                "pool": "idle_sequence",
+                "role": "idle_sequence",
+            }
+        )
+    return out
+
+
 @vrm_bp.route("/api/animations")
 def api_animations():
     """Idle / talking / expression pools; legacy `motion` = idle + talk; `local` = all body VRMA paths."""
@@ -574,12 +638,14 @@ def api_animations():
     motion_idle = _build_motion_pool_items(idle_vrma_paths(), idle_fbx_paths(), "idle")
     motion_talk = _build_motion_pool_items(talk_vrma_paths(), talk_fbx_paths(), "talk")
     motion_expression = _expression_items_for_api()
+    motion_idle_sequence = _idle_sequence_items_for_api()
     motion_items = motion_idle + motion_talk
     expression_items = motion_expression
     return jsonify(
         {
             "motion": motion_items,
             "motion_idle": motion_idle,
+            "motion_idle_sequence": motion_idle_sequence,
             "motion_talk": motion_talk,
             "motion_expression": motion_expression,
             "expression": expression_items,
@@ -594,6 +660,7 @@ def api_animations():
             "animations_root": _luna_animations_root(),
             "talking_root": _talking_dir(),
             "expressions_root": _expressions_dir(),
+            "fbx_animations_root": _fbx_animations_dir(),
             "sample": {
                 "label": "Sample — Pixiv test.vrma (CDN)",
                 "url": "https://raw.githubusercontent.com/pixiv/three-vrm/dev/packages/three-vrm-animation/examples/models/test.vrma",
@@ -612,6 +679,7 @@ def api_status():
     idle_v = idle_vrma_paths()
     vrma_path = idle_v[0] if idle_v else None
     edge_ok = _edge_tts_enabled() and _edge_tts_import_ok()
+    _chat = (_env_str("OLLAMA_CHAT_MODEL") or _env_str("OLLAMA_MODEL") or "llama3.2:latest").strip() or "llama3.2:latest"
     return jsonify(
         {
             "ok": bool(os.path.isfile(path)),
@@ -628,8 +696,42 @@ def api_status():
             "expressions_root": _expressions_dir(),
             "edge_tts": edge_ok,
             "edge_tts_voice": _edge_tts_voice_default() if edge_ok else "",
+            "chat_model": _chat,
         }
     )
+
+
+def _is_gemma4_family_model_id(model_id: str) -> bool:
+    m = (model_id or "").strip().lower().replace(" ", "")
+    if not m:
+        return False
+    if m.startswith("gemma4"):
+        return True
+    return "gemma-4" in m or "gemma4" in m
+
+
+def _strip_emojis_for_edge_tts(text: str) -> str:
+    if not text:
+        return text
+    out: list[str] = []
+    for ch in text:
+        o = ord(ch)
+        if o in (0x200D, 0xFE0F, 0x20E3):
+            continue
+        if 0x1F3FB <= o <= 0x1F3FF:
+            continue
+        if (
+            0x1F300 <= o <= 0x1FAFF
+            or 0x2600 <= o <= 0x26FF
+            or 0x2700 <= o <= 0x27BF
+            or 0x1F600 <= o <= 0x1F64F
+            or 0x1F680 <= o <= 0x1F6FF
+            or 0x1F1E6 <= o <= 0x1F1FF
+        ):
+            continue
+        out.append(ch)
+    s = "".join(out)
+    return " ".join(s.split()).strip()
 
 
 @vrm_bp.route("/api/tts", methods=["POST"])
@@ -637,6 +739,9 @@ def api_tts():
     """Synthesize speech with Edge TTS (e.g. Ava); returns MP3 for the VRM viewer Web Audio path."""
     data = request.get_json(force=True, silent=True) or {}
     text = (data.get("text") or "").strip()
+    chat = (_env_str("OLLAMA_CHAT_MODEL") or _env_str("OLLAMA_MODEL") or "").strip()
+    if _is_gemma4_family_model_id(chat):
+        text = _strip_emojis_for_edge_tts(text)
     if not text:
         return jsonify({"error": "Missing or empty text"}), 400
     voice = (data.get("voice") or "").strip() or None

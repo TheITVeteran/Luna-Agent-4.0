@@ -96,20 +96,28 @@
 
 <button type="button" id="settings-toggle" title="Avatar &amp; speech" aria-expanded="false" aria-controls="settings-panel">⚙</button>
 <div id="settings-panel" role="dialog" aria-label="Avatar settings">
-  <h3>Body motion</h3>
+  <h3>Expression (face)</h3>
   <div class="status" id="anim-status">Loading…</div>
-  <label for="idle-select">Idle — <code style="color:#88b4cc">Luna animations/</code> (silent loop)</label>
-  <select id="idle-select"></select>
-  <label for="talk-select">Talking — <code style="color:#88b4cc">Luna animations/talking/</code> (speech loop)</label>
-  <select id="talk-select"></select>
-  <h3 style="margin-top:14px">Expression (face)</h3>
-  <label for="expression-select">Expression — <code style="color:#88b4cc">Luna animations/expressions/</code> (loop)</label>
-  <select id="expression-select"></select>
-  <div class="hint">
-    Three folders: <strong>idle</strong> body clips in the animations root, <strong>talking</strong> in <code style="color:#00d4ff">talking/</code>, <strong>expression</strong> face VRMA in <code style="color:#00d4ff">expressions/</code>. While silent, idle body and expression <strong>alternate</strong> on one timer. During TTS, expression VRMA is off and one <strong>talking</strong> body clip loops until the response finishes (no mid-speech talk swap).
-    Legacy: <code style="color:#00d4ff">data/vrm/animations/</code>. FBX retargets in-browser. Low-motion body <code style="color:#00d4ff">.vrma</code> can be hidden server-side (<code style="color:#00d4ff">LUNA_VRMA_MIN_MOTION_RAD=0</code> lists all).
+  <div hidden>
+    <label for="idle-select">Idle — <code style="color:#88b4cc">Luna animations/</code> + <code style="color:#88b4cc">fbx animations/</code> (sequence first)</label>
+    <select id="idle-select"></select>
+    <label for="talk-select">Talking — <code style="color:#88b4cc">Luna animations/talking/</code> (speech loop)</label>
+    <select id="talk-select"></select>
   </div>
-  <div class="bone-map-row">
+  <div hidden>
+    <label for="expression-select">Expression — <code style="color:#88b4cc">Luna animations/expressions/</code> (loop)</label>
+    <select id="expression-select"></select>
+  </div>
+  <label for="emotion-test-select">Emotion test</label>
+  <select id="emotion-test-select"></select>
+  <div class="row-btns">
+    <button type="button" class="btn" id="btn-emotion-apply">Apply emotion</button>
+    <button type="button" class="btn btn-secondary" id="btn-emotion-clear">Neutral</button>
+  </div>
+  <div class="hint">
+    If <code style="color:#88b4cc">Luna animations/fbx animations/</code> has clips, they drive idle body in order (no auto <strong>expression VRMA</strong> — it would overwrite those bones). If that folder is empty, <code style="color:#88b4cc">VRMA_01</code> in expressions can load. Luna <strong>[TAG]</strong> emotions still blend when applicable.
+  </div>
+  <div class="bone-map-row" hidden>
     <label><input type="checkbox" id="bone-map-toggle"/> Show Mixamo ↔ Luna (VRM) bone map</label>
   </div>
   <div id="bone-map-panel" hidden></div>
@@ -120,7 +128,7 @@
     <strong>Browser</strong> uses OS voices (Web Speech API) — Ava is not listed there.
     Mouth visemes: Edge uses live audio level; browser uses text-timed shapes.
     The main Luna page (<code style="color:#00d4ff">/</code>) mirrors replies here; this page also polls Twitch when IRC ingest is enabled (same as the chat UI). Keep <code style="color:#00d4ff">/vrm/</code> open for avatar + Edge TTS.
-    Manual / dev: <code style="color:#00d4ff">BroadcastChannel(&quot;luna-vrm-speech&quot;)</code> → <code style="color:#00d4ff">{ type: &quot;speak&quot;, text: &quot;…&quot;, engine?: &quot;edge&quot; | &quot;browser&quot; }</code>.
+    Manual / dev: <code style="color:#00d4ff">BroadcastChannel(&quot;luna-vrm-speech&quot;)</code> → <code style="color:#00d4ff">{ type: &quot;speak&quot;, text: &quot;…&quot;, engine?: &quot;edge&quot; | &quot;browser&quot; }</code>. Leading <code>[HAPPY]</code>-style tags (same set as Luna’s chat prompt) drive VRM face presets during TTS; lip-sync still controls vowel shapes.
   </div>
   <label for="tts-engine">Engine</label>
   <select id="tts-engine">
@@ -143,7 +151,7 @@
 </div>
 
 <div id="hud">
-  <strong>VRM viewer</strong> — orbit · zoom · ⚙ idle / talk / expression + TTS<br/>
+  <strong>VRM viewer</strong> — orbit · zoom · ⚙ expression + TTS<br/>
   Model: <span id="path-hint">…</span>
   <div class="err" id="err" hidden></div>
 </div>
@@ -161,13 +169,24 @@ import {
 import { FBXLoader } from "three/addons/loaders/FBXLoader.js";
 import * as SkeletonUtils from "three/addons/utils/SkeletonUtils.js";
 
-const BASE = new URL(".", window.location.href).href;
+/** Same-origin ``/vrm/`` prefix — do not use ``new URL(".", location)``: without a trailing slash on ``/vrm``, that resolves to ``/`` and breaks ``api/animations`` + ``model``. */
+const BASE = new URL("/vrm/", window.location.origin).href;
 const MODEL_URL = new URL("model", BASE).href;
 const API_ANIMATIONS = new URL("api/animations", BASE).href;
 const API_TTS = new URL("api/tts", BASE).href;
 const URL_PARAMS = new URLSearchParams(window.location.search);
 /** `?boneMap=1` — open bone map logging + panel when an FBX clip loads. */
 const BONE_MAP_URL = URL_PARAMS.get("boneMap") === "1" || URL_PARAMS.get("boneMap") === "true";
+/** Expression-only avatar behavior: body clip playback is disabled. */
+const useProceduralBody = true;
+/** Substring to match a talking-pool .vrma (stem / label / filename) for reference body motion. `?refVrma=0` disables. */
+const REF_VRMA_SUBSTRING = (() => {
+  const raw = (URL_PARAMS.get("refVrma") ?? "standing arguing").trim();
+  if (!raw || raw === "0" || /^off$/i.test(raw)) return "";
+  return raw;
+})();
+const REF_VRMA_SPEED = Math.max(0.05, parseFloat(URL_PARAMS.get("refSpeed") || "0.72") || 0.72);
+const REF_VRMA_WEIGHT = Math.min(1, Math.max(0, parseFloat(URL_PARAMS.get("refWeight") || "0.55") || 0.55));
 
 function pingVrmPresenceToServer() {
   fetch(new URL("/api/vrm-presence", window.location.origin).href, {
@@ -205,6 +224,9 @@ const ttsVoice = document.getElementById("tts-voice");
 const ttsText = document.getElementById("tts-text");
 const btnSpeak = document.getElementById("btn-speak");
 const btnStopSpeech = document.getElementById("btn-stop-speech");
+const emotionTestSelect = document.getElementById("emotion-test-select");
+const btnEmotionApply = document.getElementById("btn-emotion-apply");
+const btnEmotionClear = document.getElementById("btn-emotion-clear");
 const boneMapToggle = document.getElementById("bone-map-toggle");
 const boneMapPanel = document.getElementById("bone-map-panel");
 
@@ -234,12 +256,17 @@ let nextSilentTurnIsExpression = false;
 let animationList = {
   motion: [],
   motion_idle: [],
+  motion_idle_sequence: [],
   motion_talk: [],
   motion_expression: [],
   expression: [],
   local: [],
   sample: null,
 };
+/** Index into ``motion_idle_sequence``; advances when each LoopOnce clip finishes. */
+let idleSeqIdx = 0;
+/** @type {((e: { action: THREE.AnimationAction }) => void) | null} */
+let idleSeqMixerHandler = null;
 /** Last body mode for crossfade strength (idle vs talk). */
 let lastBodyMode = null;
 /** Avoid immediate repeat when picking random clips. */
@@ -257,8 +284,12 @@ let lipAudioMode = false;
 let speakGen = 0;
 let edgeAudioCtx = null;
 let edgeAnalyser = null;
+/** One-time ``AnalyserNode`` → destination wiring (unity gain / 1.0). */
+let edgeAnalyserToDestWired = false;
 /** @type {AudioBufferSourceNode | null} */
 let edgePlaybackSource = null;
+/** From `/vrm/api/status` — used to strip emojis for Gemma 4 family TTS. */
+let lunaChatModelId = "";
 let lipAmpSmooth = 0;
 let lipTdBuf = null;
 /** Text-timed viseme lipsync (browser SpeechSynthesis has no audio buffer). */
@@ -273,11 +304,450 @@ const lipSync = {
   /** Smoothed target weights for VRM mouth presets */
   smooth: { aa: 0, ih: 0, ee: 0, ou: 0, oh: 0 },
 };
+/** Timeline of in-line [TAG] emotions across the current spoken response. */
+const speechEmotionTimeline = {
+  events: /** @type {{ at01: number, tag: string }[]} */ ([]),
+  idx: -1,
+};
+/** Last applied logical emotion blend (used by procedural talking body). */
+const currentEmotionWeights = { neutral: 1, angry: 0, fun: 0, joy: 0, sorrow: 0, surprised: 0 };
+let talkingBodyBlend = 0;
+
+/**
+ * Sampled relative rotations from a reference talking VRMA (offset from clip frame 0).
+ * @type {{
+ *   label: string,
+ *   duration: number,
+ *   bones: Map<string, { n: number, offsets: Float32Array }>,
+ * } | null}
+ */
+let referenceMotionLayer = null;
+const refMotionQuatA = new THREE.Quaternion();
+const refMotionQuatB = new THREE.Quaternion();
+const refMotionQuatOut = new THREE.Quaternion();
+const refMotionFullPose = new THREE.Quaternion();
+const refMotionProcOnly = new THREE.Quaternion();
 
 /** Primary blendshape for big open/close (some models differ). Set after VRM load. */
 let mouthOpenExprName = "aa";
 
 const clock = new THREE.Clock();
+/** Full humanoid chain for procedural idle + speech (all optional bones skip if absent). */
+const PROC_TALK_BONES = [
+  "hips",
+  "spine",
+  "chest",
+  "upperChest",
+  "neck",
+  "head",
+  "leftShoulder",
+  "rightShoulder",
+  "leftUpperArm",
+  "rightUpperArm",
+  "leftLowerArm",
+  "rightLowerArm",
+  "leftHand",
+  "rightHand",
+  "leftUpperLeg",
+  "rightUpperLeg",
+  "leftLowerLeg",
+  "rightLowerLeg",
+  "leftFoot",
+  "rightFoot",
+  "leftToes",
+  "rightToes",
+];
+/** Minimum procedural body blend when idle so the avatar never freezes fully. */
+const PROC_BODY_IDLE_FLOOR = 0.28;
+const procTalkRestQuat = new Map();
+const procTalkEuler = new THREE.Euler(0, 0, 0, "XYZ");
+const procTalkQuat = new THREE.Quaternion();
+const procTalkTmpA = new THREE.Vector3();
+const procTalkTmpB = new THREE.Vector3();
+const procTalkFixEuler = new THREE.Euler(0, 0, 0, "XYZ");
+const procTalkFixQuat = new THREE.Quaternion();
+
+/** Stop body (idle/talk) mixer only — expression VRMA keeps running when silent. */
+function stopAllFileMotion() {
+  clearSilentTurn();
+  if (mixer) {
+    try {
+      mixer.stopAllAction();
+    } catch {
+      /* */
+    }
+  }
+  motionActionCurrent = null;
+}
+
+function cacheProceduralRestPose() {
+  procTalkRestQuat.clear();
+  const h = vrm?.humanoid;
+  if (!h) return;
+  vrm.scene.updateWorldMatrix(true, true);
+
+  // If the model is still in a rig-rest T-pose, apply a one-time base adjustment.
+  let tPoseLike = false;
+  const lUpper = h.getNormalizedBoneNode("leftUpperArm");
+  const rUpper = h.getNormalizedBoneNode("rightUpperArm");
+  const lHand = h.getNormalizedBoneNode("leftHand");
+  const rHand = h.getNormalizedBoneNode("rightHand");
+  if (lUpper && rUpper && lHand && rHand) {
+    lUpper.getWorldPosition(procTalkTmpA);
+    lHand.getWorldPosition(procTalkTmpB);
+    const lDy = Math.abs(procTalkTmpA.y - procTalkTmpB.y);
+    rUpper.getWorldPosition(procTalkTmpA);
+    rHand.getWorldPosition(procTalkTmpB);
+    const rDy = Math.abs(procTalkTmpA.y - procTalkTmpB.y);
+    tPoseLike = lDy < 0.085 && rDy < 0.085;
+  }
+
+  for (const b of PROC_TALK_BONES) {
+    const node = h.getNormalizedBoneNode(b);
+    if (!node) continue;
+    const q = node.quaternion.clone();
+    if (tPoseLike) {
+      if (b === "leftUpperArm") {
+        // Drop arms from T-pose toward a relaxed down position.
+        procTalkFixEuler.set(0.0, 0.0, 1.05);
+        procTalkFixQuat.setFromEuler(procTalkFixEuler);
+        q.multiply(procTalkFixQuat);
+      } else if (b === "rightUpperArm") {
+        procTalkFixEuler.set(0.0, 0.0, -1.05);
+        procTalkFixQuat.setFromEuler(procTalkFixEuler);
+        q.multiply(procTalkFixQuat);
+      } else if (b === "leftLowerArm") {
+        procTalkFixEuler.set(-0.14, 0.0, 0.14);
+        procTalkFixQuat.setFromEuler(procTalkFixEuler);
+        q.multiply(procTalkFixQuat);
+      } else if (b === "rightLowerArm") {
+        procTalkFixEuler.set(-0.14, 0.0, -0.14);
+        procTalkFixQuat.setFromEuler(procTalkFixEuler);
+        q.multiply(procTalkFixQuat);
+      } else if (b === "leftHand" || b === "rightHand") {
+        procTalkFixEuler.set(0.06, 0.0, b === "leftHand" ? 0.05 : -0.05);
+        procTalkFixQuat.setFromEuler(procTalkFixEuler);
+        q.multiply(procTalkFixQuat);
+      }
+    }
+    procTalkRestQuat.set(b, q);
+  }
+}
+
+function normalizeMotionMatchKey(s) {
+  return String(s || "")
+    .toLowerCase()
+    .replace(/\.[a-z0-9]+$/i, "")
+    .replace(/[^a-z0-9]+/g, "");
+}
+
+/** Pick ``talk:vrma:<i>`` (or talk fbx skipped) whose stem/label/name matches substring. */
+function findTalkMotionKeyByStem(substr) {
+  const needle = normalizeMotionMatchKey(substr);
+  if (!needle) return null;
+  for (const item of talkMotionItems()) {
+    if (inferMotionKind(item) !== "vrma") continue;
+    const hay = [
+      normalizeMotionMatchKey(item.stem),
+      normalizeMotionMatchKey(item.label),
+      normalizeMotionMatchKey(item.name),
+    ];
+    if (hay.some((h) => h.includes(needle) || needle.includes(h))) {
+      return motionOptionValue(item);
+    }
+  }
+  return null;
+}
+
+function backupSceneLocalQuaternions(root) {
+  const list = [];
+  root.traverse((o) => {
+    list.push({ o, q: o.quaternion.clone() });
+  });
+  return list;
+}
+
+function restoreSceneLocalQuaternions(list) {
+  for (const { o, q } of list) {
+    o.quaternion.copy(q);
+  }
+}
+
+/**
+ * Relative quaternion at time ``tSec`` (looped): ``inv(q0) * q(t)`` from sampled VRMA.
+ */
+function referenceBoneOffsetAt(boneName, tSec) {
+  const layer = referenceMotionLayer;
+  if (!layer) return null;
+  const rec = layer.bones.get(boneName);
+  if (!rec || rec.n < 2) return null;
+  const { duration } = layer;
+  const { n, offsets } = rec;
+  if (duration <= 0) return null;
+  let u = (tSec % duration) / duration;
+  if (u < 0) u += 1;
+  const f = u * (n - 1);
+  const i0 = Math.floor(f);
+  const i1 = Math.min(i0 + 1, n - 1);
+  const a = f - i0;
+  const o0 = i0 * 4;
+  const o1 = i1 * 4;
+  refMotionQuatA.set(offsets[o0], offsets[o0 + 1], offsets[o0 + 2], offsets[o0 + 3]);
+  refMotionQuatB.set(offsets[o1], offsets[o1 + 1], offsets[o1 + 2], offsets[o1 + 3]);
+  refMotionQuatOut.copy(refMotionQuatA).slerp(refMotionQuatB, a);
+  return refMotionQuatOut;
+}
+
+/**
+ * Load a talking VRMA, sample normalized bone quats over time, store offsets from frame 0.
+ * Does not play the file on the main mixer — only drives procedural blend.
+ */
+async function loadReferenceMotionFromTalkVrma() {
+  referenceMotionLayer = null;
+  if (!useProceduralBody || !REF_VRMA_SUBSTRING || !vrm?.humanoid) return;
+  const key = findTalkMotionKeyByStem(REF_VRMA_SUBSTRING);
+  if (!key) {
+    console.warn(`[VRM] No talking VRMA matched refVrma="${REF_VRMA_SUBSTRING}"`);
+    return;
+  }
+  const url = keyToMotionUrl(key);
+  if (!url) return;
+  let gltfAnim;
+  try {
+    gltfAnim = await loader.loadAsync(url);
+  } catch (e) {
+    console.warn("[VRM] Reference VRMA load failed:", e);
+    return;
+  }
+  const vrmAnimation = gltfAnim.userData.vrmAnimations?.[0];
+  if (!vrmAnimation) {
+    console.warn("[VRM] Reference glTF has no vrmAnimations[0]");
+    return;
+  }
+  let clip;
+  try {
+    clip = createVRMAnimationClip(vrmAnimation, vrm);
+  } catch (e) {
+    console.warn("[VRM] createVRMAnimationClip failed for reference:", e);
+    return;
+  }
+  const duration = Math.max(1e-6, clip.duration || 1);
+  const sampleRate = 24;
+  const n = Math.min(256, Math.max(16, Math.ceil(duration * sampleRate)));
+  const backup = backupSceneLocalQuaternions(vrm.scene);
+  const sampleMixer = new THREE.AnimationMixer(vrm.scene);
+  const sampleAction = sampleMixer.clipAction(clip);
+  sampleAction.reset();
+  sampleAction.enabled = true;
+  sampleAction.setEffectiveWeight(1);
+  sampleAction.setLoop(THREE.LoopOnce, 0);
+  sampleAction.clampWhenFinished = true;
+  sampleAction.play();
+  const q0Map = new Map();
+  const bones = new Map();
+  const tmpQ = new THREE.Quaternion();
+  const tmpInv = new THREE.Quaternion();
+
+  try {
+    sampleAction.time = 0;
+    sampleMixer.update(1e-6);
+    for (const bone of PROC_TALK_BONES) {
+      const node = vrm.humanoid.getNormalizedBoneNode(bone);
+      if (!node) continue;
+      q0Map.set(bone, node.quaternion.clone());
+    }
+
+    for (const bone of PROC_TALK_BONES) {
+      const q0 = q0Map.get(bone);
+      if (!q0) continue;
+      tmpInv.copy(q0).invert();
+      const offsets = new Float32Array(n * 4);
+      for (let i = 0; i < n; i++) {
+        const t = (i / Math.max(1, n - 1)) * duration;
+        sampleAction.time = t;
+        sampleMixer.update(1e-6);
+        const node = vrm.humanoid.getNormalizedBoneNode(bone);
+        if (!node) continue;
+        tmpQ.copy(node.quaternion).premultiply(tmpInv);
+        const o = i * 4;
+        offsets[o] = tmpQ.x;
+        offsets[o + 1] = tmpQ.y;
+        offsets[o + 2] = tmpQ.z;
+        offsets[o + 3] = tmpQ.w;
+      }
+      bones.set(bone, { n, offsets });
+    }
+  } finally {
+    restoreSceneLocalQuaternions(backup);
+    sampleMixer.stopAllAction();
+  }
+
+  const item = talkMotionItems().find((it) => motionOptionValue(it) === key);
+  const label = item?.label || item?.stem || REF_VRMA_SUBSTRING;
+  referenceMotionLayer = { label, duration, bones };
+  console.info(`[VRM] Reference motion sampled: "${label}" (${n} samples, ${duration.toFixed(2)}s)`);
+}
+
+/**
+ * Procedural talking movement driven by current emotion mix.
+ * Keeps face free for tag-based expressions while body still feels alive.
+ */
+function applyProceduralTalkingBody(elapsed, delta) {
+  if (!vrm?.humanoid || procTalkRestQuat.size === 0) return;
+  if (
+    useProceduralBody &&
+    mixer &&
+    motionActionCurrent &&
+    typeof motionActionCurrent.isRunning === "function" &&
+    motionActionCurrent.isRunning() &&
+    lastBodyMode === "talk"
+  ) {
+    return;
+  }
+  /* Idle expression VRMA (e.g. VRMA_01) runs on ``exprMixer`` and drives bones. Procedural sway runs after the mixers and was overwriting those quats every frame — bind pose + fake drift (“floating”) instead of the real clip. */
+  if (
+    useProceduralBody &&
+    !speaking &&
+    expressionActionCurrent &&
+    typeof expressionActionCurrent.isRunning === "function" &&
+    expressionActionCurrent.isRunning()
+  ) {
+    return;
+  }
+  /* ``fbx animations/`` sequence (or any idle body clip) on main ``mixer`` — do not add procedural on top. */
+  if (
+    useProceduralBody &&
+    !speaking &&
+    mixer &&
+    motionActionCurrent &&
+    typeof motionActionCurrent.isRunning === "function" &&
+    motionActionCurrent.isRunning() &&
+    lastBodyMode === "idle"
+  ) {
+    return;
+  }
+  const emotionPulse =
+    Math.min(
+      1,
+      (currentEmotionWeights.angry || 0) * 0.42 +
+        (currentEmotionWeights.joy || 0) * 0.32 +
+        (currentEmotionWeights.fun || 0) * 0.28 +
+        (currentEmotionWeights.sorrow || 0) * 0.2 +
+        (currentEmotionWeights.surprised || 0) * 0.26,
+    ) * 0.55;
+  const emotionalIdle = Math.max(PROC_BODY_IDLE_FLOOR, emotionPulse);
+  const target = speaking ? 1 : emotionalIdle;
+  talkingBodyBlend += (target - talkingBodyBlend) * Math.min(1, delta * 8);
+  if (talkingBodyBlend < 0.002 && target < 0.01) {
+    for (const [bone, rest] of procTalkRestQuat) {
+      const n = vrm.humanoid.getNormalizedBoneNode(bone);
+      if (n) n.quaternion.copy(rest);
+    }
+    return;
+  }
+
+  const refPhase = elapsed * REF_VRMA_SPEED;
+  const refW = REF_VRMA_WEIGHT * talkingBodyBlend;
+
+  const angry = currentEmotionWeights.angry || 0;
+  const joy = currentEmotionWeights.joy || 0;
+  const fun = currentEmotionWeights.fun || 0;
+  const sorrow = currentEmotionWeights.sorrow || 0;
+  const surprised = currentEmotionWeights.surprised || 0;
+  const pulse =
+    lipAudioMode
+      ? Math.min(1, Math.max(0.06, lipAmpSmooth * 1.15 + 0.06))
+      : 0.22 + 0.78 * (0.5 + 0.5 * Math.sin(elapsed * 8.2));
+  const energy = Math.min(1, 0.22 + pulse * 0.78 + joy * 0.32 + fun * 0.24 + angry * 0.18);
+  const breathe = 0.5 + 0.5 * Math.sin(elapsed * 1.15);
+
+  for (const [bone, rest] of procTalkRestQuat) {
+    const n = vrm.humanoid.getNormalizedBoneNode(bone);
+    if (!n) continue;
+    let ax = 0;
+    let ay = 0;
+    let az = 0;
+    if (bone === "hips") {
+      ax = Math.sin(elapsed * 1.2) * (0.004 + energy * 0.008 + sorrow * 0.004) + (breathe - 0.5) * 0.01;
+      ay = Math.sin(elapsed * 1.9) * (0.006 + fun * 0.007 + joy * 0.006);
+    } else if (bone === "spine" || bone === "chest" || bone === "upperChest") {
+      ax =
+        (-0.008 - joy * 0.006 + sorrow * 0.012) * (0.35 + 0.65 * pulse) +
+        (breathe - 0.5) * (0.02 + energy * 0.015);
+      ay = Math.sin(elapsed * 1.6) * (0.007 + fun * 0.007 + surprised * 0.006);
+      az = Math.sin(elapsed * 2.2) * (0.004 + joy * 0.004 - sorrow * 0.002);
+    } else if (bone === "neck") {
+      const sp = speaking ? 1.45 : 1;
+      ay =
+        Math.sin(elapsed * 2.4) * (0.012 + joy * 0.008 + surprised * 0.012) * sp +
+        Math.sin(elapsed * 0.72 + 0.2) * (0.008 * sp);
+      ax = Math.sin(elapsed * 2.1) * (0.005 + sorrow * 0.007) * sp;
+      az = Math.sin(elapsed * 1.18) * (0.014 * sp) + Math.sin(elapsed * 2.05) * 0.004 * sp;
+    } else if (bone === "head") {
+      const think = speaking ? 1.2 : 0.75;
+      ax = Math.sin(elapsed * 0.82) * (0.022 * think) + Math.sin(elapsed * 1.35) * 0.009;
+      ay = Math.sin(elapsed * 0.64 + 0.35) * (0.026 * think) + Math.sin(elapsed * 2.0) * (0.007 + (joy + fun) * 0.006);
+      az = Math.sin(elapsed * 0.91) * (0.014 * think) + Math.sin(elapsed * 1.5 + sorrow * 2) * 0.005;
+    } else if (
+      bone === "leftUpperArm" ||
+      bone === "rightUpperArm" ||
+      bone === "leftLowerArm" ||
+      bone === "rightLowerArm"
+    ) {
+      const sign = bone === "leftUpperArm" || bone === "leftLowerArm" ? 1 : -1;
+      const isLower = bone === "leftLowerArm" || bone === "rightLowerArm";
+      const armScale = (isLower ? 0.78 : 1) * 1.38;
+      ax =
+        ((0.006 + energy * 0.014 + angry * 0.016) * pulse + Math.sin(elapsed * (2.05 + sign * 0.09)) * 0.016) *
+        armScale;
+      ay = sign * Math.sin(elapsed * 1.38 + sign * 0.28) * (0.017 + fun * 0.014 + joy * 0.011) * armScale;
+      az =
+        (sign * (0.012 + fun * 0.014 + joy * 0.01) * (0.3 + 0.7 * breathe) +
+          Math.sin(elapsed * 1.65 + sign * 0.4) * 0.012) *
+        armScale;
+    } else if (bone === "leftHand" || bone === "rightHand") {
+      const sign = bone === "leftHand" ? 1 : -1;
+      const loose = 1.15 + energy * 0.35;
+      ax = Math.sin(elapsed * 2.25 + sign * 0.6) * 0.034 * loose;
+      ay = Math.sin(elapsed * 1.72 - sign * 0.35) * 0.028 * loose;
+      az = sign * Math.sin(elapsed * 1.88) * 0.024 * loose + (breathe - 0.5) * 0.014;
+    } else if (bone === "leftShoulder" || bone === "rightShoulder") {
+      const sign = bone === "leftShoulder" ? 1 : -1;
+      ax = Math.sin(elapsed * 1.55 + sign * 0.2) * (0.01 + sorrow * 0.006 + energy * 0.008);
+      ay = sign * Math.sin(elapsed * 1.9) * (0.008 + joy * 0.006 + surprised * 0.005);
+      az = sign * Math.sin(elapsed * 2.1 + sign * 0.4) * (0.007 + fun * 0.006);
+    } else if (bone === "leftUpperLeg" || bone === "rightUpperLeg") {
+      const sign = bone === "leftUpperLeg" ? 1 : -1;
+      ax = (0.01 + energy * 0.03) * pulse + Math.sin(elapsed * 2.2 + sign * 0.7) * 0.018;
+      ay = sign * Math.sin(elapsed * 1.6 + sign * 0.35) * (0.009 + fun * 0.008);
+    } else if (bone === "leftLowerLeg" || bone === "rightLowerLeg") {
+      const sign = bone === "leftLowerLeg" ? 1 : -1;
+      ax = Math.sin(elapsed * 2.05 + sign * 0.5) * (0.012 + energy * 0.02) + (breathe - 0.5) * 0.006;
+      ay = sign * Math.sin(elapsed * 1.45) * 0.006;
+    } else if (bone === "leftFoot" || bone === "rightFoot") {
+      const sign = bone === "leftFoot" ? 1 : -1;
+      ax = Math.sin(elapsed * 1.85 + sign * 0.3) * 0.008;
+      ay = sign * Math.sin(elapsed * 1.2) * 0.005;
+      az = Math.sin(elapsed * 2.3) * 0.004;
+    } else if (bone === "leftToes" || bone === "rightToes") {
+      const sign = bone === "leftToes" ? 1 : -1;
+      ax = Math.sin(elapsed * 2.4 + sign) * 0.006;
+      az = sign * Math.sin(elapsed * 1.7) * 0.005;
+    }
+    const blend = talkingBodyBlend * (0.72 + energy * 0.32);
+    procTalkEuler.set(ax * blend, ay * blend, az * blend);
+    procTalkQuat.setFromEuler(procTalkEuler);
+    const refOff =
+      referenceMotionLayer && refW > 0.001 ? referenceBoneOffsetAt(bone, refPhase) : null;
+    if (refOff) {
+      refMotionFullPose.copy(rest).multiply(refOff).multiply(procTalkQuat);
+      refMotionProcOnly.copy(rest).multiply(procTalkQuat);
+      n.quaternion.copy(refMotionProcOnly).slerp(refMotionFullPose, refW);
+    } else {
+      n.quaternion.copy(rest).multiply(procTalkQuat);
+    }
+  }
+}
 
 function refreshMouthOpenExprName() {
   mouthOpenExprName = "aa";
@@ -405,6 +875,9 @@ function updateLipSyncFromAudio(delta) {
   } else if (mouthOpenExprName !== "aa" && em.getExpression("aa")) {
     em.setValue("aa", 0);
   }
+  const dur = Math.max(0.2, lipSync.durationSec || 1);
+  const u = Math.min(1, Math.max(0, (performance.now() - lipSync.t0) / 1000 / dur));
+  updateSpeechEmotionByProgress(u);
   if (em.getExpression("ee")) em.setValue("ee", lipAmpSmooth * 0.4);
   if (em.getExpression("ih")) em.setValue("ih", lipAmpSmooth * 0.28);
   if (em.getExpression("oh") && mouthOpenExprName !== "oh") em.setValue("oh", lipAmpSmooth * 0.18);
@@ -442,6 +915,7 @@ function updateLipSync(delta) {
 
   const elapsed = (performance.now() - lipSync.t0) / 1000;
   const u = Math.min(1, elapsed / Math.max(0.15, lipSync.durationSec));
+  updateSpeechEmotionByProgress(u);
   const idx = Math.min(text.length - 1, Math.max(0, Math.floor(u * text.length)));
   const ch = text[idx];
   const target = charToLipWeights(ch);
@@ -500,7 +974,15 @@ loader.register((parser) => new VRMLoaderPlugin(parser));
 loader.register((parser) => new VRMAnimationLoaderPlugin(parser));
 const fbxLoader = new FBXLoader();
 
+function detachIdleSequenceAdvance() {
+  if (mixer && idleSeqMixerHandler) {
+    mixer.removeEventListener("finished", idleSeqMixerHandler);
+    idleSeqMixerHandler = null;
+  }
+}
+
 function stopMotionMixerHard() {
+  detachIdleSequenceAdvance();
   if (mixer) {
     mixer.stopAllAction();
     mixer = null;
@@ -512,12 +994,16 @@ function stopMotionMixerHard() {
  * Body motion: reuse one mixer, crossfade from the previous clip instead of stop-all → T-pose.
  * @param {number} [fadeSec=CROSS_FADE_SEQUENCE_SEC] - blend duration when switching clips.
  */
-function playBodyClipWithCrossfade(clip, fadeSec = CROSS_FADE_SEQUENCE_SEC) {
+/**
+ * @param {{ loopOnce?: boolean }} [opts]
+ */
+function playBodyClipWithCrossfade(clip, fadeSec = CROSS_FADE_SEQUENCE_SEC, opts = {}) {
   if (!vrm) return;
   if (!mixer) mixer = new THREE.AnimationMixer(vrm.scene);
   const newAction = mixer.clipAction(clip);
-  newAction.setLoop(THREE.LoopRepeat);
-  newAction.clampWhenFinished = false;
+  const once = !!opts.loopOnce;
+  newAction.setLoop(once ? THREE.LoopOnce : THREE.LoopRepeat, once ? 1 : Infinity);
+  newAction.clampWhenFinished = once;
 
   const prev = motionActionCurrent;
   const canXfade =
@@ -527,8 +1013,18 @@ function playBodyClipWithCrossfade(clip, fadeSec = CROSS_FADE_SEQUENCE_SEC) {
     prev.isRunning();
 
   if (canXfade) {
+    // crossFadeTo schedules fades but does not activate an inactive target action.
+    newAction.reset().play();
     prev.crossFadeTo(newAction, fadeSec, false);
   } else {
+    // A finished LoopOnce action may stay enabled/clamped; stop stale pose influence first.
+    if (prev && prev !== newAction) {
+      try {
+        prev.stop();
+      } catch {
+        /* */
+      }
+    }
     // First body clip: fade from 0 so the model does not sit at bind pose (T/A-pose) for ~0.4s.
     const fadeInSec = motionActionCurrent ? fadeSec : 0;
     newAction.reset().fadeIn(fadeInSec).play();
@@ -598,16 +1094,21 @@ function clearSilentTurn() {
  * During TTS, expression is paused and one talking body clip loops until speech ends.
  */
 function scheduleSilentTurn() {
-  if (silentTurnTimer != null) {
-    clearTimeout(silentTurnTimer);
-    silentTurnTimer = null;
-  }
-  const hasIdle = idleMotionItems().length > 0;
+  if (silentTurnTimer != null) clearTimeout(silentTurnTimer);
+  silentTurnTimer = null;
+  if (useProceduralBody) return;
+  const hasSeq = idleSequenceItems().length > 0;
+  const hasIdleBase = Array.isArray(animationList.motion_idle) && animationList.motion_idle.length > 0;
+  const hasIdle = hasSeq || hasIdleBase;
   const hasExpr = expressionMotionItems().length > 0;
   if (!hasIdle && !hasExpr) return;
+  /* Body idle sequence advances on clip end; no periodic timer unless we also rotate expression VRMA. */
+  if (hasSeq && !hasExpr) return;
   const gen = silentTurnGen;
   let delaySec;
-  if (hasIdle && hasExpr) {
+  if (hasSeq && hasExpr) {
+    delaySec = randBetween(EXPR_ROTATE_MIN_SEC, EXPR_ROTATE_MAX_SEC);
+  } else if (hasIdle && hasExpr) {
     delaySec = randBetween(
       nextSilentTurnIsExpression ? EXPR_ROTATE_MIN_SEC : IDLE_ROTATE_MIN_SEC,
       nextSilentTurnIsExpression ? EXPR_ROTATE_MAX_SEC : IDLE_ROTATE_MAX_SEC,
@@ -622,12 +1123,14 @@ function scheduleSilentTurn() {
     silentTurnTimer = null;
     if (gen !== silentTurnGen || !vrm || speaking) return;
     try {
-      if (hasIdle && hasExpr) {
+      if (hasSeq && hasExpr) {
+        await playRandomExpressionFromPool();
+      } else if (hasIdle && hasExpr) {
         if (nextSilentTurnIsExpression) {
           await playRandomExpressionFromPool();
           nextSilentTurnIsExpression = false;
         } else {
-          await playRandomIdleFromPool();
+          if (!hasSeq) await playRandomIdleFromPool();
           nextSilentTurnIsExpression = true;
         }
       } else if (hasIdle) {
@@ -643,6 +1146,11 @@ function scheduleSilentTurn() {
 }
 
 async function playRandomIdleFromPool() {
+  const seq = idleSequenceItems();
+  if (seq.length > 0) {
+    await playIdleSequenceAt(idleSeqIdx);
+    return;
+  }
   const items = idleMotionItems();
   const keys = items.map((item) => motionOptionValue(item));
   if (!keys.length) return;
@@ -695,6 +1203,7 @@ async function playRandomTalkFromPool() {
 }
 
 async function playRandomExpressionFromPool() {
+  if (useProceduralBody) return;
   const items = expressionMotionItems();
   const keys = items.map((item) => motionOptionValue(item)).filter(Boolean);
   if (!keys.length) return;
@@ -721,6 +1230,31 @@ async function playRandomExpressionFromPool() {
 async function resumeIdleSequence() {
   if (!vrm || speaking) return;
   clearSilentTurn();
+  if (useProceduralBody) {
+    stopMotionMixerHard();
+    nextSilentTurnIsExpression = false;
+    const seq = idleSequenceItems();
+    if (seq.length > 0) {
+      try {
+        await playIdleSequenceAt(idleSeqIdx);
+      } catch (e) {
+        console.warn(e);
+      }
+    }
+    animStatus.textContent =
+      seq.length > 0
+        ? "Procedural body + idle sequence (fbx animations/) — expression VRMA not layered (would override bones)"
+        : "Procedural body + expression VRMA (e.g. VRMA_01)";
+    const ek = expressionSelect?.value;
+    if (ek && seq.length === 0) {
+      try {
+        await playExpressionMotionClip(ek);
+      } catch (e) {
+        console.warn(e);
+      }
+    }
+    return;
+  }
   try {
     await playRandomIdleFromPool();
   } catch (e) {
@@ -737,15 +1271,30 @@ async function resumeIdleSequence() {
 async function startSilentAnimationLoop() {
   if (!vrm || speaking) return;
   clearSilentTurn();
+  const hasSeq = idleSequenceItems().length > 0;
   const hasIdle = idleMotionItems().length > 0;
   const hasExpr = expressionMotionItems().length > 0;
+  if (useProceduralBody) {
+    animStatus.textContent = "Emotion-driven body + face (procedural)";
+    return;
+  }
   if (!hasIdle && !hasExpr) return;
   try {
     if (hasIdle && hasExpr) {
-      await playRandomIdleFromPool();
+      if (hasSeq) {
+        idleSeqIdx = 0;
+        await playIdleSequenceAt(0);
+      } else {
+        await playRandomIdleFromPool();
+      }
       nextSilentTurnIsExpression = true;
     } else if (hasIdle) {
-      await playRandomIdleFromPool();
+      if (hasSeq) {
+        idleSeqIdx = 0;
+        await playIdleSequenceAt(0);
+      } else {
+        await playRandomIdleFromPool();
+      }
       nextSilentTurnIsExpression = false;
     } else {
       await playRandomExpressionFromPool();
@@ -757,18 +1306,18 @@ async function startSilentAnimationLoop() {
   scheduleSilentTurn();
 }
 
-/** Start talking body clip once; it loops until TTS ends. Expression VRMA is paused for the whole utterance. */
+/** Start speech mode: pause expression VRMA; play **Standing Arguing** (talk VRMA) when using procedural body. */
 async function startTalkSequence() {
   clearSilentTurn();
   pauseExpressionForSpeech();
-  try {
-    await playRandomTalkFromPool();
-  } catch (e) {
-    console.warn(e);
-    speaking = false;
-    clearLipMouth();
-    await resumeIdleSequence();
-    return false;
+  stopMotionMixerHard();
+  const key = talkSelect?.value;
+  if (key && useProceduralBody) {
+    try {
+      await playMotionClip(key, "talk");
+    } catch (e) {
+      console.warn(e);
+    }
   }
   return true;
 }
@@ -790,12 +1339,14 @@ function primeExprMixer(dt = 1 / 30) {
 }
 
 /**
- * Keys: ``idle:vrma:0``, ``talk:fbx:1``, ``expr:vrma:2`` (expression face only).
- * @returns {{ pool: "idle"|"talk"|"expr", kind: "vrma"|"fbx", index: number } | null}
+ * Keys: ``idle:vrma:0``, ``idle:seq:0`` (``fbx animations/`` order), ``talk:fbx:1``, ``expr:vrma:2`` (expression face only).
+ * @returns {{ pool: "idle"|"talk"|"expr", kind: "vrma"|"fbx"|"seq", index: number } | null}
  */
 function parseMotionKey(key) {
   const k = String(key);
-  const m = k.match(/^(idle|talk|expr):(vrma|fbx):(\d+)$/);
+  let m = k.match(/^idle:seq:(\d+)$/);
+  if (m) return { pool: "idle", kind: "seq", index: parseInt(m[1], 10) };
+  m = k.match(/^(idle|talk|expr):(vrma|fbx):(\d+)$/);
   if (!m) return null;
   return { pool: m[1], kind: m[2], index: parseInt(m[3], 10) };
 }
@@ -805,6 +1356,9 @@ function keyToMotionUrl(key) {
   if (!p) return null;
   if (p.pool === "expr" && p.kind === "vrma") {
     return new URL(`animation/expression/${p.index}`, BASE).href;
+  }
+  if (p.pool === "idle" && p.kind === "seq") {
+    return new URL(`animation/idle/sequence/${p.index}`, BASE).href;
   }
   const folder = p.pool === "talk" ? "talking" : "idle";
   return new URL(`animation/${folder}/${p.kind}/${p.index}`, BASE).href;
@@ -995,10 +1549,13 @@ function disposeFbxHierarchy(root) {
  */
 /**
  * @param {"idle"|"talk"} pool - URL folder: ``idle`` → ``animation/idle/fbx/``, ``talk`` → ``animation/talking/fbx/``
+ * @param {string} [urlOverride] - e.g. ``animation/idle/sequence/<i>`` for ordered ``fbx animations/`` clips.
+ * @param {{ loopOnce?: boolean }} [clipOpts] - passed to ``playBodyClipWithCrossfade``.
  */
-async function playFbxMotionClip(fbxIndex, mode, fadeSec, pool) {
+async function playFbxMotionClip(fbxIndex, mode, fadeSec, pool, urlOverride = null, clipOpts = {}) {
   const folder = pool === "talk" ? "talking" : "idle";
-  const url = new URL(`animation/${folder}/fbx/${fbxIndex}`, BASE).href;
+  const url =
+    urlOverride || new URL(`animation/${folder}/fbx/${fbxIndex}`, BASE).href;
   animStatus.textContent = mode === "talk" ? "FBX (talk)…" : "FBX (idle)…";
 
   const fbx = await fbxLoader.loadAsync(url);
@@ -1053,7 +1610,7 @@ async function playFbxMotionClip(fbxIndex, mode, fadeSec, pool) {
   }
 
   patchRetargetedTracksForSceneRoot(retargeted);
-  playBodyClipWithCrossfade(retargeted, fadeSec);
+  playBodyClipWithCrossfade(retargeted, fadeSec, clipOpts);
   disposeFbxHierarchy(fbx);
   lastBodyMode = mode;
 
@@ -1064,15 +1621,85 @@ async function playFbxMotionClip(fbxIndex, mode, fadeSec, pool) {
   animStatus.textContent = speaking ? `Speaking — ${label || "FBX"}` : `Idle — ${label || "FBX"}`;
 }
 
+function attachIdleSequenceAdvance(action) {
+  detachIdleSequenceAdvance();
+  if (!mixer || !action) return;
+  idleSeqMixerHandler = (e) => {
+    if (e.action !== action || speaking) return;
+    detachIdleSequenceAdvance();
+    const seq = idleSequenceItems();
+    if (!seq.length || !vrm) return;
+    idleSeqIdx = (idleSeqIdx + 1) % seq.length;
+    void playIdleSequenceAt(idleSeqIdx);
+  };
+  mixer.addEventListener("finished", idleSeqMixerHandler);
+}
+
+/**
+ * Play one entry from ``Luna animations/fbx animations`` (API: ``motion_idle_sequence``), then chain on finish when ``loopOnce``.
+ */
+async function playIdleSequenceAt(index) {
+  const seq = idleSequenceItems();
+  if (!seq.length || !vrm) return;
+  const i = ((index % seq.length) + seq.length) % seq.length;
+  idleSeqIdx = i;
+  const key = `idle:seq:${i}`;
+  if (idleSelect && Array.from(idleSelect.options).some((o) => o.value === key)) {
+    idleSelect.value = key;
+  }
+  lastPlayedIdleKey = key;
+  errEl.hidden = true;
+  try {
+    await playMotionClip(key, "idle", { loopSequenceOnce: true });
+  } catch (e) {
+    console.warn(e);
+  }
+}
+
 /**
  * Body / locomotion VRMA or FBX (idle or talking pool only).
  * @param {"idle"|"talk"} mode - for status text only
+ * @param {{ loopSequenceOnce?: boolean }} [opts] - idle ``idle:seq:`` clips loop once then advance.
  */
-async function playMotionClip(key, mode) {
+async function playMotionClip(key, mode, opts = {}) {
+  const loopSequenceOnce = !!opts.loopSequenceOnce;
+  if (useProceduralBody && mode !== "talk") {
+    const pk = parseMotionKey(key);
+    if (!pk || pk.kind !== "seq") return;
+  }
   if (!vrm || !key) return;
   const p = parseMotionKey(key);
   if (!p || p.pool === "expr") throw new Error("Bad body motion key");
   const fadeSec = fadeSecForBodyMode(mode);
+
+  if (p.kind === "seq") {
+    const url = keyToMotionUrl(key);
+    if (!url) throw new Error("No URL for sequence clip");
+    const item = idleSequenceItems()[p.index];
+    if (item?.kind === "fbx") {
+      await playFbxMotionClip(p.index, mode, fadeSec, "idle", url, { loopOnce: loopSequenceOnce });
+    } else {
+      animStatus.textContent = "Idle sequence…";
+      const gltfAnim = await loader.loadAsync(url);
+      const vrmAnimation = gltfAnim.userData.vrmAnimations?.[0];
+      if (!vrmAnimation) throw new Error("No vrmAnimations[0] in sequence VRMA");
+      const clip = createVRMAnimationClip(vrmAnimation, vrm);
+      const boneTracks = clip.tracks.filter(
+        (t) => /\.(quaternion|position)$/.test(t.name) && !String(t.name).includes("VRMLookAtQuaternionProxy"),
+      );
+      if (boneTracks.length > 0 && boneTracks.length < 14) {
+        console.warn(
+          `[VRM] VRMA produced only ${boneTracks.length} bone tracks — clip may not match this model (T-pose / wrong rig).`,
+        );
+      }
+      playBodyClipWithCrossfade(clip, fadeSec, { loopOnce: loopSequenceOnce });
+      lastBodyMode = mode;
+    }
+    if (loopSequenceOnce && motionActionCurrent) attachIdleSequenceAdvance(motionActionCurrent);
+    animStatus.textContent = item?.label ? `Idle seq — ${item.label}` : "Idle sequence";
+    return;
+  }
+
   if (p.kind === "fbx") {
     return playFbxMotionClip(p.index, mode, fadeSec, p.pool === "talk" ? "talk" : "idle");
   }
@@ -1107,8 +1734,9 @@ async function playMotionClip(key, mode) {
     : `Idle — ${label || "clip"}`;
 }
 
-/** Face / expression VRMA from ``expressions/`` (second mixer). */
+/** Face / expression VRMA from ``expressions/`` (second mixer). Allowed with procedural body when not speaking (e.g. VRMA_01 idle). */
 async function playExpressionMotionClip(key) {
+  if (speaking) return;
   if (!vrm || !key) return;
   const p = parseMotionKey(key);
   if (!p || p.pool !== "expr" || p.kind !== "vrma") {
@@ -1128,6 +1756,7 @@ async function playExpressionMotionClip(key) {
 
 /** User picked an idle clip from the dropdown — play it and keep auto-cycling. */
 async function applyIdleClipManual() {
+  if (useProceduralBody) return;
   if (!vrm || speaking) return;
   const key = idleSelect.value;
   if (!key) return;
@@ -1147,6 +1776,7 @@ async function applyIdleClipManual() {
 }
 
 async function applyExpressionClipManual() {
+  if (useProceduralBody) return;
   if (!vrm || speaking) return;
   const key = expressionSelect.value;
   if (!key) return;
@@ -1175,11 +1805,18 @@ function allMotionItems() {
   return animationList.motion?.length ? animationList.motion : animationList.local || [];
 }
 
-function idleMotionItems() {
-  if (Array.isArray(animationList.motion_idle) && animationList.motion_idle.length) {
-    return animationList.motion_idle;
+function idleSequenceItems() {
+  if (Array.isArray(animationList.motion_idle_sequence) && animationList.motion_idle_sequence.length) {
+    return animationList.motion_idle_sequence;
   }
   return [];
+}
+
+function idleMotionItems() {
+  const seq = idleSequenceItems();
+  const base = Array.isArray(animationList.motion_idle) && animationList.motion_idle.length ? animationList.motion_idle : [];
+  if (seq.length) return [...seq, ...base];
+  return base;
 }
 
 function talkMotionItems() {
@@ -1207,6 +1844,7 @@ function inferMotionKind(item) {
 
 function motionOptionValue(item) {
   if (!item) return "";
+  if (item.pool === "idle_sequence") return `idle:seq:${item.index}`;
   const kind = inferMotionKind(item);
   const pool = item.pool || "idle";
   const prefix = pool === "talk" ? "talk" : pool === "expression" ? "expr" : "idle";
@@ -1225,13 +1863,47 @@ function fillClipSelect(selectEl, items) {
   }
 }
 
+/** Match podcast studio defaults: ``expressions/VRMA_01.vrma``, ``talking/Standing Arguing.vrma``. */
+function findPreferredExpressionVrma01(items) {
+  const list = items || [];
+  return (
+    list.find((x) => {
+      if (!x || x.kind !== "vrma") return false;
+      const stem = x.stem || "";
+      const name = x.name || "";
+      const label = x.label || "";
+      const n = normalizeMotionMatchKey(stem || name);
+      if (n === "vrma01" || n === "vrma1" || n === "vrma001") return true;
+      return (
+        /vrma_01|vrma01/i.test(stem) ||
+        /vrma_01/i.test(name) ||
+        /vrma\s*01/i.test(label) ||
+        /^vrma\s*1$/i.test(label.trim())
+      );
+    }) || null
+  );
+}
+
+function findPreferredStandingArguing(items) {
+  const list = items || [];
+  return (
+    list.find(
+      (x) =>
+        x.kind === "vrma" &&
+        /standing\s*arguing/i.test(`${x.stem || ""} ${x.label || ""} ${x.name || ""}`),
+    ) || null
+  );
+}
+
 function defaultMotionKeys() {
   const idle = idleMotionItems();
   const talk = talkMotionItems();
   const expr = expressionMotionItems();
-  const idleKey = idle.map((item) => motionOptionValue(item))[0] || "";
-  const talkKey = talk.map((item) => motionOptionValue(item))[0] || "";
-  const exprKey = expr.map((item) => motionOptionValue(item))[0] || "";
+  const exprPick = findPreferredExpressionVrma01(expr) || expr[0];
+  const talkPick = findPreferredStandingArguing(talk) || talk[0];
+  const idleKey = idle.length ? motionOptionValue(idle[0]) : "";
+  const talkKey = talkPick ? motionOptionValue(talkPick) : "";
+  const exprKey = exprPick ? motionOptionValue(exprPick) : "";
   return { idleKey, talkKey, exprKey };
 }
 
@@ -1309,6 +1981,397 @@ function stripLunaEmotionTagsForSpeech(text) {
     .trim();
 }
 
+function isGemma4FamilyChatModel(id) {
+  const m = String(id || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "");
+  if (!m) return false;
+  if (m.startsWith("gemma4")) return true;
+  return m.includes("gemma-4") || m.includes("gemma4");
+}
+
+function stripEmojisForTts(text) {
+  if (!text) return text;
+  let s = String(text);
+  try {
+    s = s.replace(/\p{Extended_Pictographic}/gu, "");
+  } catch {
+    /* older engines */
+  }
+  s = s.replace(/[\uFE0F\u200D]/g, "");
+  try {
+    s = s.replace(/[\u{1F3FB}-\u{1F3FF}]/gu, "");
+  } catch {
+    /* */
+  }
+  s = s.replace(/\s+/g, " ").trim();
+  return s;
+}
+
+function maybeStripEmojisForGemmaTts(text) {
+  if (!isGemma4FamilyChatModel(lunaChatModelId)) return text;
+  return stripEmojisForTts(text);
+}
+
+function normalizeTagToFaceWeights(tag) {
+  if (!tag) return { neutral: 1 };
+  const t = String(tag).toUpperCase();
+  if (LUNA_ACTION_FACE_TAGS.has(t)) return { neutral: 1 };
+  return LUNA_TAG_FACE_WEIGHTS[t] || { neutral: 1 };
+}
+
+/**
+ * Build timeline from inline tags: "hi [SAD] ... [HAPPY] ...".
+ * ``at01`` is normalized progress 0..1 over the spoken plain text.
+ */
+function buildSpeechEmotionTimeline(rawText, spokenText) {
+  const raw = String(rawText || "");
+  const spokenLen = Math.max(1, String(spokenText || "").length);
+  const re = /\[([A-Z][A-Z0-9_]*)\]\s*/gi;
+  const events = [{ at01: 0, tag: "NEUTRAL" }];
+  let last = 0;
+  let charPos = 0;
+  let m;
+  while ((m = re.exec(raw))) {
+    const before = raw.slice(last, m.index);
+    charPos += before.length;
+    const tag = String(m[1] || "").toUpperCase();
+    const at01 = Math.min(1, Math.max(0, charPos / spokenLen));
+    const prev = events[events.length - 1];
+    if (!prev || prev.tag !== tag || Math.abs(prev.at01 - at01) > 0.001) {
+      events.push({ at01, tag });
+    }
+    last = re.lastIndex;
+  }
+  if (!events.length) events.push({ at01: 0, tag: "NEUTRAL" });
+  return events.sort((a, b) => a.at01 - b.at01);
+}
+
+function rawTextHasEmotionTags(raw) {
+  return /\[[A-Z][A-Z0-9_]*\]/i.test(String(raw || ""));
+}
+
+/**
+ * Plain TTS (no [TAG]s) otherwise keeps only NEUTRAL — face stays flat.
+ * Use emotion-test selection if set; else a gentle [THINKING]-style baseline (conversational).
+ */
+function defaultSpeechEmotionEventsIfUntagged(rawText) {
+  let tag = "THINKING";
+  if (emotionTestSelect) {
+    const sel = String(emotionTestSelect.value || "NEUTRAL").toUpperCase();
+    if (sel && sel !== "NEUTRAL" && sel !== "RESET" && LUNA_TAG_FACE_WEIGHTS[sel]) {
+      tag = sel;
+    }
+  }
+  return [{ at01: 0, tag }];
+}
+
+function startSpeechEmotionTimeline(rawText, spokenText) {
+  let events = buildSpeechEmotionTimeline(rawText, spokenText);
+  if (!rawTextHasEmotionTags(rawText)) {
+    speechEmotionTimeline.events = defaultSpeechEmotionEventsIfUntagged(rawText);
+  } else {
+    speechEmotionTimeline.events = events;
+  }
+  speechEmotionTimeline.idx = -1;
+  updateSpeechEmotionByProgress(0);
+}
+
+function updateSpeechEmotionByProgress(progress01) {
+  const events = speechEmotionTimeline.events;
+  if (!events.length) return;
+  const u = Math.min(1, Math.max(0, progress01));
+  let idx = 0;
+  for (let i = 0; i < events.length; i++) {
+    if (events[i].at01 <= u) idx = i;
+    else break;
+  }
+  if (idx === speechEmotionTimeline.idx) return;
+  speechEmotionTimeline.idx = idx;
+  applyEmotionBlendWeights(normalizeTagToFaceWeights(events[idx].tag));
+}
+
+/** Luna chat / bot_main.py emotion tags that are body one-shots — face stays neutral-ish. */
+const LUNA_ACTION_FACE_TAGS = new Set([
+  "WAVE",
+  "NOD",
+  "SHAKE_HEAD",
+  "CLAP",
+  "POINT",
+  "SHRUG",
+  "BOW",
+  "YAWN",
+  "SIGH",
+  "STRETCH",
+  "FACEPALM",
+  "KISS",
+  "VICTORY",
+  "DANCE",
+]);
+
+/**
+ * Logical preset → aliases to match this model’s expressionManager keys (VRM 0.x presets).
+ * Resolved once per load in refreshEmotionPresetKeys().
+ */
+const EMOTION_PRESET_ALIASES = {
+  neutral: ["neutral", "Neutral"],
+  angry: ["angry", "Angry"],
+  fun: ["fun", "Fun"],
+  joy: ["joy", "Joy", "happy", "Happy"],
+  sorrow: ["sorrow", "Sorrow", "sad", "Sad"],
+  surprised: ["surprised", "Surprised"],
+};
+
+/** @type {Record<string, string>} */
+let resolvedEmotionKeys = {};
+/** Full-eye blink morph (resolved once per model). */
+let resolvedBlinkMorphKey = "";
+let faceBlinkPhase = 0;
+let faceNextBlinkAt = 0;
+
+/** Skip blendshapes that are almost always visemes / blink, not mood presets. */
+function expressionNameIsVisemeOrJaw(name) {
+  const s = String(name || "");
+  const low = s.toLowerCase();
+  for (const v of LIP_NAMES) {
+    if (low === v.toLowerCase()) return true;
+  }
+  if (/^(aa|ih|ee|ou|oh|blink|blinkl|blinkr|blinkleft|blinkright)$/i.test(s)) return true;
+  if (/vowel|viseme|lipsync|lip_sync|jaw|mouthopen|mouth_open|mouth_a|mouth_i|tongue/i.test(low)) {
+    if (!/(mood|emotion|face|facial|expression)/i.test(low)) return true;
+  }
+  return false;
+}
+
+/**
+ * VRoid / custom VRMs often use non-standard names (e.g. ``VRCE_happy``). After exact aliases,
+ * scan ``expressionMap`` so [HAPPY] and the emotion test list actually drive blendshapes.
+ */
+function refreshEmotionPresetKeys() {
+  resolvedEmotionKeys = {};
+  const em = vrm?.expressionManager;
+  if (!em) return;
+  const used = new Set();
+  const allNames = Object.keys(em.expressionMap || {}).filter((n) => n && em.getExpression(n));
+
+  for (const [logical, aliases] of Object.entries(EMOTION_PRESET_ALIASES)) {
+    for (const a of aliases) {
+      if (em.getExpression(a)) {
+        resolvedEmotionKeys[logical] = a;
+        used.add(a);
+        break;
+      }
+    }
+  }
+
+  const claim = (logical, test) => {
+    if (resolvedEmotionKeys[logical]) return;
+    for (const name of allNames) {
+      if (used.has(name) || expressionNameIsVisemeOrJaw(name)) continue;
+      if (test(name)) {
+        resolvedEmotionKeys[logical] = name;
+        used.add(name);
+        return;
+      }
+    }
+  };
+
+  claim("angry", (n) => /(angry|mad|fury|rage|annoy|irritat|怒|イライラ)/i.test(n));
+  claim("sorrow", (n) =>
+    /(sad|sorrow|cry|tear|depress|melanch|gloom|mourn|悲|泣)/i.test(n),
+  );
+  claim("surprised", (n) => /(surprised|shock|amaz|stun|awe|startl)/i.test(n));
+  claim("fun", (n) => /(fun|playful|smirk|mischief|teas|wink|いたずら)/i.test(n));
+  claim("joy", (n) =>
+    /(happy|smile|joy|cheer|grin|laugh|delight|嬉|笑)/i.test(n) &&
+    !/(angry|sad|cry|depress|surprised|shock)/i.test(n),
+  );
+  claim("neutral", (n) => /(neutral|relaxed|calm|natural|ordinary|default|通常|リラックス)/i.test(n));
+}
+
+/** Pick a single full blink morph (not L/R split) for procedural eye dynamics. */
+function refreshFaceDynamicsKeys() {
+  resolvedBlinkMorphKey = "";
+  faceBlinkPhase = 0;
+  faceNextBlinkAt = 0;
+  const em = vrm?.expressionManager;
+  if (!em) return;
+  const keys = Object.keys(em.expressionMap || {});
+  const prefer = (pred) => keys.find((k) => pred(k));
+  resolvedBlinkMorphKey =
+    prefer((k) => /^blink$/i.test(k)) ||
+    prefer((k) => /^vrc\.blink$/i.test(k) || /^vrc_blink$/i.test(k)) ||
+    prefer((k) => /(^|_)blink$/i.test(k) && !/left|right|_l|_r|l_|r_/i.test(k)) ||
+    prefer((k) => /blink/i.test(k) && !/left|right|l_|r_|_l|_r|half|inner/i.test(k)) ||
+    "";
+}
+
+/**
+ * Luna bracket-tag → weights on logical presets (0–1). Matches bot_main emotional vocabulary.
+ * Omitted keys default to 0; neutral is raised to 1 when no other emotion is active.
+ */
+const LUNA_TAG_FACE_WEIGHTS = {
+  NEUTRAL: { neutral: 1 },
+  RESET: { neutral: 1 },
+  HAPPY: { joy: 0.88, fun: 0.42 },
+  EXCITED: { joy: 0.95, fun: 0.72 },
+  LAUGH: { joy: 0.78, fun: 0.95 },
+  SAD: { sorrow: 0.82 },
+  DEPRESSED: { sorrow: 1 },
+  MAD: { angry: 0.75 },
+  ANGRY: { angry: 0.92 },
+  FURIOUS: { angry: 1 },
+  ANNOYED: { angry: 0.55, sorrow: 0.12 },
+  FRUSTRATED: { angry: 0.62, sorrow: 0.22 },
+  DISAPPOINTED: { sorrow: 0.68 },
+  SHOCKED: { surprised: 0.95, sorrow: 0.12 },
+  SURPRISED: { surprised: 0.88 },
+  CONFUSED: { surprised: 0.35, sorrow: 0.28 },
+  BORED: { sorrow: 0.35, neutral: 0.35 },
+  TIRED: { sorrow: 0.45 },
+  SLEEPY: { sorrow: 0.38, fun: 0.08 },
+  SICK: { sorrow: 0.55 },
+  RELIEVED: { joy: 0.55, fun: 0.22 },
+  EMBARRASSED: { sorrow: 0.42, surprised: 0.35 },
+  CARING: { joy: 0.62, fun: 0.18 },
+  PROUD: { joy: 0.72, fun: 0.38 },
+  IMPRESSED: { surprised: 0.55, joy: 0.45 },
+  SMUG: { fun: 0.65, joy: 0.32 },
+  CONFIDENT: { joy: 0.55, fun: 0.35 },
+  TEASING: { fun: 0.75, joy: 0.48 },
+  SHY: { sorrow: 0.22, surprised: 0.25 },
+  CURIOUS: { surprised: 0.62 },
+  QUESTION: { surprised: 0.55 },
+  THINKING: { neutral: 0.55, surprised: 0.18 },
+  DOUBTFUL: { surprised: 0.28, sorrow: 0.25 },
+  WAITING: { sorrow: 0.22 },
+  WORRIED: { sorrow: 0.68 },
+  SCARED: { sorrow: 0.55, surprised: 0.45 },
+  CONCERNED: { sorrow: 0.58 },
+  FIGHTING: { angry: 0.88 },
+  HEARTBOX: { joy: 0.75, fun: 0.35 },
+  HEARTEYES: { joy: 0.85, fun: 0.55 },
+  AGREE: { joy: 0.45, fun: 0.22 },
+  DISAGREE: { angry: 0.48, sorrow: 0.18 },
+};
+
+function populateEmotionTestSelect() {
+  if (!emotionTestSelect) return;
+  emotionTestSelect.innerHTML = "";
+  const tags = Object.keys(LUNA_TAG_FACE_WEIGHTS)
+    .filter((t) => !LUNA_ACTION_FACE_TAGS.has(t))
+    .sort((a, b) => {
+      if (a === "NEUTRAL") return -1;
+      if (b === "NEUTRAL") return 1;
+      return a.localeCompare(b);
+    });
+  for (const tag of tags) {
+    const opt = document.createElement("option");
+    opt.value = tag;
+    opt.textContent = `[${tag}]`;
+    emotionTestSelect.appendChild(opt);
+  }
+  if (tags.includes("NEUTRAL")) emotionTestSelect.value = "NEUTRAL";
+}
+
+function applyManualEmotionSelection() {
+  if (!emotionTestSelect) return;
+  const tag = String(emotionTestSelect.value || "").toUpperCase();
+  if (!tag) return;
+  if (tag === "NEUTRAL" || tag === "RESET") {
+    applyEmotionBlendWeights({ neutral: 1 });
+    animStatus.textContent = "Emotion test — [NEUTRAL]";
+    return;
+  }
+  applyLunaEmotionFromRawText(`[${tag}]`);
+  animStatus.textContent = `Emotion test — [${tag}]`;
+}
+
+function extractFirstLunaEmotionTag(text) {
+  const m = String(text || "")
+    .trim()
+    .match(/^\[([A-Z][A-Z0-9_]*)\]/i);
+  return m ? m[1].toUpperCase() : null;
+}
+
+function applyEmotionBlendWeights(weights) {
+  const w = { neutral: 0, angry: 0, fun: 0, joy: 0, sorrow: 0, surprised: 0 };
+  Object.assign(w, weights);
+  Object.assign(currentEmotionWeights, w);
+  const em = vrm?.expressionManager;
+  if (!em) return;
+  const intensity = w.joy + w.fun + w.angry + w.sorrow + w.surprised;
+  if (intensity < 0.02 && (w.neutral == null || w.neutral < 0.01)) w.neutral = 1;
+  for (const logical of ["neutral", "angry", "fun", "joy", "sorrow", "surprised"]) {
+    const key = resolvedEmotionKeys[logical];
+    if (!key || !em.getExpression(key)) continue;
+    em.setValue(key, Math.min(1, Math.max(0, w[logical] ?? 0)));
+  }
+}
+
+/**
+ * Subtle per-frame motion on mood blendshapes + periodic blink so the face stays alive
+ * (does not touch viseme ``aa``/``ih``/… — lip sync runs before this in ``animate``).
+ */
+function applyProceduralExpressionDynamics(elapsed, delta) {
+  if (!useProceduralBody || !vrm?.expressionManager) return;
+  if (exprMixer && expressionActionCurrent?.isRunning?.()) return;
+  const em = vrm.expressionManager;
+  const t = elapsed;
+  const shimmerA = 0.022 * Math.sin(t * 2.35);
+  const shimmerB = 0.015 * Math.sin(t * 1.72 + 0.55);
+  for (const logical of ["neutral", "angry", "fun", "joy", "sorrow", "surprised"]) {
+    const key = resolvedEmotionKeys[logical];
+    if (!key || !em.getExpression(key)) continue;
+    const base = currentEmotionWeights[logical] ?? 0;
+    const mix = logical === "neutral" ? shimmerA + shimmerB * 0.42 : shimmerA * 0.72 + shimmerB;
+    const scale = 0.28 + 0.72 * Math.min(1, Math.max(0.1, base));
+    em.setValue(key, Math.min(1, Math.max(0, base + mix * scale)));
+  }
+  if (!resolvedBlinkMorphKey || !em.getExpression(resolvedBlinkMorphKey)) return;
+  if (faceBlinkPhase <= 0) {
+    em.setValue(resolvedBlinkMorphKey, 0);
+    if (faceNextBlinkAt <= 0) faceNextBlinkAt = t + 0.6 + Math.random() * 1.2;
+    if (t >= faceNextBlinkAt) faceBlinkPhase = 0.001;
+  }
+  if (faceBlinkPhase > 0) {
+    faceBlinkPhase += delta * 10.8;
+    const u = Math.min(1, faceBlinkPhase);
+    em.setValue(resolvedBlinkMorphKey, Math.sin(u * Math.PI) * 0.88);
+    if (faceBlinkPhase >= 1) {
+      faceBlinkPhase = 0;
+      em.setValue(resolvedBlinkMorphKey, 0);
+      faceNextBlinkAt = t + 1.5 + Math.random() * 2.6;
+    }
+  }
+}
+
+/** Apply Luna’s leading [TAG] to VRM expression presets (expression VRMA is paused during speech). */
+function applyLunaEmotionFromRawText(raw) {
+  const tag = extractFirstLunaEmotionTag(raw);
+  if (!tag) {
+    applyEmotionBlendWeights({ neutral: 1 });
+    return;
+  }
+  if (LUNA_ACTION_FACE_TAGS.has(tag)) {
+    applyEmotionBlendWeights({ neutral: 1 });
+    return;
+  }
+  const preset = LUNA_TAG_FACE_WEIGHTS[tag];
+  if (preset) {
+    applyEmotionBlendWeights(preset);
+    return;
+  }
+  applyEmotionBlendWeights({ neutral: 1 });
+}
+
+function resetFaceEmotionToNeutralAfterSpeech() {
+  speechEmotionTimeline.events = [];
+  speechEmotionTimeline.idx = -1;
+  applyEmotionBlendWeights({ neutral: 1 });
+}
+
 function speakBrowserTts(text) {
   const raw = (text || "").trim();
   if (!raw) return;
@@ -1318,14 +2381,17 @@ function speakBrowserTts(text) {
   speechSynthesis.cancel();
   lipAudioMode = false;
 
-  const speakText = stripLunaEmotionTagsForSpeech(raw);
-  lipSync.text = speakText || raw;
+  let speakText = stripLunaEmotionTagsForSpeech(raw);
+  speakText = maybeStripEmojisForGemmaTts(speakText || raw);
+  if (!String(speakText || "").trim()) return;
+  lipSync.text = speakText;
   lipSync.t0 = performance.now();
   lipSync.durationSec = estimateSpeechDurationSec(lipSync.text);
+  startSpeechEmotionTimeline(raw, lipSync.text);
   lipSync.phase = 0;
   for (const k of LIP_NAMES) lipSync.smooth[k] = 0;
 
-  const u = new SpeechSynthesisUtterance(speakText || raw);
+  const u = new SpeechSynthesisUtterance(speakText);
   const voices = speechSynthesis.getVoices();
   const chosen = ttsVoice.selectedOptions[0];
   if (chosen?.value) {
@@ -1334,6 +2400,7 @@ function speakBrowserTts(text) {
       voices.find((v) => v.name === chosen.dataset.name);
     if (match) u.voice = match;
   }
+  u.volume = 1;
 
   u.onstart = () => {
     speaking = true;
@@ -1342,11 +2409,13 @@ function speakBrowserTts(text) {
   };
   u.onend = () => {
     speaking = false;
+    resetFaceEmotionToNeutralAfterSpeech();
     clearLipMouth();
     void resumeIdleSequence();
   };
   u.onerror = () => {
     speaking = false;
+    resetFaceEmotionToNeutralAfterSpeech();
     clearLipMouth();
     void resumeIdleSequence();
   };
@@ -1374,8 +2443,11 @@ async function speakEdgeTts(text, opts = {}) {
   stopEdgePlayback();
   const myGen = ++speakGen;
 
-  const tSpeak = stripLunaEmotionTagsForSpeech(raw) || raw;
+  let tSpeak = stripLunaEmotionTagsForSpeech(raw) || raw;
+  tSpeak = maybeStripEmojisForGemmaTts(tSpeak);
+  if (!String(tSpeak).trim()) return;
   lipSync.text = tSpeak;
+  startSpeechEmotionTimeline(raw, lipSync.text);
   lipAudioMode = false;
   errEl.hidden = true;
 
@@ -1410,11 +2482,14 @@ async function speakEdgeTts(text, opts = {}) {
       edgeAnalyser.fftSize = 512;
       edgeAnalyser.smoothingTimeConstant = 0.72;
     }
+    if (!edgeAnalyserToDestWired) {
+      edgeAnalyser.connect(edgeAudioCtx.destination);
+      edgeAnalyserToDestWired = true;
+    }
 
     const src = edgeAudioCtx.createBufferSource();
     src.buffer = audioBuf;
     src.connect(edgeAnalyser);
-    edgeAnalyser.connect(edgeAudioCtx.destination);
 
     const talkOk = await startTalkSequence();
     if (myGen !== speakGen) return;
@@ -1425,6 +2500,8 @@ async function speakEdgeTts(text, opts = {}) {
     speaking = true;
     lipAudioMode = true;
     lipAmpSmooth = 0;
+    lipSync.t0 = performance.now();
+    lipSync.durationSec = Math.max(0.2, audioBuf.duration || estimateSpeechDurationSec(lipSync.text));
     edgePlaybackSource = src;
 
     src.onended = () => {
@@ -1432,6 +2509,7 @@ async function speakEdgeTts(text, opts = {}) {
       edgePlaybackSource = null;
       speaking = false;
       lipAudioMode = false;
+      resetFaceEmotionToNeutralAfterSpeech();
       clearLipMouth();
       void resumeIdleSequence();
     };
@@ -1444,6 +2522,7 @@ async function speakEdgeTts(text, opts = {}) {
     speaking = false;
     lipAudioMode = false;
     edgePlaybackSource = null;
+    resetFaceEmotionToNeutralAfterSpeech();
     clearLipMouth();
     void resumeIdleSequence();
     errEl.hidden = false;
@@ -1513,12 +2592,30 @@ expressionSelect.addEventListener("change", () => {
   void applyExpressionClipManual();
 });
 
+emotionTestSelect?.addEventListener("change", () => {
+  if (speaking) return;
+  applyManualEmotionSelection();
+});
+
+btnEmotionApply?.addEventListener("click", () => {
+  if (speaking) return;
+  applyManualEmotionSelection();
+});
+
+btnEmotionClear?.addEventListener("click", () => {
+  if (speaking) return;
+  if (emotionTestSelect) emotionTestSelect.value = "NEUTRAL";
+  applyEmotionBlendWeights({ neutral: 1 });
+  animStatus.textContent = "Emotion test — [NEUTRAL]";
+});
+
 function stopAllSpeech() {
   speakGen += 1;
   speechSynthesis.cancel();
   stopEdgePlayback();
   speaking = false;
   lipAudioMode = false;
+  resetFaceEmotionToNeutralAfterSpeech();
   clearLipMouth();
   void resumeIdleSequence();
 }
@@ -1591,6 +2688,7 @@ pollTwitchForVrm();
   try {
     status = await (await fetch(new URL("api/status", BASE).href)).json();
     pathHint.textContent = status.path || "(unknown)";
+    if (typeof status.chat_model === "string") lunaChatModelId = status.chat_model;
     if (typeof status.edge_tts_voice === "string" && ttsEdgeVoiceName) {
       ttsEdgeVoiceName.textContent = status.edge_tts_voice || "—";
     }
@@ -1613,14 +2711,12 @@ pollTwitchForVrm();
   try {
     animationList = await fetchAnimationList();
     populateClipSelects();
-    const nIdle = idleMotionItems().length;
-    const nTalk = talkMotionItems().length;
     const nExpr = expressionMotionItems().length;
     const rootHint = animationList.animations_root ? ` · ${animationList.animations_root}` : "";
-    if (nIdle + nTalk + nExpr) {
-      animStatus.textContent = `${nIdle} idle · ${nTalk} talk · ${nExpr} expression${rootHint}`;
+    if (nExpr) {
+      animStatus.textContent = `${nExpr} expression clip${nExpr === 1 ? "" : "s"}${rootHint}`;
     } else {
-      animStatus.textContent = `No clips — add body .vrma/.fbx under Luna animations/ and expressions under expressions/.${rootHint}`;
+      animStatus.textContent = `No expression clips — add .vrma under expressions/.${rootHint}`;
     }
   } catch (e) {
     animStatus.textContent = "Could not load animation list.";
@@ -1628,6 +2724,7 @@ pollTwitchForVrm();
   }
 
   populateVoices();
+  populateEmotionTestSelect();
   setTimeout(populateVoices, 400);
 
   try {
@@ -1649,13 +2746,18 @@ pollTwitchForVrm();
       o.frustumCulled = false;
     });
 
-    try {
-      vrm.humanoid?.resetNormalizedPose?.();
-    } catch {
-      /* */
+    if (useProceduralBody) {
+      stopAllFileMotion();
+      const rootHint = animationList.animations_root ? ` · ${animationList.animations_root}` : "";
+      const seqHint = idleSequenceItems().length
+        ? `Idle sequence (fbx animations/) — body clips on main mixer; expression VRMA skipped so it does not overwrite bones. `
+        : `Procedural body + VRMA_01-style expression; `;
+      animStatus.textContent = `${seqHint}Standing Arguing while speaking${rootHint}`;
     }
 
     refreshMouthOpenExprName();
+    refreshEmotionPresetKeys();
+    refreshFaceDynamicsKeys();
 
     if (vrm.lookAt) {
       const lap = new VRMLookAtQuaternionProxy(vrm.lookAt);
@@ -1666,11 +2768,32 @@ pollTwitchForVrm();
     scene.add(vrm.scene);
     frameCameraToVrm();
 
-    if (idleMotionItems().length > 0 || expressionMotionItems().length > 0) {
-      await startSilentAnimationLoop();
-    } else {
-      animStatus.textContent =
-        "Add .vrma or Mixamo .fbx under Luna animations/ (or LUNA_ANIMATIONS_DIR) for idle/talk body motion.";
+    if (useProceduralBody) {
+      vrm.update(0);
+      cacheProceduralRestPose();
+      loadReferenceMotionFromTalkVrma().catch((e) => console.warn(e));
+    }
+
+    await startSilentAnimationLoop();
+    if (useProceduralBody) {
+      if (idleSequenceItems().length > 0) {
+        idleSeqIdx = 0;
+        try {
+          await playIdleSequenceAt(0);
+        } catch (e) {
+          console.warn(e);
+        }
+      } else if (expressionSelect?.value) {
+        /* Expression VRMA after body sequence would run on exprMixer *after* body mixer each frame and overwrite the same bones — only auto-play when there is no idle sequence. */
+        try {
+          await playExpressionMotionClip(expressionSelect.value);
+        } catch (e) {
+          console.warn(e);
+        }
+      }
+    }
+    if (!useProceduralBody && idleMotionItems().length === 0 && expressionMotionItems().length === 0) {
+      animStatus.textContent = "Add expression .vrma clips under Luna animations/expressions/.";
     }
   } catch (e) {
     errEl.hidden = false;
@@ -1691,11 +2814,16 @@ resize();
 function animate() {
   requestAnimationFrame(animate);
   const delta = clock.getDelta();
+  const elapsed = clock.getElapsedTime();
   if (mixer) mixer.update(delta);
   if (exprMixer) exprMixer.update(delta);
   if (speaking) {
     if (lipAudioMode) updateLipSyncFromAudio(delta);
     else updateLipSync(delta);
+  }
+  if (useProceduralBody) {
+    applyProceduralTalkingBody(elapsed, delta);
+    applyProceduralExpressionDynamics(elapsed, delta);
   }
   if (vrm) vrm.update(delta);
   renderer.render(scene, camera);
