@@ -94,7 +94,7 @@
     cursor: pointer;
   }
   #panel input[type="range"]#mic-vol { accent-color: #c8a060; }
-  video#hidden-feed { position: fixed; width: 2px; height: 2px; opacity: 0; pointer-events: none; left: -99px; }
+  video#hidden-feed, video#hidden-feed-aux { position: fixed; width: 2px; height: 2px; opacity: 0; pointer-events: none; left: -99px; }
 </style>
 <script type="importmap">
 {
@@ -110,6 +110,7 @@
 <body>
 <div id="wrap"><canvas id="c"></canvas></div>
 <video id="hidden-feed" playsinline muted autoplay></video>
+<video id="hidden-feed-aux" playsinline muted autoplay></video>
 
 <div id="panel" style="visibility:hidden">
   <h1>Studio</h1>
@@ -137,6 +138,11 @@
     <button type="button" class="primary" id="btn-embed-load" style="margin-top:8px">Load page on screen</button>
     <p class="embed-hint">Sharing a tab only mirrors pixels — browsers don’t expose its address. Copy the tab’s URL here to open the same page <strong>inside</strong> the studio and click, scroll, and type there. Some sites block embedding.</p>
   </div>
+  <label>Second screen (camera / VSeeFace)</label>
+  <div class="row">
+    <button type="button" id="btn-aux-camera">Camera</button>
+    <button type="button" id="btn-aux-vseeface">VSeeFace window</button>
+  </div>
   <label for="cam-select" id="cam-label">Camera</label>
   <select id="cam-select" disabled>
     <option value="">— Click Enable first —</option>
@@ -146,6 +152,10 @@
   <select id="mic-select" disabled>
     <option value="">— Same as above —</option>
   </select>
+  <button type="button" class="primary" id="btn-obs-vtuber" style="margin-top:8px">Launch OBS + VTuber mode</button>
+  <div class="hint" style="margin-top:6px">
+    VTuber mode: idle <code style="color:#8ab4e8">standing2</code> and talking <code style="color:#8ab4e8">Standing Arguing</code>.
+  </div>
   <button type="button" class="primary" id="btn-perm">Enable microphone &amp; video</button>
   <div class="row">
     <button type="button" id="btn-rec" disabled>● Record</button>
@@ -179,6 +189,7 @@ let studioIdleSeqFinishedHandler = null;
 const canvas = document.getElementById("c");
 const clock = new THREE.Clock();
 const hiddenVideo = document.getElementById("hidden-feed");
+const hiddenVideoAux = document.getElementById("hidden-feed-aux");
 const camSelect = document.getElementById("cam-select");
 const micSelect = document.getElementById("mic-select");
 const videoSourceSelect = document.getElementById("video-source");
@@ -187,12 +198,15 @@ const btnShareAgain = document.getElementById("btn-share-again");
 const btnPerm = document.getElementById("btn-perm");
 const btnRec = document.getElementById("btn-rec");
 const btnStopRec = document.getElementById("btn-stop-rec");
+const btnObsVtuber = document.getElementById("btn-obs-vtuber");
 const statusEl = document.getElementById("status");
 const screenVol = document.getElementById("screen-vol");
 const micVol = document.getElementById("mic-vol");
 const embedRow = document.getElementById("embed-row");
 const embedUrlInput = document.getElementById("embed-url");
 const btnEmbedLoad = document.getElementById("btn-embed-load");
+const btnAuxCamera = document.getElementById("btn-aux-camera");
+const btnAuxVseeface = document.getElementById("btn-aux-vseeface");
 
 let renderer, css3dRenderer, scene, camera, controls, orbMesh, orbBaseScale;
 /** Arrow keys: move camera + orbit target on the floor plane (m/s scale uses dt). */
@@ -202,9 +216,12 @@ let orbHome = new THREE.Vector3();
 let orbPosSmooth = new THREE.Vector3();
 let orbWanderSeed = Math.random() * Math.PI * 2;
 let videoTexture = null;
+let auxVideoTexture = null;
 let screenGroup = null;
+let auxScreenGroup = null;
 /** CSS3D iframe placed on the virtual screen (interactive embed mode). */
 let screenEmbedObject = null;
+let auxCaptureStream = null;
 let micStream = null;
 /** Set when using ``getDisplayMedia`` (window/screen/tab); video track kept while mic may swap. */
 let screenCaptureStream = null;
@@ -222,6 +239,7 @@ let recordingAudioCtx = null;
 
 const VRM_BASE = new URL("/vrm/", window.location.origin).href;
 const STUDIO_LUNA_MODEL_URL = new URL("model", VRM_BASE).href;
+const VRM_VIEWER_URL = new URL("/vrm/?vtuber=1", window.location.origin).href;
 /** Luna VRM (``@pixiv/three-vrm``). */
 let studioLunaVrm = null;
 let studioLunaMixer = null;
@@ -232,6 +250,7 @@ let studioLunaActTalk = null;
 /** True: Standing Arguing (mic “speech”); false: VRMA_01 standing idle. */
 let studioLunaAnimArguing = false;
 let studioLunaTalkGate = false;
+let studioForceLunaHidden = false;
 const studioLunaPos = new THREE.Vector3(2.4, 0, 1.0);
 let studioLunaYaw = 0;
 const studioLunaAutoTarget = new THREE.Vector3();
@@ -274,6 +293,18 @@ function pickStudioArguingVrma(motionTalk) {
   return byName || list.find((x) => x.kind === "vrma") || null;
 }
 
+/** Prefer idle clip with ``standing2`` stem/label/name (for VTuber mode). */
+function pickStudioStanding2Idle(items) {
+  const list = items || [];
+  return (
+    list.find(
+      (x) =>
+        x.kind === "vrma" &&
+        /standing\s*2|standing2/i.test(`${x.stem || ""} ${x.label || ""} ${x.name || ""}`),
+    ) || null
+  );
+}
+
 function studioVrmaUrl(item) {
   if (!item || item.kind !== "vrma") return "";
   if (item.pool === "expression") {
@@ -281,6 +312,14 @@ function studioVrmaUrl(item) {
   }
   const folder = item.pool === "talk" ? "talking" : "idle";
   return new URL(`animation/${folder}/vrma/${item.index}`, VRM_BASE).href;
+}
+
+function studioClipUrl(item) {
+  if (!item) return "";
+  if (item.pool === "idle_sequence") {
+    return new URL(`animation/idle/sequence/${item.index}`, VRM_BASE).href;
+  }
+  return studioVrmaUrl(item);
 }
 
 /** Same VRMA slot in the API (pool + index), not object identity. */
@@ -485,6 +524,56 @@ async function loadStudioLunaAvatar() {
   }
 }
 
+async function applyStudioObsVtuberMode() {
+  if (!studioLunaVrm || !studioLunaMixer || !studioAnimLoader) {
+    throw new Error("Luna avatar is not ready yet.");
+  }
+  let animData = { motion_talk: [], motion_idle: [], motion_idle_sequence: [] };
+  try {
+    const r = await fetch(new URL("api/animations", VRM_BASE).href);
+    if (r.ok) animData = await r.json();
+  } catch {
+    /* */
+  }
+
+  const seq = Array.isArray(animData.motion_idle_sequence) ? animData.motion_idle_sequence : [];
+  const idlePool = Array.isArray(animData.motion_idle) ? animData.motion_idle : [];
+  const talkPool = Array.isArray(animData.motion_talk) ? animData.motion_talk : [];
+  const idleItem = pickStudioStanding2Idle([...seq, ...idlePool]) || pickStudioStanding2Idle(idlePool) || pickStudioStanding2Idle(seq);
+  const talkItem = pickStudioArguingVrma(talkPool);
+  if (!idleItem || !talkItem) {
+    throw new Error("Could not find standing2 (idle) or Standing Arguing (talk).");
+  }
+
+  // Disable idle-sequence auto-rotation: VTuber mode uses one locked idle clip.
+  studioIdleSequenceItems = [];
+  detachStudioIdleSeqHandler();
+
+  const idleUrl = studioClipUrl(idleItem);
+  if (!idleUrl) throw new Error("No URL for standing2 idle clip.");
+  const idleClip = await loadVrmaClipForStudio(studioAnimLoader, idleUrl, studioLunaVrm);
+  const prevIdle = studioLunaActIdle;
+  const idleAct = studioLunaMixer.clipAction(idleClip);
+  idleAct.setLoop(THREE.LoopRepeat, Infinity);
+  if (prevIdle && prevIdle !== idleAct && typeof prevIdle.isRunning === "function" && prevIdle.isRunning()) {
+    prevIdle.crossFadeTo(idleAct, 0.35, false);
+  } else {
+    idleAct.reset().fadeIn(0.22).play();
+  }
+  studioLunaActIdle = idleAct;
+
+  const talkUrl = studioClipUrl(talkItem);
+  if (!talkUrl) throw new Error("No URL for Standing Arguing clip.");
+  const talkClip = await loadVrmaClipForStudio(studioAnimLoader, talkUrl, studioLunaVrm);
+  const talkAct = studioLunaMixer.clipAction(talkClip);
+  talkAct.setLoop(THREE.LoopRepeat, Infinity);
+  talkAct.reset().play();
+  talkAct.setEffectiveWeight(0);
+  studioLunaActTalk = talkAct;
+  studioLunaAnimArguing = false;
+  studioLunaTalkGate = false;
+}
+
 function updateStudioLunaAuto(dt, nowSec) {
   if (studioLunaPos.distanceTo(studioLunaAutoTarget) < 0.42 || nowSec >= studioLunaAutoRetargetAt) {
     studioLunaAutoTarget.set((Math.random() - 0.5) * 26, 0, (Math.random() - 0.5) * 26);
@@ -531,6 +620,10 @@ function clampStudioLunaPos() {
 
 function updateStudioLuna(dt) {
   if (!studioLunaVrm) return;
+  if (studioForceLunaHidden) {
+    studioLunaVrm.scene.visible = false;
+    return;
+  }
   const mode = getStudioLunaMode();
   if (mode === "hidden") {
     studioLunaVrm.scene.visible = false;
@@ -662,6 +755,13 @@ function stopAllMedia() {
   if (screenCaptureStream) {
     screenCaptureStream.getTracks().forEach((t) => t.stop());
     screenCaptureStream = null;
+  }
+  if (auxCaptureStream) {
+    auxCaptureStream.getTracks().forEach((t) => t.stop());
+    auxCaptureStream = null;
+  }
+  if (hiddenVideoAux) {
+    hiddenVideoAux.srcObject = null;
   }
   micStream = null;
 }
@@ -833,6 +933,26 @@ function attachVideoTexture() {
   applyMicVolume();
 }
 
+function attachAuxVideoTexture() {
+  if (!hiddenVideoAux) return;
+  if (auxVideoTexture) auxVideoTexture.dispose();
+  auxVideoTexture = new THREE.VideoTexture(hiddenVideoAux);
+  auxVideoTexture.colorSpace = THREE.SRGBColorSpace;
+  auxVideoTexture.minFilter = THREE.LinearFilter;
+  auxVideoTexture.magFilter = THREE.LinearFilter;
+  if (auxScreenMesh) {
+    auxScreenMesh.material.color.setHex(0xffffff);
+    auxScreenMesh.material.map = auxVideoTexture;
+    auxScreenMesh.material.roughness = 0.2;
+    auxScreenMesh.material.metalness = 0.03;
+    auxScreenMesh.material.envMapIntensity = 0.55;
+    auxScreenMesh.material.transparent = true;
+    auxScreenMesh.material.opacity = 0.82;
+    auxScreenMesh.material.depthWrite = false;
+    auxScreenMesh.material.needsUpdate = true;
+  }
+}
+
 function onDisplayTrackEnded() {
   setStatus(
     "<span style='color:#e8a088'>Screen/window share ended. Click <strong>Share…</strong> or <strong>Enable microphone &amp; video</strong> again.</span>",
@@ -894,6 +1014,7 @@ async function applySelectedDevices() {
 }
 
 let screenMesh = null;
+let auxScreenMesh = null;
 
 /** Big screen plane: video track + display/tab audio only (never the mic). */
 function streamForVideoElementFromWebcam(fullStream) {
@@ -1237,6 +1358,56 @@ function initThree() {
   right.position.set(sw / 2 + t / 2, 0, -d / 2);
   screenGroup.add(top, bot, left, right);
 
+  // Secondary screen (camera / VSeeFace) to the right of the main VTuber screen.
+  auxScreenGroup = new THREE.Group();
+  auxScreenGroup.position.set(9.8, 2.9, -10.55);
+  auxScreenGroup.rotation.order = "YXZ";
+  auxScreenGroup.rotation.y = -0.06;
+  auxScreenGroup.rotation.x = 0.05;
+  scene.add(auxScreenGroup);
+
+  const sw2 = 5.2;
+  const sh2 = 2.95;
+  const haloGeo2 = new THREE.PlaneGeometry(sw2 * 1.12, sh2 * 1.12);
+  const haloMat2 = new THREE.MeshBasicMaterial({
+    color: 0x5070c0,
+    transparent: true,
+    opacity: 0.08,
+    side: THREE.DoubleSide,
+    depthWrite: false,
+  });
+  const halo2 = new THREE.Mesh(haloGeo2, haloMat2);
+  halo2.position.z = -0.14;
+  auxScreenGroup.add(halo2);
+
+  const screenGeo2 = new THREE.PlaneGeometry(sw2, sh2);
+  const screenMat2 = new THREE.MeshPhysicalMaterial({
+    color: 0x101018,
+    roughness: 0.85,
+    metalness: 0,
+    envMapIntensity: 0.35,
+    clearcoat: 0.35,
+    clearcoatRoughness: 0.4,
+    side: THREE.FrontSide,
+    transparent: true,
+    opacity: 0.78,
+    depthWrite: false,
+  });
+  auxScreenMesh = new THREE.Mesh(screenGeo2, screenMat2);
+  auxScreenMesh.position.z = 0.04;
+  auxScreenGroup.add(auxScreenMesh);
+
+  const bw2 = sw2 + t * 2;
+  const top2 = new THREE.Mesh(new THREE.BoxGeometry(bw2, t, d), bezelMat);
+  top2.position.set(0, sh2 / 2 + t / 2, -d / 2);
+  const bot2 = new THREE.Mesh(new THREE.BoxGeometry(bw2, t, d), bezelMat);
+  bot2.position.set(0, -sh2 / 2 - t / 2, -d / 2);
+  const left2 = new THREE.Mesh(new THREE.BoxGeometry(t, sh2, d), bezelMat);
+  left2.position.set(-sw2 / 2 - t / 2, 0, -d / 2);
+  const right2 = new THREE.Mesh(new THREE.BoxGeometry(t, sh2, d), bezelMat);
+  right2.position.set(sw2 / 2 + t / 2, 0, -d / 2);
+  auxScreenGroup.add(top2, bot2, left2, right2);
+
   css3dRenderer = new CSS3DRenderer();
   const wrap = document.getElementById("wrap");
   css3dRenderer.domElement.style.position = "absolute";
@@ -1267,7 +1438,7 @@ function initThree() {
   resize();
   requestAnimationFrame(() => resize());
 
-  // Luna avatar intentionally disabled in studio.
+  void loadStudioLunaAvatar();
 }
 
 function animate() {
@@ -1300,6 +1471,7 @@ function animate() {
     }
   }
   if (videoTexture) videoTexture.needsUpdate = true;
+  if (auxVideoTexture) auxVideoTexture.needsUpdate = true;
 
   if (controls && camera) {
     const typing = isTypingTarget(document.activeElement);
@@ -1324,7 +1496,7 @@ function animate() {
     }
   }
 
-  // Studio Luna avatar update disabled.
+  updateStudioLuna(dt);
 
   if (controls) controls.update();
   renderer.render(scene, camera);
@@ -1347,6 +1519,95 @@ function applyMicVolume() {
 
 screenVol.addEventListener("input", applyScreenVolume);
 micVol.addEventListener("input", applyMicVolume);
+
+if (btnObsVtuber) {
+  btnObsVtuber.addEventListener("click", async () => {
+    btnObsVtuber.disabled = true;
+    try {
+      await applyStudioObsVtuberMode();
+      // Stream view should show the dedicated /vrm/ page, not the in-room studio avatar.
+      studioForceLunaHidden = true;
+      if (studioLunaVrm?.scene) studioLunaVrm.scene.visible = false;
+      videoSourceSelect.value = "embed";
+      updateVideoSourceUi();
+      loadEmbedPageFromUrl(VRM_VIEWER_URL);
+      let obsPart = "";
+      try {
+        const resp = await fetch(new URL("/api/obs/start", window.location.origin).href, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: "{}",
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) throw new Error(data?.error || "OBS start failed");
+        obsPart = " OBS launched.";
+      } catch (e) {
+        obsPart = ` OBS launch failed: ${String(e?.message || e)}.`;
+      }
+      setStatus(
+        `<strong>VTuber mode enabled.</strong> Screen now shows <strong>/vrm/</strong>; studio avatar hidden. Luna idle = <strong>standing2</strong>; talking = <strong>Standing Arguing</strong>.${obsPart}`,
+      );
+    } catch (e) {
+      setStatus(`❌ Could not enable VTuber mode: ${String(e?.message || e)}`);
+    } finally {
+      btnObsVtuber.disabled = false;
+    }
+  });
+}
+
+if (btnAuxCamera) {
+  btnAuxCamera.addEventListener("click", async () => {
+    btnAuxCamera.disabled = true;
+    try {
+      if (!navigator.mediaDevices?.getUserMedia) throw new Error("getUserMedia not supported");
+      if (auxCaptureStream) {
+        auxCaptureStream.getTracks().forEach((t) => t.stop());
+        auxCaptureStream = null;
+      }
+      const vId = camSelect?.value && camSelect.value !== "display" ? { exact: camSelect.value } : true;
+      const camStream = await navigator.mediaDevices.getUserMedia({ video: vId, audio: false });
+      auxCaptureStream = camStream;
+      hiddenVideoAux.srcObject = new MediaStream(camStream.getVideoTracks());
+      await hiddenVideoAux.play().catch(() => {});
+      attachAuxVideoTexture();
+      setStatus("<strong>Second screen:</strong> camera feed live.");
+    } catch (e) {
+      setStatus(`❌ Second screen camera failed: ${String(e?.message || e)}`);
+    } finally {
+      btnAuxCamera.disabled = false;
+    }
+  });
+}
+
+if (btnAuxVseeface) {
+  btnAuxVseeface.addEventListener("click", async () => {
+    btnAuxVseeface.disabled = true;
+    try {
+      if (!navigator.mediaDevices?.getDisplayMedia) throw new Error("getDisplayMedia not supported");
+      if (auxCaptureStream) {
+        auxCaptureStream.getTracks().forEach((t) => t.stop());
+        auxCaptureStream = null;
+      }
+      const disp = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+      const vt = disp.getVideoTracks()[0];
+      if (!vt) throw new Error("No video track selected");
+      vt.addEventListener("ended", () => {
+        setStatus("<span style='color:#e8a088'>Second screen share ended.</span>");
+      });
+      auxCaptureStream = disp;
+      hiddenVideoAux.srcObject = new MediaStream([vt]);
+      await hiddenVideoAux.play().catch(() => {});
+      attachAuxVideoTexture();
+      setStatus("<strong>Second screen:</strong> VSeeFace/window feed live.");
+    } catch (e) {
+      const n = e?.name || "";
+      if (n === "AbortError") setStatus("Second screen share cancelled.");
+      else setStatus(`❌ Second screen VSeeFace failed: ${String(e?.message || e)}`);
+    } finally {
+      btnAuxVseeface.disabled = false;
+    }
+  });
+}
 
 videoSourceSelect.addEventListener("change", () => {
   updateVideoSourceUi();

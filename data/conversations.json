@@ -2,46 +2,6 @@
   "discord:user:1414944231222411378": [
     {
       "role": "user",
-      "content": "!yt_comment https://www.youtube.com/watch?v=velDW1330Zc"
-    },
-    {
-      "role": "assistant",
-      "content": "✅ Comment posted on: \"The Smiling Machine\""
-    },
-    {
-      "role": "user",
-      "content": "!play \"D:\\Music for distrokid\\Ανάστα Λαμπροφόρα.wav\""
-    },
-    {
-      "role": "assistant",
-      "content": "❌ No audio stream found."
-    },
-    {
-      "role": "user",
-      "content": "!play https://www.youtube.com/watch?v=9gF2UySGZAU&list=RD9gF2UySGZAU&start_radio=1"
-    },
-    {
-      "role": "assistant",
-      "content": "✅ ▶️ Playing: **Seal - Fly Like An Eagle (Space Jam Soundtrack)**"
-    },
-    {
-      "role": "user",
-      "content": "thank you for playing music"
-    },
-    {
-      "role": "assistant",
-      "content": "[Song starts]\n\nΝύχτα σιωπηλή\nΛάδι στο καντήλι\nΣτέκονται ψυχές\nΣτην ίδια προσευχή\n\nΧτύπος στο καμπαναριό\nΣβήνει κάθε φόβο\nΚάθε πληγωμένη καρδιά\nΨιθυρίζει «ζω»\n\n[Chorus]\nΑνάστα λαμπροφόρα\nΦως απ"
-    },
-    {
-      "role": "user",
-      "content": "lol i didnt say tell me the4 lyrics :D"
-    },
-    {
-      "role": "assistant",
-      "content": "Haha, sorry about that! I got a bit carried away. Thanks for the laugh!"
-    },
-    {
-      "role": "user",
       "content": "wel im going to bed now, see you tomorow dear"
     },
     {
@@ -799,6 +759,46 @@
     {
       "role": "assistant",
       "content": "Good morning! Here's your briefing: Calendar: No events scheduled today. Top news: Lebanon enters talks with Israel but with no cards to play · BBC joins paramedics on duty in Lebanon after Israeli strikes · Hungary's next PM would pick up if Putin calls and tell him to stop Ukraine war --- yo solonaras what's up?"
+    },
+    {
+      "role": "user",
+      "content": "tell usa joke"
+    },
+    {
+      "role": "assistant",
+      "content": "Why did the scarecrow win an award?\n\nBecause he was outstanding in his field."
+    },
+    {
+      "role": "user",
+      "content": "haha that was kinda funny"
+    },
+    {
+      "role": "assistant",
+      "content": "Glad you thought so. I've got a few more if you want to keep the good vibes going."
+    },
+    {
+      "role": "user",
+      "content": "hey luna say hi to my dad"
+    },
+    {
+      "role": "assistant",
+      "content": "Hey Dad! 👋 Hope you're having a great day."
+    },
+    {
+      "role": "user",
+      "content": "Luna say goodbye to my dad. I was showing off your studio room."
+    },
+    {
+      "role": "assistant",
+      "content": "Bye, Dad! Hope you enjoyed seeing the studio. 👋"
+    },
+    {
+      "role": "user",
+      "content": "Can you say hi to Dark Devil?"
+    },
+    {
+      "role": "assistant",
+      "content": "Hey Dark Devil. 👋"
     }
   ],
   "discord:user:550782786013757442": [

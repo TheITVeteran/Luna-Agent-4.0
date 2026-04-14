@@ -10413,6 +10413,23 @@ def api_stream():
     return Response(stream_with_context(_gen()), mimetype="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
+@web.route("/api/obs/start", methods=["POST"])
+def api_obs_start():
+    """Launch OBS Studio from Start Menu shortcut (Windows)."""
+    data = request.get_json(force=True, silent=True) or {}
+    default_lnk = r"C:\ProgramData\Microsoft\Windows\Start Menu\Programs\OBS Studio.lnk"
+    path = os.path.abspath(os.path.expanduser((data.get("path") or default_lnk).strip() or default_lnk))
+    if not os.path.isfile(path):
+        return jsonify({"error": "OBS shortcut not found", "path": path}), 404
+    try:
+        if hasattr(os, "startfile"):
+            os.startfile(path)  # type: ignore[attr-defined]
+        else:
+            subprocess.Popen(["cmd", "/c", "start", "", path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return jsonify({"ok": True, "path": path})
+    except Exception as e:
+        return jsonify({"error": f"Could not launch OBS: {e}", "path": path}), 500
+
 @web.route("/api/tts", methods=["POST"])
 def api_tts():
     text = ((request.get_json(force=True, silent=True) or {}).get("text") or "").strip()
