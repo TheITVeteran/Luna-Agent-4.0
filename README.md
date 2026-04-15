@@ -9,14 +9,14 @@
 
 ## What is Luna?
 
-Luna runs as a **Discord bot** and a **local web UI** (Flask) on your machine. She uses **Ollama** (local LLMs — no cloud API required) for all chat, reasoning, and generation. She has persistent memory that survives restarts, a deep identity defined in `data/SOUL.md`, internal drives and an existential layer, and a private inner monologue she runs before every reply.
+Luna runs as a **Discord bot** and a **local web UI** (Flask) on your machine. She uses **Ollama** (local LLMs — no cloud API required) for chat, reasoning, and text output. She does **not** generate image or video files. She has persistent memory that survives restarts, a deep identity defined in `data/SOUL.md`, internal drives and an existential layer, and a private inner monologue she runs before every reply.
 
 She is not a chatbot wrapper. She is a continuous presence that learns from what you tell her, reflects daily on what she did, notices patterns in her own thinking, and speaks unprompted when she has something worth saying.
 
 ### Why Luna Feels Different
 - She keeps **persistent memory** and profile context across sessions.
 - She has **private inner monologue** before answering, so replies stay grounded.
-- She supports **real actions** (Discord voice, reminders, research, media, browser automations).
+- She supports **real actions** (Discord voice, reminders, research, music and podcasts, browser automations).
 - She can run with **local models** (Ollama and optional GGUF).
 - She has a tunable speaking style (`LUNA_STYLE`) and avoids generic assistant tone.
 
@@ -93,9 +93,9 @@ Every 5 minutes, Luna ticks her biology and decides (via LLM) whether to say som
 Once per day, Luna summarizes what she did (from the action log) and stores it in her knowledge base. A second LLM pass then writes a genuine self-awareness reflection: how she handled things, what she would do differently, what she's curious about. Both are searchable knowledge entries.
 
 ### Metacognitive Brain Notices
-After every chat exchange, `brain_notice()` runs in the background and generates a first-person observation about the exchange when one is warranted ("I made an assumption about X that wasn't stated"). These are stored as short-term memories and influence future context.
+After every chat exchange, `brain_notice()` runs in the background and may add a first-person observation about the exchange when one is warranted ("I made an assumption about X that wasn't stated"). These are stored as short-term memories and influence future context.
 
-### RAG (Retrieval-Augmented Generation)
+### RAG (retrieval-augmented chat)
 Every chat query is semantically matched against the knowledge base (`data/knowledge/`). Relevant entries are injected into the system prompt. Luna's knowledge grows from daily reflections, `!research` outputs, and anything you tell her to remember.
 
 ---
@@ -145,7 +145,7 @@ Every chat query is semantically matched against the knowledge base (`data/knowl
 | `!call <user>` | Discord voice call automation |
 | `!play <song/url>` | Play music in Discord voice channel (yt-dlp) |
 | `!podcast [choice]` | Play custom podcast from folder |
-| `!podcast create <topic>` | Luna generates a podcast episode (script + TTS MP3) |
+| `!podcast create <topic>` | Spoken podcast MP3 from a script (TTS — not image or video output) |
 | `!join` / `!leave` / `!pause` / `!resume` / `!skip` / `!stop` / `!queue` | Voice and music controls |
 | `!joinme [message]` | Luna joins your voice channel and speaks via TTS |
 | `!briefing` | Morning briefing: weather, calendar, todos, headlines |
@@ -163,7 +163,7 @@ Every chat query is semantically matched against the knowledge base (`data/knowl
 | `!help` | Full command list |
 
 ### Voice & Audio
-- **TTS** — gTTS for inline chat replies; Edge TTS (Ava Multilingual) default for podcast/audiobook generation, with Fish fallback
+- **TTS** — gTTS for inline chat replies; Edge TTS (Ava Multilingual) default for podcast and audiobook MP3s, with Fish fallback
 - **Discord voice** — join/leave, play music, speak via TTS
 - **Voice input** (STT) — Whisper transcription in Discord voice messages
 - **TranscribeMe** — `/transcribeme/` web page for transcribing audio, translating WhatsApp voice notes, Q&A, reminders
@@ -183,7 +183,7 @@ All browser automations use persistent browser profiles so you stay logged in:
 - **Instagram DM** — search user, open chat, type Luna's rephrased message
 - **Facebook Messenger** — search profile, click Message button, type in the Aa input
 - **WhatsApp Web** — find contact, open chat, type message
-- **Suno** — navigate to create, fill description, trigger generation
+- **Suno** — open create flow in the browser and submit your description (Suno produces the track; Luna does not render images or video)
 - **X (Twitter)** — compose post, fill content, post
 - **Facebook** — share to timeline
 - **YouTube** — transcribe/comment workflows plus one-at-a-time `!yt_like` actions
