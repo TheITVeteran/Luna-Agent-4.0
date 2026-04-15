@@ -3,7 +3,7 @@ Luna 4.5 — compact rewrite of bot.py
 Discord bot + Web UI + Ollama chat + Shadow commands + TTS/STT + automation
 Run: python bot.py
 """
-import asyncio, base64, concurrent.futures, html, io, json, os, queue, random, re, shutil, subprocess, sys
+import asyncio, base64, concurrent.futures, html, io, json, os, queue, random, re, shutil, socket, struct, subprocess, sys
 import tempfile, threading, time, urllib.parse, urllib.request, urllib.error
 import uuid, webbrowser, xml.etree.ElementTree as ET
 from collections import deque
@@ -71,8 +71,9 @@ LUNA_CHAT_GGUF_N_GPU = int(_env("LUNA_CHAT_GGUF_N_GPU", "-1") or "-1")
 LUNA_CHAT_GGUF_THREADS = int(_env("LUNA_CHAT_GGUF_THREADS", "0") or "0")
 OLLAMA_SMALL = _env("OLLAMA_MODEL_SMALL") or OLLAMA_MODEL
 OLLAMA_FALLBACK = _env("OLLAMA_FALLBACK_MODEL", "qwen2.5:1.5b").strip()
-# Vision model for camera — when you use the camera, Luna uses this to describe what it sees (e.g. granite3.2-vision).
-OLLAMA_VISION_MODEL = _env("OLLAMA_VISION_MODEL", "granite3.2-vision").strip()
+# Vision model for camera/screen reads. Defaults to the main chat model when not explicitly set.
+OLLAMA_VISION_MODEL = _env("OLLAMA_VISION_MODEL", OLLAMA_CHAT).strip()
+OLLAMA_VISION_TIMEOUT = max(20, min(240, int(_env("OLLAMA_VISION_TIMEOUT", "90") or "90")))
 # Playwright social flows: Granite observes viewport JPEGs for CAPTCHA/challenge UI (set LUNA_CAPTCHA_OBSERVER=0 to disable).
 # Main chat: short system injection + skip inner-monologue pre-call (faster TTFT). Set LUNA_CHAT_FAST=0 for full prompts.
 def _chat_fast_enabled() -> bool:
@@ -118,6 +119,21 @@ YT_PROFILE_DIR   = _env("YOUTUBE_PROFILE_DIR", os.path.join(_DATA, "youtube_prof
 # Used only for sign-in hints / messages — !yt_comment and !yt_like use YOUTUBE_PROFILE_DIR cookies.
 YOUTUBE_LOGIN_EMAIL = _env("YOUTUBE_LOGIN_EMAIL", "").strip()
 YOUTUBE_API_KEY  = _env("YOUTUBE_API_KEY") or _env("YT_API_KEY")
+
+# VRChat OSC bridge (optional)
+VRCHAT_OSC = _env("VRCHAT_OSC", "0").strip().lower() not in ("0", "false", "no", "off")
+VRCHAT_OSC_HOST = _env("VRCHAT_OSC_HOST", "127.0.0.1").strip() or "127.0.0.1"
+VRCHAT_OSC_PORT = int(_env("VRCHAT_OSC_PORT", "9000") or "9000")
+VRCHAT_CHATBOX = _env("VRCHAT_CHATBOX", "1").strip().lower() not in ("0", "false", "no", "off")
+VRCHAT_CHATBOX_NOTIFY = _env("VRCHAT_CHATBOX_NOTIFY", "0").strip().lower() not in ("0", "false", "no", "off")
+VRCHAT_CHATBOX_MAX = max(16, min(500, int(_env("VRCHAT_CHATBOX_MAX", "140") or "140")))
+VRCHAT_PARAM_NEUTRAL = _env("VRCHAT_PARAM_NEUTRAL", "LunaNeutral")
+VRCHAT_PARAM_HAPPY = _env("VRCHAT_PARAM_HAPPY", "LunaHappy")
+VRCHAT_PARAM_ANGRY = _env("VRCHAT_PARAM_ANGRY", "LunaAngry")
+VRCHAT_PARAM_SAD = _env("VRCHAT_PARAM_SAD", "LunaSad")
+VRCHAT_PARAM_FUN = _env("VRCHAT_PARAM_FUN", "LunaFun")
+VRCHAT_PARAM_SURPRISED = _env("VRCHAT_PARAM_SURPRISED", "LunaSurprised")
+VRCHAT_PARAM_TALKING = _env("VRCHAT_PARAM_TALKING", "LunaTalking")
 IG_BASE          = _env("INSTAGRAM_BASE_URL", "https://www.instagram.com").rstrip("/")
 IG_PROFILE_DIR   = _env("INSTAGRAM_PROFILE_DIR", os.path.join(_DATA, "instagram_profile"))
 OPEN_IG_IN_BROWSER_ONLY = _env("OPEN_IG_IN_BROWSER_ONLY", "").strip().lower() in ("1", "true", "yes")
@@ -130,7 +146,9 @@ MESSENGER_URL    = _env("MESSENGER_URL", FACEBOOK_HOME)
 BROWSER_CHANNEL  = _env("SUNO_BROWSER_CHANNEL", "chrome")
 BROWSER_PATH     = _env("SUNO_BROWSER_PATH")
 MUSIC_DL_DIR       = _env("LUNA_MUSIC_DOWNLOAD_DIR")
-CUSTOM_PODCAST_DIR = _env("CUSTOM_PODCAST_DIR", r"D:\Luna Agent n8n")
+CUSTOM_PODCAST_DIR = _env("CUSTOM_PODCAST_DIR", os.path.join(_BASE, "Luna's creations"))
+AUDIO_PODCAST_DIR  = _env("AUDIO_PODCAST_DIR", os.path.join(_BASE, "Audio-Podcast"))
+AUDIO_PODCAST_URL  = _env("AUDIO_PODCAST_URL", "http://127.0.0.1:5173").strip() or "http://127.0.0.1:5173"
 WORLD_NEWS_FEEDS = [
     "https://feeds.bbci.co.uk/news/world/rss.xml",
     "https://rss.nytimes.com/services/xml/rss/nyt/World.xml",
@@ -2186,6 +2204,8 @@ def _split_tts(text: str, max_chars: int = 80) -> list[str]:
 _tts_stop = False
 _tts_proc: subprocess.Popen | None = None
 _tts_lock = threading.Lock()
+_audio_podcast_proc: subprocess.Popen | None = None
+_audio_podcast_lock = threading.Lock()
 
 def _stop_tts():
     global _tts_stop, _tts_proc
@@ -2231,12 +2251,139 @@ def _play_reply_tts(reply: str) -> None:
     def _run():
         global _tts_stop
         _tts_stop = False
-        for chunk in _split_tts(tts_text):
-            if _tts_stop: break
-            audio = _tts_bytes(chunk)
-            if _tts_stop: break
-            if audio: _play_tts(audio)
+        _vrchat_set_talking(True)
+        try:
+            for chunk in _split_tts(tts_text):
+                if _tts_stop: break
+                audio = _tts_bytes(chunk)
+                if _tts_stop: break
+                if audio: _play_tts(audio)
+        finally:
+            _vrchat_set_talking(False)
     threading.Thread(target=_run, daemon=True).start()
+
+def _start_audio_podcast(project_dir_override: str = "") -> tuple[bool, str, str, str]:
+    global _audio_podcast_proc
+    root = (project_dir_override or AUDIO_PODCAST_DIR).strip() or AUDIO_PODCAST_DIR
+    project_dir = os.path.abspath(os.path.expanduser(root))
+    launch_py = os.path.join(project_dir, "launch.py")
+    if not os.path.isfile(launch_py):
+        return False, "Audio-Podcast launch.py not found", project_dir, AUDIO_PODCAST_URL
+    with _audio_podcast_lock:
+        if _audio_podcast_proc is not None and _audio_podcast_proc.poll() is None:
+            return True, "already_running", project_dir, AUDIO_PODCAST_URL
+        try:
+            flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform == "win32" else 0
+            _audio_podcast_proc = subprocess.Popen(
+                [sys.executable, "launch.py"],
+                cwd=project_dir,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=flags,
+            )
+            return True, "started", project_dir, AUDIO_PODCAST_URL
+        except Exception as e:
+            return False, f"Could not start Audio-Podcast: {e}", project_dir, AUDIO_PODCAST_URL
+
+# ── VRChat OSC bridge (optional) ──────────────────────────────────────────────
+_vrchat_sock: socket.socket | None = None
+_vrchat_lock = threading.Lock()
+
+def _osc_pad4(b: bytes) -> bytes:
+    pad = (4 - (len(b) % 4)) % 4
+    return b + (b"\x00" * pad)
+
+def _osc_str(s: str) -> bytes:
+    return _osc_pad4(s.encode("utf-8") + b"\x00")
+
+def _osc_blob(*args):
+    tags = ","
+    payload = b""
+    for a in args:
+        if isinstance(a, bool):
+            tags += "T" if a else "F"
+        elif isinstance(a, int):
+            tags += "i"
+            payload += struct.pack(">i", a)
+        elif isinstance(a, float):
+            tags += "f"
+            payload += struct.pack(">f", float(a))
+        else:
+            tags += "s"
+            payload += _osc_str(str(a))
+    return _osc_str(tags), payload
+
+def _vrchat_send_osc(address: str, *args):
+    global _vrchat_sock
+    if not VRCHAT_OSC:
+        return
+    try:
+        with _vrchat_lock:
+            if _vrchat_sock is None:
+                _vrchat_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            t, p = _osc_blob(*args)
+            msg = _osc_str(address) + t + p
+            _vrchat_sock.sendto(msg, (VRCHAT_OSC_HOST, VRCHAT_OSC_PORT))
+    except Exception:
+        pass
+
+def _vrchat_plain_text(text: str) -> str:
+    if not text:
+        return ""
+    s = str(text)
+    s = re.sub(r"\[[A-Za-z][A-Za-z0-9_]*\]\s*", "", s)
+    s = re.sub(r"\*\*([^*]+)\*\*", r"\1", s)
+    s = re.sub(r"`([^`]+)`", r"\1", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s[:VRCHAT_CHATBOX_MAX]
+
+def _vrchat_first_tag(text: str) -> str:
+    m = re.search(r"\[([A-Za-z][A-Za-z0-9_]*)\]", str(text or ""))
+    return (m.group(1).strip().upper() if m else "")
+
+def _vrchat_set_param(param: str, on: bool):
+    p = (param or "").strip()
+    if not p:
+        return
+    _vrchat_send_osc(f"/avatar/parameters/{p}", 1.0 if on else 0.0)
+
+def _vrchat_set_talking(on: bool):
+    _vrchat_set_param(VRCHAT_PARAM_TALKING, on)
+
+def _vrchat_apply_emotion_from_reply(reply: str):
+    tag = _vrchat_first_tag(reply)
+    emotion_params = {
+        "neutral": VRCHAT_PARAM_NEUTRAL,
+        "happy": VRCHAT_PARAM_HAPPY,
+        "angry": VRCHAT_PARAM_ANGRY,
+        "sad": VRCHAT_PARAM_SAD,
+        "fun": VRCHAT_PARAM_FUN,
+        "surprised": VRCHAT_PARAM_SURPRISED,
+    }
+    target = "neutral"
+    if tag in {"HAPPY", "JOY", "EXCITED", "LOVE", "SMILE"}:
+        target = "happy"
+    elif tag in {"ANGRY", "ANNOYED", "FRUSTRATED", "MAD"}:
+        target = "angry"
+    elif tag in {"SAD", "SORROW", "CRY", "DOWN"}:
+        target = "sad"
+    elif tag in {"FUN", "PLAYFUL", "GIGGLE", "LAUGH"}:
+        target = "fun"
+    elif tag in {"SURPRISED", "SHOCKED", "WOW"}:
+        target = "surprised"
+
+    for k, param in emotion_params.items():
+        _vrchat_set_param(param, k == target)
+
+def _vrchat_publish_reply(reply: str):
+    if not VRCHAT_OSC:
+        return
+    if VRCHAT_CHATBOX:
+        txt = _vrchat_plain_text(reply)
+        if txt:
+            # /chatbox/input (string text, bool send, bool playNotificationSound)
+            _vrchat_send_osc("/chatbox/input", txt, True, bool(VRCHAT_CHATBOX_NOTIFY))
+    _vrchat_apply_emotion_from_reply(reply)
 
 # ── Reminders ─────────────────────────────────────────────────────────────────
 
@@ -3701,7 +3848,7 @@ def _create_podcast_from_description(description: str) -> tuple[bool, str]:
         return False, "What should the podcast be about? Example: **!podcast create morning routines** or **create a podcast about productivity**."
     root = (CUSTOM_PODCAST_DIR or "").strip()
     if not root or not os.path.isdir(root):
-        return False, f"Set **CUSTOM_PODCAST_DIR** in .env to a writable folder (e.g. D:\\Luna Agent n8n) so I can save the podcast."
+        return False, "Set **CUSTOM_PODCAST_DIR** in .env to a writable folder (e.g. D:\\Luna 5.0\\Luna's creations) so I can save the podcast."
     system = (
         "You are Luna. Write a short podcast script (about 2–3 minutes when read aloud). "
         "Structure: a brief intro (1–2 sentences), 2–3 short segments with clear content, and a brief outro. "
@@ -4867,7 +5014,7 @@ def _create_audiobook_from_research(topic: str, scope: str | None = None) -> tup
         )
     root = (CUSTOM_PODCAST_DIR or "").strip()
     if not root or not os.path.isdir(root):
-        return False, f"Set **CUSTOM_PODCAST_DIR** in .env to a writable folder (e.g. D:\\Luna Agent n8n) so I can save the audiobook."
+        return False, "Set **CUSTOM_PODCAST_DIR** in .env to a writable folder (e.g. D:\\Luna 5.0\\Luna's creations) so I can save the audiobook."
     files_slug = _topic_slug(topic)
     brief_path = _find_latest_topic_file(_RESEARCH_BRIEFS_DIR, files_slug)
     story_path = _find_latest_topic_file(_AUDIOBOOK_SCRIPTS_DIR, files_slug)
@@ -7609,17 +7756,26 @@ _camera_last_image_bytes: bytes | None = None  # for camera chat (Granite thread
 _camera_chat_history: list[dict] = []  # [{role, content}, ...] separate thread with vision model
 _camera_chat_lock = threading.Lock()
 _camera_lock = threading.Lock()
+_vision_infer_lock = threading.Lock()
+_vision_last_error = ""
 
 def _vision_describe_image(
     image_bytes: bytes,
     prompt: str = "Describe briefly what you see in this image. One or two sentences. Be concise. Only describe what is actually visible. Do not invent or hallucinate.",
     *,
-    timeout: int = 30,
+    timeout: int | None = None,
+    wait_for_lock: bool = True,
 ) -> str:
     """Call Ollama vision model (e.g. Granite 3.2 Vision) with the image. Returns description or empty if unavailable."""
+    global _vision_last_error
     if not OLLAMA_VISION_MODEL or not image_bytes:
         return ""
+    lock_acquired = False
     try:
+        lock_acquired = _vision_infer_lock.acquire(blocking=wait_for_lock)
+        if not lock_acquired:
+            _vision_last_error = "vision_busy"
+            return ""
         b64 = base64.b64encode(image_bytes).decode("ascii")
         body = json.dumps({
             "model": OLLAMA_VISION_MODEL,
@@ -7633,12 +7789,20 @@ def _vision_describe_image(
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        with urllib.request.urlopen(req, timeout=timeout) as r:
+        with urllib.request.urlopen(req, timeout=(timeout or OLLAMA_VISION_TIMEOUT)) as r:
             data = json.loads(r.read())
         out = (data.get("response") or "").strip()
+        _vision_last_error = ""
         return out[:600] if out else ""
-    except Exception:
+    except Exception as e:
+        _vision_last_error = str(e)[:200]
         return ""
+    finally:
+        if lock_acquired:
+            try:
+                _vision_infer_lock.release()
+            except Exception:
+                pass
 
 
 _CAPTCHA_VISION_PROMPT = """You are inspecting a screenshot of a web browser page.
@@ -7719,9 +7883,15 @@ def _camera_chat_turn(message: str, image_bytes: bytes | None) -> tuple[bool, st
     lines.append("Assistant:")
     prompt = "\n".join(lines)
     try:
-        reply = _vision_describe_image(img, prompt=prompt)
+        reply = _vision_describe_image(img, prompt=prompt, timeout=max(90, OLLAMA_VISION_TIMEOUT), wait_for_lock=True)
         if not reply:
-            reply = "I couldn't generate a reply. Try again."
+            em = (_vision_last_error or "").lower()
+            if "timed out" in em or "timeout" in em:
+                reply = "Vision timed out on this frame. Try again in a moment."
+            elif "vision_busy" in em:
+                reply = "Vision is busy processing another frame. Try again in a moment."
+            else:
+                reply = f"{OLLAMA_VISION_MODEL} returned no image reply. Try again."
         with _camera_chat_lock:
             _camera_chat_history.append({"role": "assistant", "content": reply})
         return True, reply
@@ -7732,53 +7902,67 @@ def _camera_chat_turn(message: str, image_bytes: bytes | None) -> tuple[bool, st
         return False, str(e)[:200]
 
 def _process_camera_frame(image_bytes: bytes) -> dict:
-    """Run face/object detection and, if OLLAMA_VISION_MODEL set, ask the vision model what it observes."""
+    """Gemma-powered camera analysis: summary + face count + object list from vision model."""
     result = {"objects": [], "face_count": 0, "summary": "", "vision_summary": "", "ts": time.time(), "error": None}
+    if not image_bytes:
+        result["summary"] = "No image data."
+        return result
+    if not OLLAMA_VISION_MODEL:
+        result["summary"] = "No vision model configured."
+        return result
     try:
-        import cv2
-        import numpy as np
-        nparr = np.frombuffer(image_bytes, np.uint8)
-        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-        if img is None:
-            result["error"] = "Could not decode image"
-            result["summary"] = "Could not decode the image."
-            return result
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        face_cascade = cv2.CascadeClassifier(
-            cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+        schema_prompt = (
+            "Analyze this camera frame and return STRICT JSON only (no markdown, no extra text) with keys:\n"
+            "{"
+            "\"summary\": string (max 2 concise sentences), "
+            "\"face_count\": integer >= 0, "
+            "\"objects\": array of short object labels (lowercase, unique, max 12)"
+            "}\n"
+            "Use only visible items. If unsure, omit objects instead of guessing."
         )
-        faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
-        result["face_count"] = len(faces)
-        try:
-            from ultralytics import YOLO
-            model = YOLO("yolov8n.pt")
-            det = model(img, verbose=False)[0]
-            names = getattr(det, "names", {}) or {}
-            for box in det.boxes:
-                cls_id = int(box.cls.item())
-                conf = float(box.conf.item())
-                name = names.get(cls_id, f"object_{cls_id}")
-                result["objects"].append({"label": name, "confidence": round(conf, 2)})
-        except Exception:
-            pass
-        parts = []
-        if result["face_count"]:
-            parts.append(f"{result['face_count']} face(s) detected")
-        if result["objects"]:
-            from collections import Counter
-            counts = Counter(o["label"] for o in result["objects"])
-            parts.append("objects: " + ", ".join(f"{v} {k}" for k, v in counts.most_common(12)))
-        cv_summary = "; ".join(parts) if parts else "No faces or objects detected."
-        # Vision model (e.g. Granite 3.2 Vision): describe what it observes
-        vision_summary = _vision_describe_image(image_bytes)
-        if vision_summary:
-            result["vision_summary"] = vision_summary
-            result["summary"] = vision_summary
+        raw = _vision_describe_image(image_bytes, prompt=schema_prompt, timeout=45)
+        parsed = None
+        if raw:
+            try:
+                parsed = json.loads(raw)
+            except Exception:
+                m = re.search(r"\{.*\}", raw, flags=re.S)
+                if m:
+                    try:
+                        parsed = json.loads(m.group(0))
+                    except Exception:
+                        parsed = None
+        if isinstance(parsed, dict):
+            summary = str(parsed.get("summary") or "").strip()
+            face_count = parsed.get("face_count", 0)
+            try:
+                face_count = max(0, int(face_count))
+            except Exception:
+                face_count = 0
+            objs_in = parsed.get("objects") or []
+            labels: list[str] = []
+            if isinstance(objs_in, list):
+                for o in objs_in:
+                    lab = str(o or "").strip().lower()
+                    if not lab:
+                        continue
+                    if lab not in labels:
+                        labels.append(lab)
+                    if len(labels) >= 12:
+                        break
+            result["face_count"] = face_count
+            result["objects"] = [{"label": lab, "confidence": 1.0} for lab in labels]
+            if summary:
+                result["vision_summary"] = summary
+                result["summary"] = summary
+                return result
+        # Fallback: plain description still from the same vision model.
+        plain = _vision_describe_image(image_bytes, timeout=max(60, OLLAMA_VISION_TIMEOUT), wait_for_lock=False)
+        if plain:
+            result["vision_summary"] = plain
+            result["summary"] = plain
         else:
-            result["summary"] = cv_summary
-    except ImportError as e:
-        result["error"] = str(e)
-        result["summary"] = "Install opencv-python for camera: pip install opencv-python"
+            result["summary"] = "No scene details returned by vision model."
     except Exception as e:
         result["error"] = str(e)
         result["summary"] = f"Camera processing error: {e}"
@@ -9414,6 +9598,8 @@ def api_status():
               "chat_model": OLLAMA_CHAT, "shadow_model": OLLAMA_MODEL,
               "chat_model_display": _model_status_label(OLLAMA_CHAT),
               "shadow_model_display": _model_status_label(OLLAMA_MODEL),
+              "vision_model": OLLAMA_VISION_MODEL,
+              "vision_model_display": _model_status_label(OLLAMA_VISION_MODEL),
               "chat_backend": ("gguf" if _gguf_path_valid() else "ollama"),
               "linked_scope": LINKED_SCOPE or None}
     status.update(_get_working_status())
@@ -10155,6 +10341,7 @@ def _execute_chat_turn(scope: str, msg: str, data: dict | None = None, *, chat_s
         if chat_source == "twitch":
             a = _strip_luna_tags_for_twitch(a)
         append_exchange(scope, msg, a)
+        _vrchat_publish_reply(a)
         return a
 
     pending = _pending_file_update.pop(scope, None) if chat_source == "web" else None
@@ -10401,6 +10588,10 @@ def api_stream():
             yield f"data: {json.dumps({'chunk': chunk}, ensure_ascii=False)}\n\n"
         reply = _sanitize_luna_reply("".join(full).strip())
         append_exchange(scope, msg, reply)
+        try:
+            _vrchat_publish_reply(reply)
+        except Exception:
+            pass
 
         def _stream_post_memory():
             try:
@@ -10429,6 +10620,21 @@ def api_obs_start():
         return jsonify({"ok": True, "path": path})
     except Exception as e:
         return jsonify({"error": f"Could not launch OBS: {e}", "path": path}), 500
+
+@web.route("/api/audio-podcast/start", methods=["POST"])
+def api_audio_podcast_start():
+    """Launch Audio-Podcast app (launch.py) and optionally open its UI URL."""
+    data = request.get_json(force=True, silent=True) or {}
+    ok, status, project_dir, url = _start_audio_podcast((data.get("project_dir") or "").strip())
+    if not ok:
+        code = 404 if "not found" in status.lower() else 500
+        return jsonify({"error": status, "project_dir": project_dir, "url": url}), code
+    if bool(data.get("open_ui", True)):
+        try:
+            webbrowser.open(url)
+        except Exception:
+            pass
+    return jsonify({"ok": True, "status": status, "project_dir": project_dir, "url": url})
 
 @web.route("/api/tts", methods=["POST"])
 def api_tts():

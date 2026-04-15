@@ -2003,7 +2003,7 @@
     </div>
     <div class="camera-popup-analysis empty" id="camera-popup-analysis">Analyzing…</div>
     <div class="camera-popup-chat" id="camera-popup-chat">
-      <div class="camera-popup-chat-title">Chat with Granite (vision) — separate thread</div>
+      <div class="camera-popup-chat-title" id="camera-popup-chat-title">Chat with vision model — separate thread</div>
       <div class="camera-popup-chat-messages" id="camera-popup-chat-messages"></div>
       <div class="camera-popup-chat-row">
         <input type="text" class="camera-popup-chat-input" id="camera-popup-chat-input" placeholder="Ask about what you see…" />
@@ -2203,6 +2203,13 @@ async function checkStatus() {
     const modelEl = document.getElementById('stat-model');
     const m = (d.chat_model_display || d.chat_model || '').trim();
     modelEl.textContent = m ? m.toUpperCase() : '—';
+    const camTitle = document.getElementById('camera-popup-chat-title');
+    if (camTitle) {
+      const vm = (d.vision_model_display || d.vision_model || '').trim();
+      camTitle.textContent = vm
+        ? ('Chat with ' + vm + ' (vision) — separate thread')
+        : 'Chat with vision model — separate thread';
+    }
     updateWorkingStatus(d);
   } catch {
     document.getElementById('stat-ollama').textContent = 'OFFLINE';

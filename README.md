@@ -23,7 +23,7 @@ She is not a chatbot wrapper. She is a continuous presence that learns from what
 ### New / Notable
 - **YouTube traction analytics**: `!yt_analytics [days] [limit]` (API key optional; scrape fallback available).
 - **Live Discord status control**: `!status <text>` / `!status clear` / `!status <type> <text>`.
-- **LISA GGUF chat default** for Luna conversation.
+- **Optional local GGUF chat** via `LUNA_CHAT_GGUF` + `OLLAMA_CHAT_MODEL` routing.
 - **Claude-like communication tuning** in system prompt (less robotic / less canned assistant phrasing).
 
 | Interface | What you do there |
@@ -36,12 +36,11 @@ She is not a chatbot wrapper. She is a continuous presence that learns from what
 ## Architecture Overview
 
 ```
-bot.py                  ← Main entry: Discord bot + Flask web server + all commands
+bot_main.py             ← Main entry: Discord bot + Flask web server + all commands
 ├── luna_memory.py      ← Persistent 3-tier memory (core / long-term / short-term); disk-backed
 ├── luna_brain.py       ← LLM-powered memory filter + metacognitive self-observer
 ├── luna_profile.py     ← Persistent user profile (name, goals, preferences); disk-backed
 ├── luna_conversation.py← Recent conversation history for context injection
-├── luna_profile.py     ← Per-user profile
 ├── shadow_agent.py     ← "Shadow, do X" natural-language command executor
 ├── celine.py           ← Voice clip processing utilities
 ├── luna_transcribeme.py← TranscribeMe blueprint (transcribe, translate, remind)
@@ -130,10 +129,13 @@ Every chat query is semantically matched against the knowledge base (`data/knowl
 | `!summarize <url or text>` | Concise summary + key points |
 | `!research <topic>` | Source-driven research brief (for writing) |
 | `!research_story <topic>` | Story-style script for audiobook narration |
-| `!audiobook create <topic> [duration:30]` | MP3 narration: default ~15–20 min; use `duration:30`, `45`, `60`, or `90` for long multi-chapter listens (YouTube-style length) |
+| `!audiobook create <topic> [duration:30]` | Create chaptered audiobook MP3 output from research/story context |
+| `!audiobook continue` / `!audiobook cancel` | Continue remaining chapters one-by-one, or cancel the pending queue |
 | `!suno <description>` | Create a Suno song via browser automation |
+| `!suno_ready` | Mark Suno browser session as logged in/ready |
 | `!share_song` / `!share_facebook` | Share latest Suno song to X or Facebook |
 | `!yt_comment <url>` | Transcribe YouTube video + post AI comment with real context |
+| `!yt_like <url>` | Like one YouTube video via Playwright (same YouTube profile) |
 | `!yt_analytics [days] [limit]` | Rank top channel videos by traction (views velocity + engagement); uses API if key exists, otherwise scrape fallback |
 | `!status <text>` / `!status clear` | Change Luna's live Discord bot status (linked/admin) |
 | `!ig_dm <user> [message]` | Instagram DM (browser automation, Luna rephrases) |
@@ -144,7 +146,7 @@ Every chat query is semantically matched against the knowledge base (`data/knowl
 | `!play <song/url>` | Play music in Discord voice channel (yt-dlp) |
 | `!podcast [choice]` | Play custom podcast from folder |
 | `!podcast create <topic>` | Luna generates a podcast episode (script + TTS MP3) |
-| `!skip` / `!stop` / `!queue` / `!pause` / `!resume` | Music controls |
+| `!join` / `!leave` / `!pause` / `!resume` / `!skip` / `!stop` / `!queue` | Voice and music controls |
 | `!joinme [message]` | Luna joins your voice channel and speaks via TTS |
 | `!briefing` | Morning briefing: weather, calendar, todos, headlines |
 | `!analytics_screen` | Vision read of analytics on screen (web UI **Read screen analytics** can pick window/monitor) |
@@ -159,25 +161,6 @@ Every chat query is semantically matched against the knowledge base (`data/knowl
 | `remind me at 7pm to …` | Set reminder → Discord DM + TTS voice at the right time |
 | `retry` | Retry last failed command with different strategies |
 | `!help` | Full command list |
-
-### AI Image Generation
-- Command: `!genimg <description>`
-- Uses **local Stable Diffusion XL** on your GPU — no API key, no cloud
-- Falls back to Pollinations.ai API if `POLLINATIONS_API_KEY` is set in `.env`
-- Generates 1024×1024 PNG, sent as Discord attachment
-- First run downloads ~6GB SDXL model weights (cached after that)
-- Natural language: `generate an image of a sunset over mountains`
-
-### AI Video Generation
-- Command: `!genvid <description> [duration:30]`
-- Luna writes N scene descriptions from your concept using Ollama
-- Generates one SDXL image per scene
-- Applies **Ken Burns zoom/pan** effects (alternating zoom-in / zoom-out per scene)
-- **Crossfade transitions** between scenes
-- Encodes to **H.264 MP4** (via bundled FFmpeg through imageio)
-- Duration: 5–60 seconds (default 30); ~6 scenes for 30s
-- Sent as Discord attachment if under 25MB, otherwise saves to `_tmp_vid/`
-- Natural language: `create a video about a journey through space`
 
 ### Voice & Audio
 - **TTS** — gTTS for inline chat replies; Edge TTS (Ava Multilingual) default for podcast/audiobook generation, with Fish fallback
@@ -203,7 +186,7 @@ All browser automations use persistent browser profiles so you stay logged in:
 - **Suno** — navigate to create, fill description, trigger generation
 - **X (Twitter)** — compose post, fill content, post
 - **Facebook** — share to timeline
-- **YouTube** — transcribe video via Whisper, generate contextual comment, post
+- **YouTube** — transcribe/comment workflows plus one-at-a-time `!yt_like` actions
 - All DMs are rephrased by Luna in her own words (not copy-pasted from your input)
 
 ### Autonomous Evolution
@@ -242,7 +225,7 @@ ollama pull granite3.2-vision                # vision (optional, for camera)
 pip install llama-cpp-python
 ```
 
-In `.env` set **`LUNA_CHAT_GGUF`** to the full path of that file. Keep **`OLLAMA_CHAT_MODEL`** in sync with the chat label Luna uses (default in `bot.py` is `mradermacher/meta-llama-Meta-Llama-3-8B-Instruct-fine-tune-english-LISA-i1-GGUF`); routing to GGUF requires the **same string** as `OLLAMA_CHAT_MODEL` and a valid file path.
+In `.env` set **`LUNA_CHAT_GGUF`** to the full path of that file. Keep **`OLLAMA_CHAT_MODEL`** in sync with the chat label Luna uses; routing to GGUF requires the **same string** as `OLLAMA_CHAT_MODEL` and a valid file path.
 
 GPU on Windows: you may need a CUDA build of `llama-cpp-python`; see the [project docs](https://github.com/abetlen/llama-cpp-python#installation). Tune **`LUNA_CHAT_GGUF_N_GPU`** (layers offloaded) and **`LUNA_CHAT_GGUF_N_CTX`** if needed.
 
@@ -257,12 +240,6 @@ pip install -r requirements.txt
 python -m playwright install chromium
 ```
 
-For AI image/video generation (requires NVIDIA GPU):
-```bash
-# Already included in requirements.txt:
-# torch, diffusers, transformers, accelerate, cv2, imageio, imageio-ffmpeg
-```
-
 ### 4. Environment
 Copy `.env.example` to `.env` and set at minimum:
 
@@ -273,8 +250,10 @@ LINKED_DISCORD_USER_ID=your_discord_user_id
 # Optional — defaults shown
 OLLAMA_BASE_URL=http://127.0.0.1:11434
 OLLAMA_MODEL=llama3.2:latest
-# OLLAMA_CHAT_MODEL defaults in bot.py to:
-# mradermacher/meta-llama-Meta-Llama-3-8B-Instruct-fine-tune-english-LISA-i1-GGUF
+# Optional chat override; if omitted, chat uses OLLAMA_MODEL
+# OLLAMA_CHAT_MODEL=your-chat-model
+# Optional local GGUF path for chat routing:
+# LUNA_CHAT_GGUF=D:\models\your-model.gguf
 OLLAMA_FALLBACK_MODEL=qwen2.5:1.5b
 OLLAMA_VISION_MODEL=granite3.2-vision
 
@@ -287,13 +266,14 @@ LUNA_STYLE=grounded   # grounded | creative | intimate
 DISCORD_STATUS_TYPE=listening
 DISCORD_STATUS_TEXT=lisa vibes
 
-# Optional — Pollinations.ai fallback for image gen (if no GPU)
-POLLINATIONS_API_KEY=your_key
-
 # Social media profile dirs (browser sessions stay logged in)
 SUNO_PROFILE_DIR=data/suno_profile
+X_PROFILE_DIR=data/x_profile
+YOUTUBE_PROFILE_DIR=data/youtube_profile
 IG_PROFILE_DIR=data/instagram_profile
 FB_PROFILE_DIR=data/facebook_profile
+WHATSAPP_WEB_PROFILE_DIR=data/whatsapp_web_profile
+MESSENGER_PROFILE_DIR=data/messenger_profile
 
 # Custom podcast folder
 CUSTOM_PODCAST_DIR=D:\your\podcast\folder
@@ -301,7 +281,7 @@ CUSTOM_PODCAST_DIR=D:\your\podcast\folder
 
 ### 5. Run
 ```bash
-python bot.py
+python bot_main.py
 ```
 
 Web UI: **http://127.0.0.1:5050** · Discord bot connects automatically.
@@ -317,7 +297,7 @@ Web UI: **http://127.0.0.1:5050** · Discord bot connects automatically.
 | `DISCORD_ADMIN_ID` | optional | Admin override |
 | `OLLAMA_BASE_URL` | `http://127.0.0.1:11434` | Ollama API base |
 | `OLLAMA_MODEL` | `llama3.2:latest` | Code / Shadow / heavy tasks |
-| `OLLAMA_CHAT_MODEL` | `mradermacher/meta-llama-Meta-Llama-3-8B-Instruct-fine-tune-english-LISA-i1-GGUF` | **Luna conversation** label; must match for GGUF routing |
+| `OLLAMA_CHAT_MODEL` | same as `OLLAMA_MODEL` | Chat model override; must match when routing chat to GGUF |
 | `LUNA_CHAT_GGUF` | — | Path to a local `.gguf` file for Luna chat (bypasses Ollama for chat) |
 | `LUNA_CHAT_GGUF_N_CTX` / `N_GPU` / `THREADS` | `8192` / `-1` / auto | llama-cpp load tuning |
 | `OLLAMA_SMALL` | same as `OLLAMA_MODEL` | Fast model; override with `OLLAMA_MODEL_SMALL` |
@@ -326,7 +306,6 @@ Web UI: **http://127.0.0.1:5050** · Discord bot connects automatically.
 | `YOUTUBE_CHANNEL_ID` | existing default | Channel analyzed by `!yt_analytics` and channel-song workflows |
 | `LUNA_STYLE` | `grounded` | Speaking profile (`grounded`, `creative`, `intimate`) |
 | `DISCORD_STATUS_TYPE` / `DISCORD_STATUS_TEXT` | `listening` / empty | Bot presence type/text on startup |
-| `POLLINATIONS_API_KEY` | optional | Fallback for image gen without GPU |
 | `CUSTOM_PODCAST_DIR` | — | Folder scanned by `!podcast` |
 | `LINKED_DISCORD_USER_ID` | — | Discord user who is "linked" (gets proactive DMs, reminders, plays) |
 | Profile dirs | `data/*_profile` | Browser session persistence for each platform |
@@ -383,10 +362,9 @@ Shadow, scrape https://example.com get me the prices
 
 Or just say it directly — Luna recognizes many patterns without the Shadow prefix:
 ```
-generate an image of a castle at night
-create a video of waves on a beach
 research quantum computing
 dm Alex about the project update
+brief me for today
 ```
 
 ---
@@ -394,7 +372,7 @@ dm Alex about the project update
 ## Project Layout
 
 ```
-bot.py                  Main bot — Discord + Flask + all logic
+bot_main.py             Main bot — Discord + Flask + all logic
 luna_memory.py          Disk-backed 3-tier memory
 luna_brain.py           LLM memory filter + metacognitive observer
 luna_profile.py         Disk-backed user profiles
@@ -408,7 +386,6 @@ transcribeme.html       TranscribeMe page
 translate.html          Translation page
 requirements.txt        Python dependencies
 data/                   All persistent state (see Data Files above)
-_tmp_vid/               Temp folder for generated images/videos
 Luna's creations/       Code and scripts Luna writes autonomously
 ```
 

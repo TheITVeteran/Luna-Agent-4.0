@@ -138,10 +138,11 @@
     <button type="button" class="primary" id="btn-embed-load" style="margin-top:8px">Load page on screen</button>
     <p class="embed-hint">Sharing a tab only mirrors pixels — browsers don’t expose its address. Copy the tab’s URL here to open the same page <strong>inside</strong> the studio and click, scroll, and type there. Some sites block embedding.</p>
   </div>
-  <label>Second screen (camera / VSeeFace)</label>
+  <label>Second screen (camera / desktop apps)</label>
   <div class="row">
     <button type="button" id="btn-aux-camera">Camera</button>
     <button type="button" id="btn-aux-vseeface">VSeeFace window</button>
+    <button type="button" id="btn-aux-app">Desktop app</button>
   </div>
   <label for="cam-select" id="cam-label">Camera</label>
   <select id="cam-select" disabled>
@@ -207,6 +208,7 @@ const embedUrlInput = document.getElementById("embed-url");
 const btnEmbedLoad = document.getElementById("btn-embed-load");
 const btnAuxCamera = document.getElementById("btn-aux-camera");
 const btnAuxVseeface = document.getElementById("btn-aux-vseeface");
+const btnAuxApp = document.getElementById("btn-aux-app");
 
 let renderer, css3dRenderer, scene, camera, controls, orbMesh, orbBaseScale;
 /** Arrow keys: move camera + orbit target on the floor plane (m/s scale uses dt). */
@@ -1605,6 +1607,40 @@ if (btnAuxVseeface) {
       else setStatus(`❌ Second screen VSeeFace failed: ${String(e?.message || e)}`);
     } finally {
       btnAuxVseeface.disabled = false;
+    }
+  });
+}
+
+async function startAuxDesktopCapture(label = "desktop app window") {
+  if (!navigator.mediaDevices?.getDisplayMedia) throw new Error("getDisplayMedia not supported");
+  if (auxCaptureStream) {
+    auxCaptureStream.getTracks().forEach((t) => t.stop());
+    auxCaptureStream = null;
+  }
+  const disp = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+  const vt = disp.getVideoTracks()[0];
+  if (!vt) throw new Error("No video track selected");
+  vt.addEventListener("ended", () => {
+    setStatus("<span style='color:#e8a088'>Second screen share ended.</span>");
+  });
+  auxCaptureStream = disp;
+  hiddenVideoAux.srcObject = new MediaStream([vt]);
+  await hiddenVideoAux.play().catch(() => {});
+  attachAuxVideoTexture();
+  setStatus(`<strong>Second screen:</strong> ${label} live.`);
+}
+
+if (btnAuxApp) {
+  btnAuxApp.addEventListener("click", async () => {
+    btnAuxApp.disabled = true;
+    try {
+      await startAuxDesktopCapture("desktop app window");
+    } catch (e) {
+      const n = e?.name || "";
+      if (n === "AbortError") setStatus("Second screen share cancelled.");
+      else setStatus(`❌ Second screen desktop-app failed: ${String(e?.message || e)}`);
+    } finally {
+      btnAuxApp.disabled = false;
     }
   });
 }
