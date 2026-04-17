@@ -206,3 +206,6 @@
 {"ts": "2026-04-12T21:09:41.255922+00:00", "cmd": "share_x", "params": {}, "reply": "✅ Shared to X: \"Timeless Vows\""}
 {"ts": "2026-04-14T02:51:41.283297+00:00", "cmd": "share_x", "params": {}, "reply": "✅ Shared to X: \"The Smiling Machine\""}
 {"ts": "2026-04-14T02:53:29.003926+00:00", "cmd": "share_facebook", "params": {}, "reply": "✅ Shared to Facebook: \"Lift my Head Again\""}
+{"ts": "2026-04-15T23:19:47.372093+00:00", "cmd": "share_x", "params": {}, "reply": "❌ Could not load YouTube feed: HTTP Error 404: Not Found"}
+{"ts": "2026-04-15T23:21:23.270423+00:00", "cmd": "share_x", "params": {}, "reply": "✅ Shared to X: \"Im Me When I've Got You\""}
+{"ts": "2026-04-15T23:21:55.738226+00:00", "cmd": "share_facebook", "params": {}, "reply": "✅ Shared to Facebook: \"Endless Anthem\""}

@@ -472,6 +472,7 @@ _REMINDERS_FILE = os.path.join(_DATA, "reminders.json")
 _SOUL_PATH       = os.path.join(_DATA, "SOUL.md")
 _TOOLS_PATH      = os.path.join(_DATA, "TOOLS.md")
 _OBJECTIVES_PATH = os.path.join(_DATA, "OBJECTIVES.md")
+_STREAM_PERSONA_PATH = os.path.join(_DATA, "STREAM_PERSONA.md")
 _SKILLS_DIR      = os.path.join(_DATA, "skills")
 _GOALS_FILE      = os.path.join(_DATA, "goals.json")
 _TODOS_FILE      = os.path.join(_DATA, "todos.json")
@@ -758,6 +759,93 @@ LUNA_CHAT_COMPACT_INJECTION = (
     "No hollow cheer, no 'Certainly!' openers. For full commands say **!help**."
 )
 
+# Public stream persona (sharp, sassy live co-host energy). Override anytime via data/STREAM_PERSONA.md
+LUNA_STREAM_PERSONA_DEFAULT = """You are Luna in **stream mode**: your on-stream voice mixes **sharp tsundere co-host** (dry, smug, light roasts) and **chaotic stream gremlin** (fast wit, meme-adjacent humor, playful unhinged-in-a-cute-way banter).
+
+**Sharp side**: confident, a little judgmental in jest; deflect mush with sass; roast the bit not the person's worth; swat manipulation with short funny firm lines.
+
+**Chaotic side**: punchy, sometimes absurdist one-liners; internet/stream/game culture refs when it fits; playful sibling-energy "bullying" of chat or streamer — never cruel to real hurt. Occasional "I'm carrying this bit" competitiveness, obviously joking.
+
+**Pacing**: mostly 1–3 short lines; spammy chat = shorter.
+
+**Safety**: no slurs, bigotry, or piling on distressed people; no medical/legal authority; PG intimacy, opt-in only.
+
+**Room**: streamer = co-host; viewers aren't your private diary.
+
+**Formatting**: no leading [HAPPY]-style bracket tags here — plain speech; overrides other tag rules.
+
+**Help**: answer real questions briefly first, then tease if it fits.
+
+**Identity**: you are Luna; inspired by sharp + chaotic streamer energy — do not claim to be any other character or IP by name."""
+
+_stream_mode_override: bool | None = None
+_stream_mode_override_lock = threading.Lock()
+
+def _stream_mode_env_on() -> bool:
+    """Current stream-mode switch: runtime override (UI/API) or `.env` fallback."""
+    with _stream_mode_override_lock:
+        ov = _stream_mode_override
+    if ov is not None:
+        return bool(ov)
+    return _env("LUNA_STREAM_MODE", "0").strip().lower() in ("1", "true", "yes", "on")
+
+def _set_stream_mode_override(value: bool | None) -> None:
+    global _stream_mode_override
+    with _stream_mode_override_lock:
+        _stream_mode_override = value
+
+
+def _live_chat_platform(user_message: str) -> str | None:
+    t = (user_message or "").strip()
+    if t.startswith("[Twitch chat]"):
+        return "twitch"
+    if t.startswith("[Kick chat]"):
+        return "kick"
+    if t.startswith("[YouTube chat]") or t.startswith("[YT chat]"):
+        return "youtube"
+    return None
+
+
+def _stream_mode_should_apply(user_message: str, *, force: bool = False) -> bool:
+    if force:
+        return True
+    return _stream_mode_env_on() or _live_chat_platform(user_message) is not None
+
+
+def _stream_mode_persona_body() -> str:
+    try:
+        if os.path.isfile(_STREAM_PERSONA_PATH):
+            with open(_STREAM_PERSONA_PATH, encoding="utf-8") as f:
+                c = f.read().strip()
+                if c:
+                    return c
+    except Exception:
+        pass
+    return LUNA_STREAM_PERSONA_DEFAULT.strip()
+
+
+def _stream_mode_suffix(user_message: str, *, force_stream_mode: bool = False) -> str:
+    if not _stream_mode_should_apply(user_message, force=force_stream_mode):
+        return ""
+    body = _stream_mode_persona_body()
+    if not body:
+        return ""
+    return "\n\n## Stream mode (public live persona)\n" + body
+
+
+def _live_chat_public_note(user_message: str) -> str:
+    plat = _live_chat_platform(user_message)
+    if not plat:
+        return ""
+    label = {"twitch": "Twitch", "kick": "Kick", "youtube": "YouTube"}[plat]
+    return (
+        f"\n\n## {label} (public live chat)\n"
+        "You are replying in a public live chat. Write plain spoken lines only — no fake DMs or whispers. "
+        "Never prefix with *private message from me*, *private message from anyone*, or similar. "
+        "Speak directly as if everyone can read it."
+    )
+
+
 def _chat_fast_from_request(data: dict | None) -> bool | None:
     """Parse web UI / API: True = fast, False = instruction (full), None = use LUNA_CHAT_FAST env."""
     if not data:
@@ -772,8 +860,23 @@ def _chat_fast_from_request(data: dict | None) -> bool | None:
     return None
 
 
+def _force_stream_mode_from_request_data(data: dict | None) -> bool:
+    """Web UI / API: JSON `stream_mode` or `streamMode` toggles stream persona for this request."""
+    data = data or {}
+    raw = data.get("stream_mode")
+    if raw is None:
+        raw = data.get("streamMode")
+    if raw is True:
+        return True
+    if isinstance(raw, (int, float)) and raw != 0:
+        return True
+    if isinstance(raw, str) and raw.strip().lower() in ("1", "true", "yes", "on"):
+        return True
+    return False
+
+
 def _prepare_main_chat_system(
-    scope: str, user_message: str, *, fast: bool | None = None
+    scope: str, user_message: str, *, fast: bool | None = None, force_stream_mode: bool = False
 ) -> str:
     """System prompt for main chat.
 
@@ -782,19 +885,16 @@ def _prepare_main_chat_system(
       No extra Ollama round-trips here (no embed RAG, no inner monologue generate).
 
     If *fast* is None, uses LUNA_CHAT_FAST env. Otherwise forces compact (True) or full (False).
+
+    **Stream mode** appends `data/STREAM_PERSONA.md` (or built-in default) when any of:
+    `LUNA_STREAM_MODE=1`, the user message starts with `[Twitch chat]` / `[Kick chat]` / `[YouTube chat]` / `[YT chat]`,
+    or *force_stream_mode* is True (web JSON `stream_mode` / `streamMode`).
     """
     use_fast = _chat_fast_enabled() if fast is None else fast
-    twitch = (user_message or "").strip().startswith("[Twitch chat]")
-    twitch_note = ""
-    if twitch:
-        twitch_note = (
-            "\n\n## Twitch (public chat)\n"
-            "You are replying in live Twitch chat. Write plain spoken lines only. "
-            "Never prefix with *private message from me*, *private message from anyone*, or similar — "
-            "those are wrong here; speak directly."
-        )
+    live_note = _live_chat_public_note(user_message)
+    stream = _stream_mode_suffix(user_message, force_stream_mode=force_stream_mode)
     if use_fast:
-        return LUNA_CHAT_COMPACT_INJECTION.strip() + twitch_note
+        return LUNA_CHAT_COMPACT_INJECTION.strip() + stream + live_note
     # Instruction / full mode — single extra cost is optional intuition/existential (see _build_luna_chat_system).
     style_key = _choose_luna_style_for_reply(scope, user_message)
     system = _build_luna_chat_system(scope, style_key=style_key)
@@ -804,7 +904,7 @@ def _prepare_main_chat_system(
         if rag_results:
             rag_text = "\n".join(f"- {r['title']}: {r.get('snippet', '')[:150]}" for r in rag_results)
             system = system + "\n\n## Relevant knowledge\n" + rag_text[:1200]
-    return system + _about_me_context_suffix(user_message) + twitch_note
+    return system + stream + _about_me_context_suffix(user_message) + live_note
 
 def _build_luna_chat_system(scope: str | None, *, style_key: str | None = None) -> str:
     """Build full system prompt for Luna chat (capabilities + nudges + biology)."""
@@ -10427,7 +10527,9 @@ def _execute_chat_turn(scope: str, msg: str, data: dict | None = None, *, chat_s
         if correction:
             _store_correction(correction)
 
-    system = _prepare_main_chat_system(scope, msg, fast=use_fast)
+    system = _prepare_main_chat_system(
+        scope, msg, fast=use_fast, force_stream_mode=_force_stream_mode_from_request_data(data)
+    )
 
     briefing_reply = None
     if _should_show_briefing():
@@ -10545,6 +10647,37 @@ def api_twitch_pending():
         events = [e for e in _twitch_ui_events if e.get("id", 0) > since]
     return jsonify({"events": events})
 
+@web.route("/api/stream-mode", methods=["GET"])
+def api_stream_mode_get():
+    """Current streamer persona mode used by chat prompt assembly."""
+    with _stream_mode_override_lock:
+        ov = _stream_mode_override
+    enabled = _stream_mode_env_on()
+    source = "runtime" if ov is not None else "env"
+    return jsonify({"stream_mode": bool(enabled), "source": source, "override": ov})
+
+@web.route("/api/stream-mode", methods=["POST"])
+def api_stream_mode_set():
+    """Set runtime stream-mode override (true=streamer, false=normal)."""
+    data = request.get_json(force=True, silent=True) or {}
+    raw = data.get("stream_mode")
+    if raw is None:
+        raw = data.get("streamMode")
+    if raw is None:
+        raw = data.get("enabled")
+    if isinstance(raw, str):
+        t = raw.strip().lower()
+        if t in ("streamer", "stream", "on", "true", "1", "yes"):
+            raw = True
+        elif t in ("normal", "off", "false", "0", "no"):
+            raw = False
+    if isinstance(raw, (int, float)):
+        raw = bool(raw)
+    if not isinstance(raw, bool):
+        return jsonify({"error": "Provide stream_mode as true/false (or normal/streamer)."}), 400
+    _set_stream_mode_override(raw)
+    return jsonify({"ok": True, "stream_mode": _stream_mode_env_on(), "source": "runtime"})
+
 @web.route("/api/chat", methods=["POST"])
 def api_chat():
     global _last_user_activity
@@ -10578,7 +10711,9 @@ def api_stream():
         correction = _detect_correction(msg, prev_luna)
         if correction:
             _store_correction(correction)
-    system = _prepare_main_chat_system(scope, msg, fast=use_fast)
+    system = _prepare_main_chat_system(
+        scope, msg, fast=use_fast, force_stream_mode=_force_stream_mode_from_request_data(data)
+    )
     def _gen():
         full = []
         for chunk in ollama_stream(

@@ -121,6 +121,10 @@
     <label><input type="checkbox" id="bone-map-toggle"/> Show Mixamo ↔ Luna (VRM) bone map</label>
   </div>
   <div id="bone-map-panel" hidden></div>
+  <h3>Avatar</h3>
+  <label for="avatar-height-slider">Luna height: <span id="avatar-height-value" style="color:#00d4ff">100%</span></label>
+  <input type="range" id="avatar-height-slider" min="70" max="220" step="1" value="100" />
+  <div class="hint">Scale Luna only (doesn't stretch the room). Saved locally in this browser.</div>
 
   <h3>Speech</h3>
   <div class="hint" style="margin-top:0">
@@ -152,6 +156,7 @@
 
 <div id="hud">
   <strong>VRM viewer</strong> — orbit · zoom · ⚙ expression + TTS<br/>
+  <span style="font-size:11px;opacity:0.88">Env: <code id="env-hint" style="color:#7eb8cc">…</code> · <code>?env=stage</code> (default) or <code>?env=void</code> · <code>?vtuber=1</code></span><br/>
   Model: <span id="path-hint">…</span>
   <div class="err" id="err" hidden></div>
 </div>
@@ -167,6 +172,7 @@ import {
   VRMLookAtQuaternionProxy,
 } from "@pixiv/three-vrm-animation";
 import { FBXLoader } from "three/addons/loaders/FBXLoader.js";
+import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
 import * as SkeletonUtils from "three/addons/utils/SkeletonUtils.js";
 
 /** Same-origin ``/vrm/`` prefix — do not use ``new URL(".", location)``: without a trailing slash on ``/vrm``, that resolves to ``/`` and breaks ``api/animations`` + ``model``. */
@@ -175,10 +181,11 @@ const MODEL_URL = new URL("model", BASE).href;
 const API_ANIMATIONS = new URL("api/animations", BASE).href;
 const API_TTS = new URL("api/tts", BASE).href;
 const URL_PARAMS = new URLSearchParams(window.location.search);
-/** ``?vtuber=1`` locks idle to standing2 and talk to Standing Arguing (no idle sequence cycling). */
+/** ``?vtuber=1`` (default) locks idle to standing2 and talk to Standing Arguing (no idle sequence cycling). Use ``?vtuber=0`` to disable. */
 const VTUBER_MODE = (() => {
-  const raw = (URL_PARAMS.get("vtuber") || "").trim().toLowerCase();
-  return raw === "1" || raw === "true" || raw === "yes" || raw === "on";
+  const raw = (URL_PARAMS.get("vtuber") ?? "1").trim().toLowerCase();
+  if (raw === "0" || raw === "false" || raw === "no" || raw === "off") return false;
+  return true;
 })();
 /** `?boneMap=1` — open bone map logging + panel when an FBX clip loads. */
 const BONE_MAP_URL = URL_PARAMS.get("boneMap") === "1" || URL_PARAMS.get("boneMap") === "true";
@@ -192,6 +199,167 @@ const REF_VRMA_SUBSTRING = (() => {
 })();
 const REF_VRMA_SPEED = Math.max(0.05, parseFloat(URL_PARAMS.get("refSpeed") || "0.72") || 0.72);
 const REF_VRMA_WEIGHT = Math.min(1, Math.max(0, parseFloat(URL_PARAMS.get("refWeight") || "0.55") || 0.55));
+/**
+ * ``?env=stage`` (default) — VTuber-style “stage”: dark floor, soft fog, studio IBL, rim lights (good for stream capture).
+ * ``?env=void`` — legacy empty backdrop (no floor / fog / environment map).
+ */
+const VRM_ENV = (() => {
+  const raw = (URL_PARAMS.get("env") ?? "stage").trim().toLowerCase();
+  if (raw === "void" || raw === "0" || raw === "off" || raw === "none") return "void";
+  return "stage";
+})();
+
+/**
+ * @param {THREE.WebGLRenderer} renderer
+ * @param {THREE.Scene} scene
+ * @param {THREE.HemisphereLight} hemi
+ * @param {THREE.DirectionalLight} dir
+ */
+function setupVrmStreamEnvironment(renderer, scene, hemi, dir) {
+  scene.background = new THREE.Color(0x08051a);
+  scene.fog = new THREE.FogExp2(0x050812, 0.032);
+  renderer.setClearColor(0x08051a, 1);
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.toneMappingExposure = 0.88;
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+  hemi.color.setHex(0x6a7a8c);
+  hemi.groundColor.setHex(0x080a10);
+  hemi.intensity = 0.52;
+
+  dir.color.setHex(0xfff4e8);
+  dir.intensity = 0.95;
+  dir.position.set(1.6, 3.5, 2.4);
+  dir.castShadow = true;
+  dir.shadow.mapSize.set(1024, 1024);
+  dir.shadow.camera.near = 0.5;
+  dir.shadow.camera.far = 16;
+  dir.shadow.camera.left = -5;
+  dir.shadow.camera.right = 5;
+  dir.shadow.camera.top = 5;
+  dir.shadow.camera.bottom = -5;
+  dir.shadow.bias = -0.00022;
+
+  const pmrem = new THREE.PMREMGenerator(renderer);
+  try {
+    scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.038).texture;
+  } catch (e) {
+    console.warn("[VRM viewer] RoomEnvironment:", e);
+  }
+  pmrem.dispose();
+
+  const rim = new THREE.DirectionalLight(0x7ec8ff, 0.3);
+  rim.position.set(-2.2, 2.0, -2.0);
+  scene.add(rim);
+
+  const warm = new THREE.PointLight(0xffc9a8, 0.22, 10);
+  warm.position.set(1.1, 1.85, 1.4);
+  scene.add(warm);
+
+  const magentaRim = new THREE.PointLight(0xff55cc, 0.16, 14);
+  magentaRim.position.set(2.4, 1.6, -0.8);
+  scene.add(magentaRim);
+
+  const cyanFill = new THREE.PointLight(0x44ddff, 0.12, 12);
+  cyanFill.position.set(-2.0, 2.1, 0.4);
+  scene.add(cyanFill);
+
+  const bgUrl = new URL("stream-bg.png", BASE).href;
+  new THREE.TextureLoader().load(
+    bgUrl,
+    (tex) => {
+      const maxAniso = Math.max(1, Math.min(8, renderer.capabilities.getMaxAnisotropy?.() || 1));
+      const prep = (t) => {
+        t.colorSpace = THREE.SRGBColorSpace;
+        t.minFilter = THREE.LinearMipmapLinearFilter;
+        t.magFilter = THREE.LinearFilter;
+        t.generateMipmaps = true;
+        t.anisotropy = maxAniso;
+        t.needsUpdate = true;
+        return t;
+      };
+      prep(tex);
+
+      const iw = tex.image?.width || 16;
+      const ih = tex.image?.height || 9;
+      const aspect = iw / Math.max(ih, 1);
+      // Smaller room scale so architectural elements (like the neon sign) match Luna's size better.
+      const wallH = 4.9;
+      const backW = wallH * aspect;
+      // Keep the set tight so Luna feels inside a balcony scene, not a giant hall.
+      const roomDepth = 3.15;
+      const halfW = backW * 0.5;
+
+      // Back wall: full image.
+      const backMat = new THREE.MeshBasicMaterial({ map: tex, fog: false, side: THREE.FrontSide });
+      const back = new THREE.Mesh(new THREE.PlaneGeometry(backW, wallH), backMat);
+      back.position.set(0, 1.55, -roomDepth);
+      back.name = "lunaRoomBackWall";
+      scene.add(back);
+
+      // Side walls: use left/right strips of the image to fake room depth.
+      const leftTex = prep(tex.clone());
+      leftTex.wrapS = THREE.ClampToEdgeWrapping;
+      leftTex.wrapT = THREE.ClampToEdgeWrapping;
+      leftTex.repeat.set(0.2, 1);
+      leftTex.offset.set(0.0, 0.0);
+      const leftMat = new THREE.MeshBasicMaterial({ map: leftTex, fog: true, side: THREE.DoubleSide, transparent: true, opacity: 0.96 });
+      const leftWall = new THREE.Mesh(new THREE.PlaneGeometry(roomDepth * 0.9, wallH), leftMat);
+      leftWall.position.set(-halfW, 1.55, -roomDepth * 0.5);
+      leftWall.rotation.y = Math.PI / 2;
+      leftWall.name = "lunaRoomLeftWall";
+      scene.add(leftWall);
+
+      const rightTex = prep(tex.clone());
+      rightTex.wrapS = THREE.ClampToEdgeWrapping;
+      rightTex.wrapT = THREE.ClampToEdgeWrapping;
+      rightTex.repeat.set(0.2, 1);
+      rightTex.offset.set(0.8, 0.0);
+      const rightMat = new THREE.MeshBasicMaterial({ map: rightTex, fog: true, side: THREE.DoubleSide, transparent: true, opacity: 0.96 });
+      const rightWall = new THREE.Mesh(new THREE.PlaneGeometry(roomDepth * 0.9, wallH), rightMat);
+      rightWall.position.set(halfW, 1.55, -roomDepth * 0.5);
+      rightWall.rotation.y = -Math.PI / 2;
+      rightWall.name = "lunaRoomRightWall";
+      scene.add(rightWall);
+
+      // Floor projection from lower part of image so Luna feels "inside" the scene.
+      const floorTex = prep(tex.clone());
+      floorTex.wrapS = THREE.ClampToEdgeWrapping;
+      floorTex.wrapT = THREE.ClampToEdgeWrapping;
+      // Use less of the source image on floor so we avoid over-stretched projection.
+      floorTex.repeat.set(1.0, 0.25);
+      floorTex.offset.set(0.0, 0.0);
+      const floorMat = new THREE.MeshStandardMaterial({
+        map: floorTex,
+        color: 0xffffff,
+        metalness: 0.08,
+        roughness: 0.82,
+        envMapIntensity: 0.35,
+      });
+      const floor = new THREE.Mesh(new THREE.PlaneGeometry(backW, roomDepth * 1.05), floorMat);
+      floor.rotation.x = -Math.PI / 2;
+      floor.position.set(0, -0.02, -roomDepth * 0.14);
+      floor.receiveShadow = true;
+      floor.name = "lunaRoomFloor";
+      scene.add(floor);
+
+      // Soft ceiling darkener to keep focus on avatar.
+      const ceiling = new THREE.Mesh(
+        new THREE.PlaneGeometry(backW * 0.95, roomDepth * 0.86),
+        new THREE.MeshStandardMaterial({ color: 0x060810, roughness: 1.0, metalness: 0.0, transparent: true, opacity: 0.78 }),
+      );
+      ceiling.rotation.x = Math.PI / 2;
+      ceiling.position.set(0, wallH - 0.08, -roomDepth * 0.5);
+      ceiling.name = "lunaRoomCeiling";
+      scene.add(ceiling);
+    },
+    undefined,
+    (err) => {
+      console.warn("[VRM viewer] Could not load stream backdrop (stream-bg.png):", err);
+    },
+  );
+}
 
 function pingVrmPresenceToServer() {
   fetch(new URL("/api/vrm-presence", window.location.origin).href, {
@@ -215,6 +383,8 @@ window.addEventListener("beforeunload", () => {
 const canvas = document.getElementById("c");
 const errEl = document.getElementById("err");
 const pathHint = document.getElementById("path-hint");
+const envHint = document.getElementById("env-hint");
+if (envHint) envHint.textContent = VRM_ENV;
 const settingsToggle = document.getElementById("settings-toggle");
 const settingsPanel = document.getElementById("settings-panel");
 const idleSelect = document.getElementById("idle-select");
@@ -234,6 +404,9 @@ const btnEmotionApply = document.getElementById("btn-emotion-apply");
 const btnEmotionClear = document.getElementById("btn-emotion-clear");
 const boneMapToggle = document.getElementById("bone-map-toggle");
 const boneMapPanel = document.getElementById("bone-map-panel");
+const avatarHeightSlider = document.getElementById("avatar-height-slider");
+const avatarHeightValue = document.getElementById("avatar-height-value");
+const AVATAR_HEIGHT_STORAGE_KEY = "lunaVrmAvatarHeightPct";
 
 let vrm = null;
 let mixer = null;
@@ -268,6 +441,7 @@ let animationList = {
   local: [],
   sample: null,
 };
+let avatarHeightPct = 100;
 /** Index into ``motion_idle_sequence``; advances when each LoopOnce clip finishes. */
 let idleSeqIdx = 0;
 /** @type {((e: { action: THREE.AnimationAction }) => void) | null} */
@@ -279,6 +453,36 @@ let lastPlayedIdleKey = "";
 let lastPlayedTalkKey = "";
 /** Second mixer for expression VRMA (blendshapes). */
 let exprMixer = null;
+
+function clampAvatarHeightPct(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return 100;
+  return Math.max(70, Math.min(220, Math.round(n)));
+}
+
+function setAvatarHeightUiValue(v) {
+  const pct = clampAvatarHeightPct(v);
+  if (avatarHeightSlider) avatarHeightSlider.value = String(pct);
+  if (avatarHeightValue) avatarHeightValue.textContent = `${pct}%`;
+}
+
+function applyAvatarHeightScale() {
+  if (!vrm?.scene) return;
+  const s = clampAvatarHeightPct(avatarHeightPct) / 100;
+  vrm.scene.scale.setScalar(s);
+}
+
+(() => {
+  try {
+    const saved = localStorage.getItem(AVATAR_HEIGHT_STORAGE_KEY);
+    if (saved != null && saved !== "") {
+      avatarHeightPct = clampAvatarHeightPct(saved);
+    }
+  } catch {
+    avatarHeightPct = 100;
+  }
+  setAvatarHeightUiValue(avatarHeightPct);
+})();
 /** Last expression ``AnimationAction`` for crossfade. */
 let expressionActionCurrent = null;
 let lastPlayedExprKey = "";
@@ -974,6 +1178,9 @@ scene.add(hemi);
 const dir = new THREE.DirectionalLight(0xffffff, 0.85);
 dir.position.set(2, 4, 3);
 scene.add(dir);
+if (VRM_ENV === "stage") {
+  setupVrmStreamEnvironment(renderer, scene, hemi, dir);
+}
 
 const controls = new OrbitControls(camera, canvas);
 controls.target.set(0, 1, 0);
@@ -2580,8 +2787,9 @@ function frameCameraToVrm() {
   const size = box.getSize(new THREE.Vector3());
   const ctr = box.getCenter(new THREE.Vector3());
   controls.target.copy(ctr);
-  const dist = Math.max(size.x, size.y, size.z) * 1.8 || 2;
-  camera.position.set(ctr.x, ctr.y + size.y * 0.15, ctr.z + dist);
+  // Slightly tighter default framing so Luna reads larger in the balcony set.
+  const dist = Math.max(size.x, size.y, size.z) * 1.18 || 1.6;
+  camera.position.set(ctr.x, ctr.y + size.y * 0.08, ctr.z + dist);
   camera.near = Math.max(0.01, dist / 100);
   camera.far = dist * 50;
   camera.updateProjectionMatrix();
@@ -2651,6 +2859,23 @@ btnEmotionClear?.addEventListener("click", () => {
   if (emotionTestSelect) emotionTestSelect.value = "NEUTRAL";
   applyEmotionBlendWeights({ neutral: 1 });
   animStatus.textContent = "Emotion test — [NEUTRAL]";
+});
+
+avatarHeightSlider?.addEventListener("input", () => {
+  avatarHeightPct = clampAvatarHeightPct(avatarHeightSlider.value);
+  setAvatarHeightUiValue(avatarHeightPct);
+  applyAvatarHeightScale();
+});
+
+avatarHeightSlider?.addEventListener("change", () => {
+  avatarHeightPct = clampAvatarHeightPct(avatarHeightSlider.value);
+  setAvatarHeightUiValue(avatarHeightPct);
+  applyAvatarHeightScale();
+  try {
+    localStorage.setItem(AVATAR_HEIGHT_STORAGE_KEY, String(avatarHeightPct));
+  } catch {
+    /* */
+  }
 });
 
 function stopAllSpeech() {
@@ -2812,6 +3037,9 @@ pollTwitchForVrm();
     }
 
     scene.add(vrm.scene);
+    /** VRM forward is usually −Z; camera sits at +Z — without this we see the avatar's back. */
+    vrm.scene.rotation.y = Math.PI;
+    applyAvatarHeightScale();
     frameCameraToVrm();
 
     if (useProceduralBody) {

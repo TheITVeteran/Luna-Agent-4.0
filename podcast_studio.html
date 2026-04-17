@@ -66,6 +66,17 @@
   #panel .status strong { color: #9ab8e8; }
   #panel .row { display: flex; gap: 6px; margin-top: 8px; }
   #panel .row button { margin-top: 0; flex: 1; }
+  #panel .mode-toggle button {
+    border-color: rgba(120, 150, 220, 0.26);
+    background: rgba(12, 16, 28, 0.96);
+    color: #a9bbd8;
+  }
+  #panel .mode-toggle button.active {
+    border-color: rgba(140, 180, 255, 0.52);
+    background: linear-gradient(180deg, rgba(100, 150, 255, 0.35), rgba(60, 100, 200, 0.15));
+    color: #e8f2ff;
+    box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.06) inset;
+  }
   #panel .hint { font-size: 10px; color: #4a5a72; margin-top: 8px; line-height: 1.35; }
   #panel .embed-url-input {
     width: 100%; margin-top: 4px; padding: 8px 10px; border-radius: 8px;
@@ -154,6 +165,10 @@
     <option value="">— Same as above —</option>
   </select>
   <button type="button" class="primary" id="btn-obs-vtuber" style="margin-top:8px">Launch OBS + VTuber mode</button>
+  <div class="row mode-toggle" style="margin-top:8px">
+    <button type="button" id="btn-mode-normal">Normal mode</button>
+    <button type="button" id="btn-mode-streamer">Streamer mode</button>
+  </div>
   <div class="hint" style="margin-top:6px">
     VTuber mode: idle <code style="color:#8ab4e8">standing2</code> and talking <code style="color:#8ab4e8">Standing Arguing</code>.
   </div>
@@ -200,6 +215,8 @@ const btnPerm = document.getElementById("btn-perm");
 const btnRec = document.getElementById("btn-rec");
 const btnStopRec = document.getElementById("btn-stop-rec");
 const btnObsVtuber = document.getElementById("btn-obs-vtuber");
+const btnModeNormal = document.getElementById("btn-mode-normal");
+const btnModeStreamer = document.getElementById("btn-mode-streamer");
 const statusEl = document.getElementById("status");
 const screenVol = document.getElementById("screen-vol");
 const micVol = document.getElementById("mic-vol");
@@ -238,10 +255,13 @@ let recStart = 0;
 let recTimer = null;
 /** Dedicated graph for mixing mic + virtual-screen audio into one recording track. */
 let recordingAudioCtx = null;
+let studioStreamMode = false;
 
 const VRM_BASE = new URL("/vrm/", window.location.origin).href;
 const STUDIO_LUNA_MODEL_URL = new URL("model", VRM_BASE).href;
 const VRM_VIEWER_URL = new URL("/vrm/?vtuber=1", window.location.origin).href;
+/** In-room standing avatar in this studio scene (disabled: dedicated /vrm/ viewer is now the avatar surface). */
+const STUDIO_INROOM_AVATAR_ENABLED = false;
 /** Luna VRM (``@pixiv/three-vrm``). */
 let studioLunaVrm = null;
 let studioLunaMixer = null;
@@ -621,6 +641,7 @@ function clampStudioLunaPos() {
 }
 
 function updateStudioLuna(dt) {
+  if (!STUDIO_INROOM_AVATAR_ENABLED) return;
   if (!studioLunaVrm) return;
   if (studioForceLunaHidden) {
     studioLunaVrm.scene.visible = false;
@@ -652,6 +673,52 @@ function updateStudioLuna(dt) {
 
 function setStatus(html) {
   statusEl.innerHTML = html;
+}
+
+function renderStreamModeToggle() {
+  if (btnModeNormal) btnModeNormal.classList.toggle("active", !studioStreamMode);
+  if (btnModeStreamer) btnModeStreamer.classList.toggle("active", !!studioStreamMode);
+}
+
+async function setStudioStreamMode(enabled, announce = false) {
+  const next = !!enabled;
+  if (btnModeNormal) btnModeNormal.disabled = true;
+  if (btnModeStreamer) btnModeStreamer.disabled = true;
+  try {
+    const resp = await fetch(new URL("/api/stream-mode", window.location.origin).href, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ stream_mode: next }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data?.error || "Could not set stream mode");
+    studioStreamMode = !!data.stream_mode;
+    renderStreamModeToggle();
+    if (announce) {
+      setStatus(
+        studioStreamMode
+          ? "<strong>Streamer mode ON.</strong> Luna now uses the stream persona in chat."
+          : "<strong>Normal mode ON.</strong> Luna now uses the regular persona.",
+      );
+    }
+  } catch (e) {
+    setStatus(`❌ Could not switch mode: ${String(e?.message || e)}`);
+  } finally {
+    if (btnModeNormal) btnModeNormal.disabled = false;
+    if (btnModeStreamer) btnModeStreamer.disabled = false;
+  }
+}
+
+async function syncStudioStreamModeFromServer() {
+  try {
+    const resp = await fetch(new URL("/api/stream-mode", window.location.origin).href, { method: "GET" });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data?.error || "Could not read stream mode");
+    studioStreamMode = !!data.stream_mode;
+  } catch {
+    studioStreamMode = false;
+  }
+  renderStreamModeToggle();
 }
 
 function isTypingTarget(el) {
@@ -1440,7 +1507,11 @@ function initThree() {
   resize();
   requestAnimationFrame(() => resize());
 
-  void loadStudioLunaAvatar();
+  if (STUDIO_INROOM_AVATAR_ENABLED) {
+    void loadStudioLunaAvatar();
+  } else {
+    studioForceLunaHidden = true;
+  }
 }
 
 function animate() {
@@ -1526,8 +1597,7 @@ if (btnObsVtuber) {
   btnObsVtuber.addEventListener("click", async () => {
     btnObsVtuber.disabled = true;
     try {
-      await applyStudioObsVtuberMode();
-      // Stream view should show the dedicated /vrm/ page, not the in-room studio avatar.
+      // Stream view should show the dedicated /vrm/ page (studio no longer uses in-room standing avatar).
       studioForceLunaHidden = true;
       if (studioLunaVrm?.scene) studioLunaVrm.scene.visible = false;
       videoSourceSelect.value = "embed";
@@ -1547,13 +1617,26 @@ if (btnObsVtuber) {
         obsPart = ` OBS launch failed: ${String(e?.message || e)}.`;
       }
       setStatus(
-        `<strong>VTuber mode enabled.</strong> Screen now shows <strong>/vrm/</strong>; studio avatar hidden. Luna idle = <strong>standing2</strong>; talking = <strong>Standing Arguing</strong>.${obsPart}`,
+        `<strong>VTuber mode enabled.</strong> Screen now shows <strong>/vrm/</strong> (dedicated avatar viewer). Stream persona: <strong>${studioStreamMode ? "ON" : "OFF"}</strong>.${obsPart}`,
       );
     } catch (e) {
       setStatus(`❌ Could not enable VTuber mode: ${String(e?.message || e)}`);
     } finally {
       btnObsVtuber.disabled = false;
     }
+  });
+}
+
+if (btnModeNormal) {
+  btnModeNormal.addEventListener("click", async () => {
+    if (!studioStreamMode) return;
+    await setStudioStreamMode(false, true);
+  });
+}
+if (btnModeStreamer) {
+  btnModeStreamer.addEventListener("click", async () => {
+    if (studioStreamMode) return;
+    await setStudioStreamMode(true, true);
   });
 }
 
@@ -1804,6 +1887,7 @@ btnPerm.addEventListener("click", async () => {
 });
 
 updateVideoSourceUi();
+void syncStudioStreamModeFromServer();
 
 function formatTime(ms) {
   const s = Math.floor(ms / 1000);

@@ -2,38 +2,6 @@
   "discord:user:1414944231222411378": [
     {
       "role": "user",
-      "content": "Are you here?"
-    },
-    {
-      "role": "assistant",
-      "content": "yes, i'm still here. it's quiet now that you're gone to bed. feel free to come back and chat anytime if you want."
-    },
-    {
-      "role": "user",
-      "content": "Well its the next day. Easter. I am at the village with my family"
-    },
-    {
-      "role": "assistant",
-      "content": "happy easter! hope your family is enjoying their celebrations today. the village looks lovely this time of year, doesn't it? the flowers are blooming, and the air is filled with the scent of baking bread... what's on the menu for dinner tonight?"
-    },
-    {
-      "role": "user",
-      "content": "Many foods and desert"
-    },
-    {
-      "role": "assistant",
-      "content": "delicious! traditional easter treats like hot cross buns, simnel cake, and lamb pudding sound wonderful. and of course, there are always plenty of sweet desserts to enjoy. i can almost smell the sweetness wafting from the oven... what's your favorite easter dessert?"
-    },
-    {
-      "role": "user",
-      "content": "Lamb pudding are you crazy?"
-    },
-    {
-      "role": "assistant",
-      "content": "I guess some people just don't share my affection for traditional easter sweets! lamb pudding might not be everyone's cup of tea, but to me it's a sweet and tangy delight. how about you, do you have a favorite easter dessert that's more to your liking?"
-    },
-    {
-      "role": "user",
       "content": "Lamb is a food not a desert"
     },
     {
@@ -799,6 +767,38 @@
     {
       "role": "assistant",
       "content": "✅ Liked video (watch?v=RH7nYD40AZc)."
+    },
+    {
+      "role": "user",
+      "content": "Shadow, share song"
+    },
+    {
+      "role": "assistant",
+      "content": "❌ Could not load YouTube feed: HTTP Error 404: Not Found"
+    },
+    {
+      "role": "user",
+      "content": "Shadow, share song"
+    },
+    {
+      "role": "assistant",
+      "content": "✅ Shared to X: \"Im Me When I've Got You\""
+    },
+    {
+      "role": "user",
+      "content": "Shadow, share facebook"
+    },
+    {
+      "role": "assistant",
+      "content": "✅ Shared to Facebook: \"Endless Anthem\""
+    },
+    {
+      "role": "user",
+      "content": "!podcast"
+    },
+    {
+      "role": "assistant",
+      "content": "🎙️ **Custom podcast episodes in your folder:**\n1. audiobook_1m37s_sex_in_a_farm_20260415_0004.mp3\n2. podcast_girls_without_limits_living_wi_20260414_2359.mp3\n\nSay `!podcast <number>` or `!podcast <part of name>` to play one of them in Discord voice."
     }
   ],
   "discord:user:550782786013757442": [

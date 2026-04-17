@@ -16,7 +16,7 @@ Set LUNA_VRM_PATH for the .vrm model. VRMA files are VRM Animation format (conve
 
 Body-motion .vrma with almost no joint movement (T-pose / frozen) are omitted unless LUNA_VRMA_MIN_MOTION_RAD=0 (default min peak delta ~0.035 rad between keyframes).
 
-Mount at /vrm (Blueprint).
+Mount at /vrm (Blueprint). The viewer page supports ``?env=stage`` (default: dark floor + fog + studio-style lighting) or ``?env=void`` (minimal backdrop).
 """
 from __future__ import annotations
 
@@ -431,6 +431,15 @@ def index():
     """Serve the VRM viewer UI."""
     base = _project_base()
     return send_from_directory(base, "vrm_viewer.html")
+
+
+@vrm_bp.route("/stream-bg.png")
+def serve_stream_backdrop():
+    """Cyberpunk balcony / city stream backdrop for ``?env=stage`` (see ``data/vrm/luna_stream_bg.png``)."""
+    path = os.path.join(_project_base(), "data", "vrm", "luna_stream_bg.png")
+    if not os.path.isfile(path):
+        return jsonify({"error": "Stream backdrop not found", "path": path}), 404
+    return send_file(path, mimetype="image/png", max_age=300)
 
 
 @vrm_bp.route("/model")
