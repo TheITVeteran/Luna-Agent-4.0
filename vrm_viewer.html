@@ -132,6 +132,7 @@
     <strong>Browser</strong> uses OS voices (Web Speech API) — Ava is not listed there.
     Mouth visemes: Edge uses live audio level; browser uses text-timed shapes.
     The main Luna page (<code style="color:#00d4ff">/</code>) mirrors replies here; this page also polls Twitch when IRC ingest is enabled (same as the chat UI). Keep <code style="color:#00d4ff">/vrm/</code> open for avatar + Edge TTS.
+    <strong>Voice activity</strong> (Speak button): toggles hands-free mic to <code style="color:#00d4ff">/api/chat</code>. Leave it on to keep listening, or toggle off to stop the mic.
     Manual / dev: <code style="color:#00d4ff">BroadcastChannel(&quot;luna-vrm-speech&quot;)</code> → <code style="color:#00d4ff">{ type: &quot;speak&quot;, text: &quot;…&quot;, engine?: &quot;edge&quot; | &quot;browser&quot; }</code>. Leading <code>[HAPPY]</code>-style tags (same set as Luna’s chat prompt) drive VRM face presets during TTS; lip-sync still controls vowel shapes.
   </div>
   <label for="tts-engine">Engine</label>
@@ -146,6 +147,7 @@
     <label for="tts-voice">Voice</label>
     <select id="tts-voice"></select>
   </div>
+  <div id="speak-stt-status" class="hint" style="margin-top:4px;min-height:1.25em" aria-live="polite"></div>
   <label for="tts-text">Text</label>
   <textarea id="tts-text" placeholder="Type something for Luna to say…"></textarea>
   <div class="row-btns">
@@ -180,6 +182,9 @@ const BASE = new URL("/vrm/", window.location.origin).href;
 const MODEL_URL = new URL("model", BASE).href;
 const API_ANIMATIONS = new URL("api/animations", BASE).href;
 const API_TTS = new URL("api/tts", BASE).href;
+/** Same-origin main Luna chat (not under ``/vrm/``). */
+const API_CHAT = new URL("/api/chat", window.location.origin).href;
+const API_TRANSCRIBE = new URL("/api/transcribe", window.location.origin).href;
 const URL_PARAMS = new URLSearchParams(window.location.search);
 /** ``?vtuber=1`` (default) locks idle to standing2 and talk to Standing Arguing (no idle sequence cycling). Use ``?vtuber=0`` to disable. */
 const VTUBER_MODE = (() => {
@@ -399,6 +404,8 @@ const ttsVoice = document.getElementById("tts-voice");
 const ttsText = document.getElementById("tts-text");
 const btnSpeak = document.getElementById("btn-speak");
 const btnStopSpeech = document.getElementById("btn-stop-speech");
+const speakSttStatus = document.getElementById("speak-stt-status");
+const VOICE_ACTIVITY_ENABLED_KEY = "lunaVrmVoiceActivityEnabled";
 const emotionTestSelect = document.getElementById("emotion-test-select");
 const btnEmotionApply = document.getElementById("btn-emotion-apply");
 const btnEmotionClear = document.getElementById("btn-emotion-clear");
@@ -491,6 +498,30 @@ let speaking = false;
 /** When true, lipsync follows Web Audio RMS (Edge TTS); else text-timed (browser). */
 let lipAudioMode = false;
 let speakGen = 0;
+/** Abort in-flight ``/api/chat`` during voice-to-Luna turns. */
+let voiceChatAbort = null;
+/** Fired once when Luna reply TTS ends or ``stopAllSpeech`` runs. */
+let speakDoneOneShot = null;
+/** True from final transcript until Luna reply TTS ends (or stop). */
+let voiceTurnBusy = false;
+/** Hub-style mic capture for ``/api/transcribe`` while voice activity is ON. */
+let convoMediaRecorder = null;
+/** @type {MediaStream | null} */
+let convoMicStream = null;
+let convoChunks = [];
+let convoShouldTranscribeOnStop = false;
+let convoSpeechDetected = false;
+let convoRecordStartedAtMs = 0;
+let convoLastVoiceAtMs = 0;
+let convoVadRaf = 0;
+let convoVadCtx = null;
+let convoVadAnalyser = null;
+let convoVadBuf = null;
+const CONVO_VAD_THRESHOLD = 0.03;
+const CONVO_SILENCE_HOLD_MS = 900;
+const CONVO_MIN_SEGMENT_MS = 650;
+const CONVO_MAX_SEGMENT_MS = 9000;
+let voiceActivityEnabled = false;
 let edgeAudioCtx = null;
 let edgeAnalyser = null;
 /** One-time ``AnalyserNode`` → destination wiring (unity gain / 1.0). */
@@ -2623,9 +2654,16 @@ function resetFaceEmotionToNeutralAfterSpeech() {
   applyEmotionBlendWeights({ neutral: 1 });
 }
 
-function speakBrowserTts(text) {
+function speakBrowserTts(text, opts = {}) {
   const raw = (text || "").trim();
-  if (!raw) return;
+  if (!raw) {
+    try {
+      opts.onEnd?.();
+    } catch {
+      /* */
+    }
+    return;
+  }
 
   stopEdgePlayback();
   speakGen += 1;
@@ -2634,7 +2672,14 @@ function speakBrowserTts(text) {
 
   let speakText = stripLunaEmotionTagsForSpeech(raw);
   speakText = maybeStripEmojisForGemmaTts(speakText || raw);
-  if (!String(speakText || "").trim()) return;
+  if (!String(speakText || "").trim()) {
+    try {
+      opts.onEnd?.();
+    } catch {
+      /* */
+    }
+    return;
+  }
   lipSync.text = speakText;
   lipSync.t0 = performance.now();
   lipSync.durationSec = estimateSpeechDurationSec(lipSync.text);
@@ -2663,12 +2708,22 @@ function speakBrowserTts(text) {
     resetFaceEmotionToNeutralAfterSpeech();
     clearLipMouth();
     void resumeIdleSequence();
+    try {
+      opts.onEnd?.();
+    } catch {
+      /* */
+    }
   };
   u.onerror = () => {
     speaking = false;
     resetFaceEmotionToNeutralAfterSpeech();
     clearLipMouth();
     void resumeIdleSequence();
+    try {
+      opts.onEnd?.();
+    } catch {
+      /* */
+    }
   };
 
   speechSynthesis.speak(u);
@@ -2676,7 +2731,14 @@ function speakBrowserTts(text) {
 
 async function speakEdgeTts(text, opts = {}) {
   const raw = (text || "").trim();
-  if (!raw) return;
+  if (!raw) {
+    try {
+      opts.onEnd?.();
+    } catch {
+      /* */
+    }
+    return;
+  }
 
   let twitchIdReserved = null;
   const tid = opts.twitchEventId;
@@ -2696,7 +2758,14 @@ async function speakEdgeTts(text, opts = {}) {
 
   let tSpeak = stripLunaEmotionTagsForSpeech(raw) || raw;
   tSpeak = maybeStripEmojisForGemmaTts(tSpeak);
-  if (!String(tSpeak).trim()) return;
+  if (!String(tSpeak).trim()) {
+    try {
+      opts.onEnd?.();
+    } catch {
+      /* */
+    }
+    return;
+  }
   lipSync.text = tSpeak;
   startSpeechEmotionTimeline(raw, lipSync.text);
   lipAudioMode = false;
@@ -2763,6 +2832,11 @@ async function speakEdgeTts(text, opts = {}) {
       resetFaceEmotionToNeutralAfterSpeech();
       clearLipMouth();
       void resumeIdleSequence();
+      try {
+        opts.onEnd?.();
+      } catch {
+        /* */
+      }
     };
 
     src.start(0);
@@ -2778,6 +2852,11 @@ async function speakEdgeTts(text, opts = {}) {
     void resumeIdleSequence();
     errEl.hidden = false;
     errEl.textContent = String(e?.message || e);
+    try {
+      opts.onEnd?.();
+    } catch {
+      /* */
+    }
   }
 }
 
@@ -2878,7 +2957,328 @@ avatarHeightSlider?.addEventListener("change", () => {
   }
 });
 
+function setSpeakSttStatus(msg) {
+  if (speakSttStatus) speakSttStatus.textContent = msg || "";
+}
+
+function hasHubTranscribeVoiceActivitySupport() {
+  return !!(window.MediaRecorder && navigator.mediaDevices?.getUserMedia);
+}
+
+function cleanupConversationCaptureNodes() {
+  if (convoVadRaf) {
+    cancelAnimationFrame(convoVadRaf);
+    convoVadRaf = 0;
+  }
+  convoVadBuf = null;
+  convoVadAnalyser = null;
+  try {
+    convoVadCtx?.close?.();
+  } catch {
+    /* */
+  }
+  convoVadCtx = null;
+}
+
+function stopConversationRecognition() {
+  cleanupConversationCaptureNodes();
+  convoSpeechDetected = false;
+  convoRecordStartedAtMs = 0;
+  convoLastVoiceAtMs = 0;
+  if (convoMediaRecorder) {
+    const rec = convoMediaRecorder;
+    convoMediaRecorder = null;
+    try {
+      rec.ondataavailable = null;
+      rec.onerror = null;
+      rec.onstop = null;
+      if (rec.state !== "inactive") rec.stop();
+    } catch {
+      /* */
+    }
+  }
+  if (convoMicStream) {
+    try {
+      convoMicStream.getTracks().forEach((t) => t.stop());
+    } catch {
+      /* */
+    }
+    convoMicStream = null;
+  }
+  convoChunks = [];
+  convoShouldTranscribeOnStop = false;
+}
+
+function teardownVoiceToLunaUi() {
+  stopConversationRecognition();
+  setSpeakSttStatus("");
+}
+
+function syncVoiceActivityUi() {
+  if (btnSpeak) {
+    btnSpeak.textContent = voiceActivityEnabled ? "Voice activity: ON" : "Voice activity: OFF";
+    btnSpeak.title = voiceActivityEnabled
+      ? "Click to stop hands-free microphone chat."
+      : "Click to start hands-free microphone chat.";
+  }
+  if (!hasHubTranscribeVoiceActivitySupport()) setSpeakSttStatus("Voice activity needs microphone recording support.");
+  else if (!voiceActivityEnabled) setSpeakSttStatus("Voice activity is off.");
+}
+
+function startVoiceActivity() {
+  voiceActivityEnabled = true;
+  try {
+    localStorage.setItem(VOICE_ACTIVITY_ENABLED_KEY, "1");
+  } catch {
+    /* */
+  }
+  syncVoiceActivityUi();
+  if (!hasHubTranscribeVoiceActivitySupport()) {
+    setSpeakSttStatus("Voice activity needs microphone recording support.");
+    return;
+  }
+  void startConversationRecognition();
+}
+
+function stopVoiceActivity() {
+  voiceActivityEnabled = false;
+  try {
+    localStorage.setItem(VOICE_ACTIVITY_ENABLED_KEY, "0");
+  } catch {
+    /* */
+  }
+  teardownVoiceToLunaUi();
+  syncVoiceActivityUi();
+}
+
+async function fetchLunaChatReply(message) {
+  const ac = new AbortController();
+  voiceChatAbort = ac;
+  try {
+    const res = await fetch(API_CHAT, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message }),
+      signal: ac.signal,
+    });
+    if (!res.ok) {
+      let err = res.statusText || "Chat failed";
+      try {
+        const j = await res.json();
+        if (j.error) err = j.error;
+      } catch {
+        /* */
+      }
+      throw new Error(err);
+    }
+    const data = await res.json();
+    return typeof data.reply === "string" ? data.reply : "";
+  } finally {
+    if (voiceChatAbort === ac) voiceChatAbort = null;
+  }
+}
+
+function speakLunaReplyAndWait(reply) {
+  const raw = (reply || "").trim();
+  return new Promise((resolve) => {
+    if (!raw) return void resolve();
+    speakDoneOneShot = resolve;
+    const done = () => {
+      if (speakDoneOneShot === resolve) speakDoneOneShot = null;
+      resolve();
+    };
+    if (ttsEngine?.value === "edge") void speakEdgeTts(raw, { onEnd: done });
+    else speakBrowserTts(raw, { onEnd: done });
+  });
+}
+
+function computeVadRms() {
+  if (!convoVadAnalyser || !convoVadBuf) return 0;
+  convoVadAnalyser.getByteTimeDomainData(convoVadBuf);
+  let sum = 0;
+  for (let i = 0; i < convoVadBuf.length; i++) {
+    const x = (convoVadBuf[i] - 128) / 128;
+    sum += x * x;
+  }
+  return Math.sqrt(sum / convoVadBuf.length);
+}
+
+async function transcribeVoiceBlob(blob) {
+  const res = await fetch(API_TRANSCRIBE, {
+    method: "POST",
+    headers: { "Content-Type": blob.type || "audio/webm" },
+    body: blob,
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data?.error || "Transcription failed");
+  if (!data?.text) return "";
+  return String(data.text || "").trim();
+}
+
+function stopConversationSegmentForTranscription() {
+  if (!convoMediaRecorder) return;
+  convoShouldTranscribeOnStop = convoSpeechDetected;
+  cleanupConversationCaptureNodes();
+  const rec = convoMediaRecorder;
+  convoMediaRecorder = null;
+  try {
+    if (rec.state !== "inactive") rec.stop();
+  } catch {
+    /* */
+  }
+}
+
+function monitorConversationVAD() {
+  if (!voiceActivityEnabled || voiceTurnBusy || !convoMediaRecorder || !convoVadAnalyser) return;
+  const now = performance.now();
+  const rms = computeVadRms();
+  if (rms >= CONVO_VAD_THRESHOLD) {
+    convoSpeechDetected = true;
+    convoLastVoiceAtMs = now;
+  } else if (
+    convoSpeechDetected &&
+    now - convoLastVoiceAtMs >= CONVO_SILENCE_HOLD_MS &&
+    now - convoRecordStartedAtMs >= CONVO_MIN_SEGMENT_MS
+  ) {
+    stopConversationSegmentForTranscription();
+    return;
+  }
+  if (now - convoRecordStartedAtMs >= CONVO_MAX_SEGMENT_MS) {
+    stopConversationSegmentForTranscription();
+    return;
+  }
+  convoVadRaf = requestAnimationFrame(monitorConversationVAD);
+}
+
+async function runVoiceTurn(userText) {
+  const t = (userText || "").trim();
+  if (!t) return;
+  voiceTurnBusy = true;
+  stopConversationRecognition();
+  setSpeakSttStatus("Luna is thinking…");
+  try {
+    const reply = await fetchLunaChatReply(t);
+    if (ttsText) ttsText.value = reply.slice(0, 12000);
+    setSpeakSttStatus("");
+    await speakLunaReplyAndWait(reply);
+  } catch (e) {
+    if (e?.name === "AbortError") setSpeakSttStatus("Stopped.");
+    else {
+      const msg = String(e?.message || e);
+      setSpeakSttStatus(msg);
+      errEl.hidden = false;
+      errEl.textContent = msg;
+    }
+  } finally {
+    voiceTurnBusy = false;
+    voiceChatAbort = null;
+    if (voiceActivityEnabled) {
+      queueMicrotask(() => void startConversationRecognition());
+    }
+  }
+}
+
+async function startConversationRecognition() {
+  if (!voiceActivityEnabled || voiceTurnBusy || convoMediaRecorder || convoMicStream) return;
+  if (!hasHubTranscribeVoiceActivitySupport()) {
+    setSpeakSttStatus("Voice activity needs microphone recording support.");
+    return;
+  }
+  convoShouldTranscribeOnStop = false;
+  convoSpeechDetected = false;
+  convoRecordStartedAtMs = performance.now();
+  convoLastVoiceAtMs = convoRecordStartedAtMs;
+  convoChunks = [];
+  setSpeakSttStatus("Listening…");
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    if (!voiceActivityEnabled || voiceTurnBusy) {
+      stream.getTracks().forEach((t) => t.stop());
+      return;
+    }
+    convoMicStream = stream;
+    convoVadCtx = new AudioContext();
+    const src = convoVadCtx.createMediaStreamSource(stream);
+    convoVadAnalyser = convoVadCtx.createAnalyser();
+    convoVadAnalyser.fftSize = 2048;
+    convoVadBuf = new Uint8Array(convoVadAnalyser.fftSize);
+    src.connect(convoVadAnalyser);
+
+    const rec = new MediaRecorder(stream);
+    convoMediaRecorder = rec;
+    rec.ondataavailable = (ev) => {
+      if (ev.data && ev.data.size > 0) convoChunks.push(ev.data);
+    };
+    rec.onerror = (ev) => {
+      setSpeakSttStatus(`Mic recorder error: ${String(ev?.error?.name || "unknown")}`);
+    };
+    rec.onstop = async () => {
+      cleanupConversationCaptureNodes();
+      const streamToStop = convoMicStream;
+      convoMicStream = null;
+      if (streamToStop) {
+        try {
+          streamToStop.getTracks().forEach((t) => t.stop());
+        } catch {
+          /* */
+        }
+      }
+      const shouldTranscribe = convoShouldTranscribeOnStop;
+      convoShouldTranscribeOnStop = false;
+      const chunks = convoChunks;
+      convoChunks = [];
+      if (!voiceActivityEnabled || voiceTurnBusy) return;
+      if (!shouldTranscribe) {
+        queueMicrotask(() => void startConversationRecognition());
+        return;
+      }
+      const blob = new Blob(chunks, { type: rec.mimeType || "audio/webm" });
+      if (blob.size < 600) {
+        queueMicrotask(() => void startConversationRecognition());
+        return;
+      }
+      try {
+        setSpeakSttStatus("Transcribing…");
+        const heard = await transcribeVoiceBlob(blob);
+        if (!heard) {
+          setSpeakSttStatus("Listening…");
+          if (voiceActivityEnabled && !voiceTurnBusy) queueMicrotask(() => void startConversationRecognition());
+          return;
+        }
+        setSpeakSttStatus(`Heard: ${heard}`);
+        await runVoiceTurn(heard);
+      } catch (e) {
+        const msg = String(e?.message || e);
+        setSpeakSttStatus(msg);
+        errEl.hidden = false;
+        errEl.textContent = msg;
+        if (voiceActivityEnabled && !voiceTurnBusy) queueMicrotask(() => void startConversationRecognition());
+      }
+    };
+    rec.start(250);
+    monitorConversationVAD();
+  } catch (e) {
+    setSpeakSttStatus(String(e?.message || "Microphone not available"));
+  }
+}
+
+(() => {
+  try {
+    voiceActivityEnabled = localStorage.getItem(VOICE_ACTIVITY_ENABLED_KEY) === "1";
+  } catch {
+    voiceActivityEnabled = false;
+  }
+  syncVoiceActivityUi();
+  if (voiceActivityEnabled) void startConversationRecognition();
+})();
+
 function stopAllSpeech() {
+  try {
+    voiceChatAbort?.abort();
+  } catch {
+    /* */
+  }
+  voiceChatAbort = null;
   speakGen += 1;
   speechSynthesis.cancel();
   stopEdgePlayback();
@@ -2887,11 +3287,21 @@ function stopAllSpeech() {
   resetFaceEmotionToNeutralAfterSpeech();
   clearLipMouth();
   void resumeIdleSequence();
+  try {
+    speakDoneOneShot?.();
+  } catch {
+    /* */
+  }
+  speakDoneOneShot = null;
+  if (voiceActivityEnabled) {
+    voiceTurnBusy = false;
+    queueMicrotask(() => void startConversationRecognition());
+  }
 }
 
-btnSpeak.addEventListener("click", () => {
-  if (ttsEngine?.value === "edge") speakEdgeTts(ttsText.value);
-  else speakBrowserTts(ttsText.value);
+btnSpeak?.addEventListener("click", () => {
+  if (voiceActivityEnabled) stopVoiceActivity();
+  else startVoiceActivity();
 });
 
 btnStopSpeech.addEventListener("click", () => {

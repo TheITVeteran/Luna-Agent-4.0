@@ -721,6 +721,25 @@
   .working-strip.empty { display: none; }
   .working-strip-label { color: var(--cyan); font-weight: 500; }
   .working-strip-list { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  /* League observer (Riot active-game visibility) */
+  .lol-observer-strip {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 5px 14px;
+    background: rgba(20, 10, 35, 0.55);
+    border-bottom: 1px solid rgba(180, 120, 255, 0.12);
+    font-size: 11px;
+    color: rgba(200, 190, 230, 0.9);
+  }
+  .lol-observer-strip.hidden { display: none; }
+  .lol-observer-label { color: #c9b0ff; font-weight: 600; white-space: nowrap; }
+  .lol-observer-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; background: rgba(168,216,234,0.35); }
+  .lol-observer-dot.ok { background: #3ecf8e; box-shadow: 0 0 6px rgba(62,207,142,0.5); }
+  .lol-observer-dot.warn { background: #e8b44c; }
+  .lol-observer-dot.err { background: #ff5c8a; }
+  .lol-observer-detail { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .working-panel { font-size: 11px; color: rgba(168,216,234,0.7); min-height: 20px; margin-bottom: 6px; }
   .action-log-box { max-height: 160px; overflow-y: auto; font-size: 10px; color: rgba(168,216,234,0.6); margin-top: 6px; padding: 8px; background: rgba(0,20,40,0.4); border-radius: 6px; }
   .action-log-box .log-entry { margin-bottom: 4px; }
@@ -1196,6 +1215,14 @@
     animation: recordPulse 1s ease-in-out infinite;
   }
 
+  .icon-btn.vad-on {
+    border-color: #00ff88;
+    color: #00ff88;
+    background: rgba(0,255,136,0.12);
+    box-shadow: 0 0 12px rgba(0,255,136,0.35);
+    animation: none;
+  }
+
   @keyframes recordPulse {
     0%,100% { box-shadow: 0 0 6px rgba(255,45,120,0.3); }
     50% { box-shadow: 0 0 18px rgba(255,45,120,0.6); }
@@ -1664,6 +1691,11 @@
   <span class="working-strip-label">Working on:</span>
   <span class="working-strip-list" id="working-strip-text">—</span>
 </div>
+<div class="lol-observer-strip hidden" id="lol-observer-strip" title="Riot Spectator v5 active-game API — same region as RIOT_LOL_REGION">
+  <span class="lol-observer-dot" id="lol-observer-dot" aria-hidden="true"></span>
+  <span class="lol-observer-label">League observer</span>
+  <span class="lol-observer-detail" id="lol-observer-detail">—</span>
+</div>
 
 <!-- Main -->
 <div class="main">
@@ -1944,6 +1976,7 @@
         <div class="input-btns">
           <button type="button" class="chat-mode-btn" id="chat-mode-btn" aria-pressed="true">Fast</button>
           <button class="icon-btn" id="mic-btn" title="Hold to record voice">🎙</button>
+          <button class="icon-btn" id="vad-btn" title="Toggle voice activity (hands-free)">VA</button>
           <button class="icon-btn" id="stop-btn" onclick="stopTTS()" title="Stop voice">◼</button>
           <button class="send-btn" id="send-btn" onclick="sendMessage()">
             Send <span class="send-arrow">›</span>
@@ -2312,6 +2345,86 @@ async function pollTwitchChat() {
 setInterval(pollTwitchChat, 2500);
 pollTwitchChat();
 
+// League of Legends live commentary (server pushes lines while a match is active)
+let lolChatSince = 0;
+async function pollLolChat() {
+  try {
+    const res = await fetch('/api/lol-chat/pending?since=' + lolChatSince);
+    if (!res.ok) return;
+    const data = await res.json();
+    const events = data.events || [];
+    for (const ev of events) {
+      if (ev.reply) appendMsg('luna', ev.reply);
+      if (ev.id > lolChatSince) lolChatSince = ev.id;
+    }
+  } catch (_) {}
+}
+setInterval(pollLolChat, 3000);
+pollLolChat();
+
+function updateLolObserverUI(lo) {
+  const strip = document.getElementById('lol-observer-strip');
+  const dot = document.getElementById('lol-observer-dot');
+  const detail = document.getElementById('lol-observer-detail');
+  if (!strip || !dot || !detail) return;
+  strip.classList.remove('hidden');
+  dot.className = 'lol-observer-dot';
+  if (!lo) {
+    dot.classList.add('warn');
+    detail.textContent = 'No status';
+    return;
+  }
+  if (lo.message === 'Module unavailable') {
+    dot.classList.add('warn');
+    detail.textContent = 'Observer module not loaded on server.';
+    return;
+  }
+  if (!lo.configured) {
+    dot.classList.add('warn');
+    detail.textContent = lo.message || 'Set RIOT_LOL_USE_LIVE_CLIENT=1 (same PC) and/or Riot API + PUUID in .env';
+    return;
+  }
+  if (lo.in_game) {
+    dot.classList.add('ok');
+    const src = lo.data_source === 'live_client' ? 'Live Client (local)' : 'Riot Spectator';
+    const parts = ['Match visible — ' + src];
+    if (lo.map_queue) parts.push(lo.map_queue);
+    if (lo.game_time_mm_ss) parts.push('@ ' + lo.game_time_mm_ss);
+    if (lo.game_id != null) parts.push('id ' + String(lo.game_id).slice(0, 12) + (String(lo.game_id).length > 12 ? '…' : ''));
+    if (lo.last_riot_http != null) parts.push('HTTP ' + lo.last_riot_http);
+    detail.textContent = parts.join(' · ');
+  } else {
+    dot.classList.add(lo.summoner_ok === false ? 'err' : 'warn');
+    let t = lo.message || 'No active game';
+    if (lo.last_riot_http != null) t += ' · Riot HTTP ' + lo.last_riot_http;
+    if (lo.region) t += ' · ' + lo.region;
+    if (lo.live_client_url) t += ' · LC ' + lo.live_client_url;
+    detail.textContent = t;
+  }
+  if (lo.last_error && !lo.in_game) {
+    detail.textContent += ' — ' + String(lo.last_error).slice(0, 100);
+  }
+}
+
+async function pollLolObserverStatus() {
+  try {
+    const r = await fetch('/api/lol-spectator/status');
+    if (!r.ok) return;
+    updateLolObserverUI(await r.json());
+  } catch (_) {
+    const strip = document.getElementById('lol-observer-strip');
+    const detail = document.getElementById('lol-observer-detail');
+    const dot = document.getElementById('lol-observer-dot');
+    if (strip && detail && dot) {
+      strip.classList.remove('hidden');
+      dot.className = 'lol-observer-dot err';
+      detail.textContent = 'Could not reach /api/lol-spectator/status';
+    }
+  }
+}
+setInterval(pollLolObserverStatus, 6000);
+pollLolObserverStatus();
+
 // Calendar popup
 const calendarBtn = document.getElementById('calendar-btn');
 const calendarOverlay = document.getElementById('calendar-popup-overlay');
@@ -2444,6 +2557,24 @@ let isSending = false;
 let mediaRecorder = null;
 let audioChunks = [];
 let isRecording = false;
+let voiceActivityEnabled = false;
+let voiceActivityBusy = false;
+let voiceActivityStream = null;
+let voiceActivityRecorder = null;
+let voiceActivityChunks = [];
+let voiceActivityAudioCtx = null;
+let voiceActivityAnalyser = null;
+let voiceActivityVadBuf = null;
+let voiceActivityVadRaf = 0;
+let voiceActivitySpeechDetected = false;
+let voiceActivityLastVoiceAtMs = 0;
+let voiceActivityRecordStartedAtMs = 0;
+let voiceActivityShouldTranscribeOnStop = false;
+
+const HUB_VAD_THRESHOLD = 0.02;
+const HUB_SILENCE_HOLD_MS = 900;
+const HUB_MIN_SEGMENT_MS = 1000;
+const HUB_MAX_SEGMENT_MS = 9000;
 
 const chatEl = document.getElementById('chat');
 const inputEl = document.getElementById('input');
@@ -2738,6 +2869,9 @@ async function sendMessage() {
   sendBtn.disabled = false;
   sendBtn.classList.remove('loading');
   inputEl.focus();
+  if (voiceActivityEnabled && !voiceActivityBusy && !voiceActivityRecorder && !isRecording) {
+    queueMicrotask(() => void startVoiceActivityCapture());
+  }
   setTimeout(() => document.getElementById('stat-mode').textContent = 'LUNA', 3000);
 }
 
@@ -3644,14 +3778,234 @@ function showToast(msg, isError = false) {
 
 // ── Voice input (hold mic button) ──
 const micBtn = document.getElementById('mic-btn');
+const vadBtn = document.getElementById('vad-btn');
 
 micBtn.addEventListener('mousedown', startRecording);
 micBtn.addEventListener('mouseup', stopRecording);
 micBtn.addEventListener('mouseleave', () => { if (isRecording) stopRecording(); });
 micBtn.addEventListener('touchstart', e => { e.preventDefault(); startRecording(); });
 micBtn.addEventListener('touchend', e => { e.preventDefault(); stopRecording(); });
+vadBtn?.addEventListener('click', toggleVoiceActivity);
+
+function updateInputFromTranscription(text) {
+  inputEl.value = text;
+  inputEl.style.height = 'auto';
+  inputEl.style.height = Math.min(inputEl.scrollHeight, 120) + 'px';
+  inputEl.focus();
+}
+
+async function transcribeVoiceBlob(blob) {
+  const res = await fetch('/api/transcribe', {
+    method: 'POST',
+    headers: { 'Content-Type': 'audio/webm' },
+    body: blob
+  });
+  return await res.json();
+}
+
+async function applyTranscriptionBlob(blob, opts = {}) {
+  const autoSend = !!opts.autoSend;
+  if (!blob || blob.size < 500) return false;
+  try {
+    const data = await transcribeVoiceBlob(blob);
+    const text = (data && data.text ? String(data.text).trim() : '');
+    if (!text) {
+      if (!autoSend) showToast((data && data.error) || 'Could not transcribe', true);
+      return false;
+    }
+    updateInputFromTranscription(text);
+    if (autoSend && !isSending) {
+      await sendMessage();
+    }
+    return true;
+  } catch {
+    if (!autoSend) showToast('Transcription failed', true);
+    return false;
+  }
+}
+
+function cleanupVoiceActivityAudioNodes() {
+  if (voiceActivityVadRaf) {
+    cancelAnimationFrame(voiceActivityVadRaf);
+    voiceActivityVadRaf = 0;
+  }
+  voiceActivityVadBuf = null;
+  voiceActivityAnalyser = null;
+  try {
+    voiceActivityAudioCtx?.close?.();
+  } catch {}
+  voiceActivityAudioCtx = null;
+}
+
+function stopVoiceActivityRecorder() {
+  cleanupVoiceActivityAudioNodes();
+  if (voiceActivityRecorder) {
+    const rec = voiceActivityRecorder;
+    voiceActivityRecorder = null;
+    try {
+      rec.ondataavailable = null;
+      rec.onerror = null;
+      rec.onstop = null;
+      if (rec.state !== 'inactive') rec.stop();
+    } catch {}
+  }
+  if (voiceActivityStream) {
+    try {
+      voiceActivityStream.getTracks().forEach(t => t.stop());
+    } catch {}
+    voiceActivityStream = null;
+  }
+  voiceActivityChunks = [];
+  voiceActivityShouldTranscribeOnStop = false;
+  voiceActivitySpeechDetected = false;
+}
+
+function voiceActivityVadRms() {
+  if (!voiceActivityAnalyser || !voiceActivityVadBuf) return 0;
+  voiceActivityAnalyser.getByteTimeDomainData(voiceActivityVadBuf);
+  let sum = 0;
+  for (let i = 0; i < voiceActivityVadBuf.length; i++) {
+    const x = (voiceActivityVadBuf[i] - 128) / 128;
+    sum += x * x;
+  }
+  return Math.sqrt(sum / voiceActivityVadBuf.length);
+}
+
+function stopVoiceActivitySegmentForTranscription() {
+  if (!voiceActivityRecorder) return;
+  voiceActivityShouldTranscribeOnStop = voiceActivitySpeechDetected;
+  cleanupVoiceActivityAudioNodes();
+  const rec = voiceActivityRecorder;
+  voiceActivityRecorder = null;
+  try {
+    if (rec.state !== 'inactive') rec.stop();
+  } catch {}
+}
+
+function monitorVoiceActivityVad() {
+  if (!voiceActivityEnabled || voiceActivityBusy || !voiceActivityRecorder || !voiceActivityAnalyser) return;
+  const now = performance.now();
+  const rms = voiceActivityVadRms();
+  if (rms >= HUB_VAD_THRESHOLD) {
+    voiceActivitySpeechDetected = true;
+    voiceActivityLastVoiceAtMs = now;
+  } else if (
+    voiceActivitySpeechDetected &&
+    now - voiceActivityLastVoiceAtMs >= HUB_SILENCE_HOLD_MS &&
+    now - voiceActivityRecordStartedAtMs >= HUB_MIN_SEGMENT_MS
+  ) {
+    stopVoiceActivitySegmentForTranscription();
+    return;
+  }
+  if (now - voiceActivityRecordStartedAtMs >= HUB_MAX_SEGMENT_MS) {
+    stopVoiceActivitySegmentForTranscription();
+    return;
+  }
+  voiceActivityVadRaf = requestAnimationFrame(monitorVoiceActivityVad);
+}
+
+async function startVoiceActivityCapture() {
+  if (!voiceActivityEnabled || voiceActivityBusy || isRecording || isSending || voiceActivityRecorder || voiceActivityStream) return;
+  voiceActivityShouldTranscribeOnStop = false;
+  voiceActivitySpeechDetected = false;
+  voiceActivityRecordStartedAtMs = performance.now();
+  voiceActivityLastVoiceAtMs = voiceActivityRecordStartedAtMs;
+  voiceActivityChunks = [];
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    if (!voiceActivityEnabled || voiceActivityBusy || isRecording || isSending) {
+      stream.getTracks().forEach(t => t.stop());
+      return;
+    }
+    voiceActivityStream = stream;
+    voiceActivityAudioCtx = new AudioContext();
+    const src = voiceActivityAudioCtx.createMediaStreamSource(stream);
+    voiceActivityAnalyser = voiceActivityAudioCtx.createAnalyser();
+    voiceActivityAnalyser.fftSize = 2048;
+    voiceActivityVadBuf = new Uint8Array(voiceActivityAnalyser.fftSize);
+    src.connect(voiceActivityAnalyser);
+
+    const rec = new MediaRecorder(stream);
+    voiceActivityRecorder = rec;
+    rec.ondataavailable = (ev) => {
+      if (ev.data && ev.data.size > 0) voiceActivityChunks.push(ev.data);
+    };
+    rec.onerror = () => {
+      if (voiceActivityEnabled) {
+        showToast('Voice activity mic recorder error', true);
+      }
+    };
+    rec.onstop = async () => {
+      cleanupVoiceActivityAudioNodes();
+      const streamToStop = voiceActivityStream;
+      voiceActivityStream = null;
+      if (streamToStop) {
+        try { streamToStop.getTracks().forEach(t => t.stop()); } catch {}
+      }
+      const shouldTranscribe = voiceActivityShouldTranscribeOnStop;
+      voiceActivityShouldTranscribeOnStop = false;
+      const chunks = voiceActivityChunks;
+      voiceActivityChunks = [];
+      if (!voiceActivityEnabled || isRecording || isSending) return;
+      if (!shouldTranscribe) {
+        queueMicrotask(() => void startVoiceActivityCapture());
+        return;
+      }
+      const blob = new Blob(chunks, { type: rec.mimeType || 'audio/webm' });
+      if (blob.size < 600) {
+        queueMicrotask(() => void startVoiceActivityCapture());
+        return;
+      }
+      voiceActivityBusy = true;
+      try {
+        await applyTranscriptionBlob(blob, { autoSend: true });
+      } finally {
+        voiceActivityBusy = false;
+      }
+      if (voiceActivityEnabled && !isRecording && !isSending) {
+        queueMicrotask(() => void startVoiceActivityCapture());
+      }
+    };
+    rec.start(250);
+    monitorVoiceActivityVad();
+  } catch {
+    showToast('Microphone not available', true);
+  }
+}
+
+function setVoiceActivityEnabled(on) {
+  voiceActivityEnabled = !!on;
+  if (!vadBtn) return;
+  vadBtn.classList.toggle('vad-on', voiceActivityEnabled);
+  vadBtn.title = voiceActivityEnabled
+    ? 'Voice activity ON — click to stop'
+    : 'Toggle voice activity (hands-free)';
+  if (!voiceActivityEnabled) {
+    stopVoiceActivityRecorder();
+    voiceActivityBusy = false;
+  }
+}
+
+async function toggleVoiceActivity() {
+  if (voiceActivityEnabled) {
+    setVoiceActivityEnabled(false);
+    showToast('Voice activity off');
+    return;
+  }
+  if (!navigator.mediaDevices || !window.MediaRecorder) {
+    showToast('Voice activity not supported in this browser', true);
+    return;
+  }
+  setVoiceActivityEnabled(true);
+  showToast('Voice activity on');
+  queueMicrotask(() => void startVoiceActivityCapture());
+}
 
 async function startRecording() {
+  if (voiceActivityEnabled) {
+    setVoiceActivityEnabled(false);
+    showToast('Voice activity paused for push-to-talk');
+  }
   try {
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     mediaRecorder = new MediaRecorder(stream);
@@ -3675,29 +4029,7 @@ async function stopRecording() {
   mediaRecorder.stop();
   mediaRecorder.onstop = async () => {
     const blob = new Blob(audioChunks, { type: 'audio/webm' });
-    if (blob.size < 500) return;
-    appendStatus('Transcribing voice input...');
-    try {
-      const res = await fetch('/api/transcribe', {
-        method: 'POST',
-        headers: { 'Content-Type': 'audio/webm' },
-        body: blob
-      });
-      const data = await res.json();
-      if (data.text) {
-        inputEl.value = data.text;
-        inputEl.style.height = 'auto';
-        inputEl.style.height = Math.min(inputEl.scrollHeight, 120) + 'px';
-        inputEl.focus();
-      } else {
-        showToast(data.error || 'Could not transcribe', true);
-      }
-    } catch {
-      showToast('Transcription failed', true);
-    }
-    // Remove status
-    const statuses = chatEl.querySelectorAll('.msg-status');
-    if (statuses.length) statuses[statuses.length - 1].remove();
+    await applyTranscriptionBlob(blob, { autoSend: false });
   };
   // Stop all mic tracks
   if (mediaRecorder.stream) {

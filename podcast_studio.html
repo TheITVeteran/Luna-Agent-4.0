@@ -172,12 +172,15 @@
   <div class="hint" style="margin-top:6px">
     VTuber mode: idle <code style="color:#8ab4e8">standing2</code> and talking <code style="color:#8ab4e8">Standing Arguing</code>.
   </div>
-  <button type="button" class="primary" id="btn-perm">Enable microphone &amp; video</button>
+  <button type="button" class="primary" id="btn-perm" title="Webcam or window on the virtual screen + mic for the orb. Full screen / Luna recording uses Launch OBS + VTuber mode instead.">Enable microphone &amp; video</button>
   <div class="row">
-    <button type="button" id="btn-rec" disabled>● Record</button>
-    <button type="button" class="danger" id="btn-stop-rec" disabled>■ Stop</button>
+    <button type="button" id="btn-rec-full" disabled title="System picker: choose your whole display">● Full screen</button>
+    <button type="button" id="btn-rec-luna" disabled title="Requires /vrm/ on the virtual screen (VTuber or Load page)">● Luna only</button>
   </div>
-  <div class="status" id="status"><strong>Step 1:</strong> Choose <strong>Webcam</strong> or <strong>Screen or window</strong>, then click <strong>Enable microphone &amp; video</strong>. For screen/window, the browser opens a picker (monitor, app window, or browser tab). Your mic is always from the microphone list.</div>
+  <div class="row">
+    <button type="button" class="danger" id="btn-stop-rec" disabled style="width:100%">■ Stop recording</button>
+  </div>
+  <div class="status" id="status"><strong>Recording:</strong> click <strong>Launch OBS + VTuber mode</strong> — that loads <code>/vrm/</code>, asks for the mic, and unlocks <strong>Full screen</strong> / <strong>Luna only</strong>. Use <strong>Enable microphone &amp; video</strong> only if you need webcam or window capture on the virtual screen for the orb (optional for recording).</div>
   <div class="hint"><strong>Scene:</strong> drag orbit · wheel zoom · middle-drag pan · <strong>arrows</strong> move view.</div>
 </div>
 
@@ -212,7 +215,8 @@ const videoSourceSelect = document.getElementById("video-source");
 const camLabel = document.getElementById("cam-label");
 const btnShareAgain = document.getElementById("btn-share-again");
 const btnPerm = document.getElementById("btn-perm");
-const btnRec = document.getElementById("btn-rec");
+const btnRecFull = document.getElementById("btn-rec-full");
+const btnRecLuna = document.getElementById("btn-rec-luna");
 const btnStopRec = document.getElementById("btn-stop-rec");
 const btnObsVtuber = document.getElementById("btn-obs-vtuber");
 const btnModeNormal = document.getElementById("btn-mode-normal");
@@ -253,6 +257,10 @@ let mediaRecorder = null;
 let recordedChunks = [];
 let recStart = 0;
 let recTimer = null;
+/** Set while “Full screen” record is active — stop tracks when the clip ends. */
+let recordingDisplayStream = null;
+/** True only after <strong>Launch OBS + VTuber mode</strong> successfully requests mic — unlocks Full screen / Luna only. */
+let vtuberRecordingReady = false;
 /** Dedicated graph for mixing mic + virtual-screen audio into one recording track. */
 let recordingAudioCtx = null;
 let studioStreamMode = false;
@@ -819,6 +827,7 @@ function stopMicTracksOnly() {
 }
 
 function stopAllMedia() {
+  vtuberRecordingReady = false;
   removeScreenEmbed();
   stopMicTracksOnly();
   if (screenCaptureStream) {
@@ -1026,7 +1035,16 @@ function onDisplayTrackEnded() {
   setStatus(
     "<span style='color:#e8a088'>Screen/window share ended. Click <strong>Share…</strong> or <strong>Enable microphone &amp; video</strong> again.</span>",
   );
-  btnRec.disabled = true;
+  if (mediaRecorder && mediaRecorder.state === "recording") {
+    try {
+      mediaRecorder.stop();
+    } catch {
+      /* */
+    }
+  }
+  resetRecordingUi();
+  setRecordingButtonsEnabled(false);
+  if (btnStopRec) btnStopRec.disabled = true;
 }
 
 async function applySelectedDevices() {
@@ -1180,7 +1198,10 @@ function closeRecordingAudioCtx() {
  * from the video element (webcam path, or embed quirks).
  * Slightly ducks each source when both are present so the mix is less likely to clip.
  */
-async function buildMixedRecordingAudioStream() {
+/**
+ * @param {MediaStream | null} [displayStreamOverride] When set (e.g. full-screen record), mix audio from this stream instead of the studio’s window/tab capture.
+ */
+async function buildMixedRecordingAudioStream(displayStreamOverride = null) {
   closeRecordingAudioCtx();
   recordingAudioCtx = new AudioContext();
   if (recordingAudioCtx.state === "suspended") {
@@ -1204,9 +1225,12 @@ async function buildMixedRecordingAudioStream() {
     hasMic = true;
   }
 
+  const override = displayStreamOverride;
   const mode = videoSourceSelect?.value;
-  if (mode === "display" && screenCaptureStream?.getAudioTracks) {
-    const sysTracks = screenCaptureStream
+  const streamForSysAudio =
+    override && override.getAudioTracks ? override : mode === "display" ? screenCaptureStream : null;
+  if (streamForSysAudio?.getAudioTracks) {
+    const sysTracks = streamForSysAudio
       .getAudioTracks()
       .filter((t) => t.kind === "audio" && t.readyState === "live");
     if (sysTracks.length) {
@@ -1248,6 +1272,208 @@ async function buildMixedRecordingAudioStream() {
   }
 
   return dest.stream;
+}
+
+function cleanupRecordingDisplayStream() {
+  if (recordingDisplayStream) {
+    try {
+      recordingDisplayStream.getTracks().forEach((t) => t.stop());
+    } catch {
+      /* */
+    }
+    recordingDisplayStream = null;
+  }
+}
+
+/** When `ok` is true, Full screen / Luna only can be clicked (mic must be enabled first). */
+function setRecordingButtonsEnabled(ok) {
+  if (btnRecFull) btnRecFull.disabled = !ok;
+  if (btnRecLuna) btnRecLuna.disabled = !ok;
+}
+
+function hasMicForRecording() {
+  return !!(micStream?.getAudioTracks?.()?.length);
+}
+
+/**
+ * Mic + orb for embed mode — used by <strong>Launch OBS + VTuber mode</strong> (unlocks recording).
+ */
+async function setupEmbedMicForVtuber() {
+  if (!navigator.mediaDevices?.getUserMedia) throw new Error("getUserMedia not supported");
+  setStatus("Requesting microphone for VTuber…");
+  const micOnly = await navigator.mediaDevices.getUserMedia({
+    audio: true,
+    video: false,
+  });
+  micStream = micOnly;
+  hiddenVideo.srcObject = null;
+  try {
+    hiddenVideo.pause();
+  } catch {
+    /* */
+  }
+  await fillMicListOnly(micStream);
+  if (!deviceListenersAttached) {
+    deviceListenersAttached = true;
+    camSelect.addEventListener("change", () => void applySelectedDevices());
+    micSelect.addEventListener("change", () => void applySelectedDevices());
+  }
+  setupAnalyser(micOnly);
+  clearVideoScreenPlaceholder();
+  vtuberRecordingReady = true;
+  setRecordingButtonsEnabled(true);
+}
+
+/**
+ * Clears timers and capture state after a recording ends or is cancelled.
+ * Re-enables record buttons only after VTuber mode has unlocked them and mic is live.
+ */
+function resetRecordingUi() {
+  if (recTimer) {
+    clearInterval(recTimer);
+    recTimer = null;
+  }
+  cleanupRecordingDisplayStream();
+  closeRecordingAudioCtx();
+  const canRec = vtuberRecordingReady && hasMicForRecording();
+  setRecordingButtonsEnabled(canRec);
+  if (btnStopRec) btnStopRec.disabled = true;
+  if (btnPerm) btnPerm.disabled = false;
+}
+
+/** Same-origin ``/vrm/`` iframe on the virtual screen → its WebGL canvas (VTuber embed). */
+function getEmbeddedVrmCanvas() {
+  if (!screenEmbedObject?.element) return null;
+  const iframe = screenEmbedObject.element.querySelector?.("iframe");
+  if (!iframe) return null;
+  try {
+    const doc = iframe.contentDocument || iframe.contentWindow?.document;
+    if (!doc) return null;
+    return doc.querySelector("canvas");
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * @param {"full" | "luna"} mode
+ */
+async function startPodcastRecording(mode) {
+  const mime = pickMime();
+  if (!mime) {
+    setStatus("<span style='color:#ff8899'>Recording not supported in this browser.</span>");
+    return;
+  }
+  if (!vtuberRecordingReady || !hasMicForRecording()) {
+    setStatus(
+      "<span style='color:#ff8899'>Recording locked.</span> Click <strong>Launch OBS + VTuber mode</strong> first (loads <code>/vrm/</code> and enables the mic).",
+    );
+    return;
+  }
+  cleanupRecordingDisplayStream();
+  const out = new MediaStream();
+  try {
+    if (mode === "full") {
+      setStatus("Choose your <strong>entire screen</strong> or a window in the system dialog…");
+      try {
+        recordingDisplayStream = await navigator.mediaDevices.getDisplayMedia({
+          video: { displaySurface: "monitor" },
+          audio: true,
+        });
+      } catch (e) {
+        const n = e?.name || "";
+        if (n === "NotAllowedError" || n === "AbortError") throw e;
+        recordingDisplayStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
+      }
+      const vt = recordingDisplayStream.getVideoTracks()[0];
+      if (!vt) throw new Error("No video track from screen capture");
+      vt.addEventListener("ended", () => {
+        setStatus("<span style='color:#e8a088'>Screen share ended.</span>");
+        if (mediaRecorder && mediaRecorder.state !== "inactive") mediaRecorder.stop();
+      });
+      out.addTrack(vt);
+      const mixedAudio = await buildMixedRecordingAudioStream(recordingDisplayStream);
+      if (mixedAudio?.getAudioTracks?.()?.length) {
+        mixedAudio.getAudioTracks().forEach((t) => out.addTrack(t));
+      } else if (micStream?.getAudioTracks?.()?.length) {
+        micStream.getAudioTracks().forEach((t) => out.addTrack(t));
+      }
+    } else {
+      const cv = getEmbeddedVrmCanvas();
+      if (!cv) {
+        setStatus(
+          "<span style='color:#ff8899'>Luna only:</span> put <strong>/vrm/</strong> on the big screen first — <strong>Launch OBS + VTuber mode</strong> or <strong>Load page</strong> with your <code>/vrm/</code> URL.",
+        );
+        return;
+      }
+      const canvasStream = cv.captureStream(30);
+      canvasStream.getVideoTracks().forEach((t) => out.addTrack(t));
+      const mixedAudio = await buildMixedRecordingAudioStream(null);
+      if (mixedAudio?.getAudioTracks?.()?.length) {
+        mixedAudio.getAudioTracks().forEach((t) => out.addTrack(t));
+      } else if (micStream?.getAudioTracks?.()?.length) {
+        micStream.getAudioTracks().forEach((t) => out.addTrack(t));
+      }
+    }
+
+    if (!out.getVideoTracks().length) throw new Error("No video track");
+
+    recordedChunks = [];
+    try {
+      mediaRecorder = new MediaRecorder(out, { mimeType: mime, videoBitsPerSecond: 8000000 });
+    } catch {
+      mediaRecorder = new MediaRecorder(out);
+    }
+    mediaRecorder.ondataavailable = (ev) => {
+      if (ev.data.size) recordedChunks.push(ev.data);
+    };
+    const fileTag = mode === "full" ? "full" : "luna";
+    mediaRecorder.onstop = () => {
+      cleanupRecordingDisplayStream();
+      closeRecordingAudioCtx();
+      const mt = mediaRecorder.mimeType || mime || "video/webm";
+      const blob = new Blob(recordedChunks, { type: mt });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      const ext = fileExtensionForMime(mt);
+      a.download = `luna-podcast-${fileTag}-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-")}.${ext}`;
+      a.click();
+      URL.revokeObjectURL(url);
+      setStatus("<strong>Saved download.</strong> Ready to record again.");
+      resetRecordingUi();
+    };
+    mediaRecorder.onerror = (ev) => {
+      console.warn("[Podcast studio] MediaRecorder error:", ev);
+      resetRecordingUi();
+      setStatus("<span style='color:#ff8899'>Recording stopped (encoder error). Try again, or another browser.</span>");
+    };
+    mediaRecorder.start(200);
+    recStart = performance.now();
+    setRecordingButtonsEnabled(false);
+    if (btnStopRec) btnStopRec.disabled = false;
+    if (btnPerm) btnPerm.disabled = true;
+    recTimer = setInterval(() => {
+      setStatus(`<strong>Recording</strong> ${formatTime(performance.now() - recStart)} — Stop when finished.`);
+    }, 500);
+    setStatus(
+      "<strong>Recording…</strong> Stop when finished." +
+        (mode === "full"
+          ? " Full screen capture + mic (and system/tab audio if the picker included it)."
+          : " Embedded <strong>/vrm/</strong> canvas + mic."),
+    );
+  } catch (e) {
+    const name = e?.name || "";
+    if (name !== "NotAllowedError" && name !== "AbortError") console.warn("[Podcast studio] Record:", e);
+    cleanupRecordingDisplayStream();
+    closeRecordingAudioCtx();
+    setStatus(
+      name === "AbortError"
+        ? "Recording cancelled."
+        : `<span style='color:#ff8899'>Could not start recording: ${String(e?.message || e)}</span>`,
+    );
+    resetRecordingUi();
+  }
 }
 
 function initThree() {
@@ -1597,12 +1823,16 @@ if (btnObsVtuber) {
   btnObsVtuber.addEventListener("click", async () => {
     btnObsVtuber.disabled = true;
     try {
-      // Stream view should show the dedicated /vrm/ page (studio no longer uses in-room standing avatar).
+      if (!navigator.mediaDevices?.getUserMedia) {
+        throw new Error("This page needs getUserMedia (use Chrome or Edge).");
+      }
       studioForceLunaHidden = true;
       if (studioLunaVrm?.scene) studioLunaVrm.scene.visible = false;
+      stopAllMedia();
       videoSourceSelect.value = "embed";
       updateVideoSourceUi();
       loadEmbedPageFromUrl(VRM_VIEWER_URL);
+      await setupEmbedMicForVtuber();
       let obsPart = "";
       try {
         const resp = await fetch(new URL("/api/obs/start", window.location.origin).href, {
@@ -1617,9 +1847,11 @@ if (btnObsVtuber) {
         obsPart = ` OBS launch failed: ${String(e?.message || e)}.`;
       }
       setStatus(
-        `<strong>VTuber mode enabled.</strong> Screen now shows <strong>/vrm/</strong> (dedicated avatar viewer). Stream persona: <strong>${studioStreamMode ? "ON" : "OFF"}</strong>.${obsPart}`,
+        `<strong>VTuber mode enabled.</strong> Mic is live; <strong>Full screen</strong> / <strong>Luna only</strong> are unlocked. Screen shows <strong>/vrm/</strong>. Stream persona: <strong>${studioStreamMode ? "ON" : "OFF"}</strong>.${obsPart}`,
       );
     } catch (e) {
+      vtuberRecordingReady = false;
+      setRecordingButtonsEnabled(false);
       setStatus(`❌ Could not enable VTuber mode: ${String(e?.message || e)}`);
     } finally {
       btnObsVtuber.disabled = false;
@@ -1733,7 +1965,7 @@ videoSourceSelect.addEventListener("change", () => {
   if (videoSourceSelect.value !== "embed") {
     removeScreenEmbed();
   }
-  if (!btnRec.disabled) {
+  if (btnRecFull && !btnRecFull.disabled) {
     setStatus(
       "Video mode changed — click <strong>Enable microphone &amp; video</strong> again to use webcam, screen, or embed.",
     );
@@ -1770,7 +2002,6 @@ btnShareAgain.addEventListener("click", async () => {
     hiddenVideo.srcObject = streamForVideoElementFromDisplay(vt, screenCaptureStream);
     await hiddenVideo.play().catch(() => {});
     attachVideoTexture();
-    btnRec.disabled = false;
     btnShareAgain.disabled = false;
     setStatus("<strong>Window updated.</strong> Orb still follows your mic.");
   } catch (e) {
@@ -1798,7 +2029,11 @@ btnPerm.addEventListener("click", async () => {
       });
       micStream = micOnly;
       hiddenVideo.srcObject = null;
-      await hiddenVideo.pause().catch(() => {});
+      try {
+        hiddenVideo.pause();
+      } catch {
+        /* */
+      }
       await fillMicListOnly(micStream);
       if (!deviceListenersAttached) {
         deviceListenersAttached = true;
@@ -1807,10 +2042,9 @@ btnPerm.addEventListener("click", async () => {
       }
       setupAnalyser(micOnly);
       clearVideoScreenPlaceholder();
-      btnRec.disabled = false;
       btnShareAgain.disabled = true;
       setStatus(
-        "<strong>Mic ready.</strong> Paste the <strong>same URL as your tab</strong> (copy from the address bar), then click <strong>Load page on screen</strong> to use it here without switching windows.",
+        "<strong>Mic ready.</strong> Paste the <strong>same URL as your tab</strong> (copy from the address bar), then click <strong>Load page on screen</strong> to use it here without switching windows. <em>Recording</em> unlocks via <strong>Launch OBS + VTuber mode</strong>, not this button.",
       );
     } else if (mode === "display") {
       if (!navigator.mediaDevices.getDisplayMedia) {
@@ -1842,7 +2076,6 @@ btnPerm.addEventListener("click", async () => {
       }
       setupAnalyser(micStream);
       attachVideoTexture();
-      btnRec.disabled = false;
       btnShareAgain.disabled = false;
       setStatus(
         "<strong>Live — window capture.</strong> Change mic above; use <strong>Share…</strong> to pick another window. Orb uses your microphone. " +
@@ -1869,7 +2102,6 @@ btnPerm.addEventListener("click", async () => {
       }
       setupAnalyser(new MediaStream(stream.getAudioTracks()));
       attachVideoTexture();
-      btnRec.disabled = false;
       setStatus("<strong>Live — webcam.</strong> Change camera/mic above. Orb follows voice level.");
     }
   } catch (e) {
@@ -1896,82 +2128,14 @@ function formatTime(ms) {
   return `${m}:${r.toString().padStart(2, "0")}`;
 }
 
-btnRec.addEventListener("click", async () => {
-  const mime = pickMime();
-  if (!mime) {
-    setStatus("<span style='color:#ff8899'>Recording not supported in this browser.</span>");
-    return;
-  }
-  try {
-    const canvasStream = renderer.domElement.captureStream(30);
-    const out = new MediaStream();
-    canvasStream.getVideoTracks().forEach((t) => out.addTrack(t));
-
-    const mixedAudio = await buildMixedRecordingAudioStream();
-    if (mixedAudio?.getAudioTracks?.()?.length) {
-      mixedAudio.getAudioTracks().forEach((t) => out.addTrack(t));
-    } else if (micStream?.getAudioTracks?.()?.length) {
-      micStream.getAudioTracks().forEach((t) => out.addTrack(t));
-    }
-
-    recordedChunks = [];
-    try {
-      mediaRecorder = new MediaRecorder(out, { mimeType: mime, videoBitsPerSecond: 8000000 });
-    } catch {
-      mediaRecorder = new MediaRecorder(out);
-    }
-    mediaRecorder.ondataavailable = (ev) => {
-      if (ev.data.size) recordedChunks.push(ev.data);
-    };
-    mediaRecorder.onstop = () => {
-      closeRecordingAudioCtx();
-      const mt = mediaRecorder.mimeType || mime || "video/webm";
-      const blob = new Blob(recordedChunks, { type: mt });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      const ext = fileExtensionForMime(mt);
-      a.download = `luna-podcast-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-")}.${ext}`;
-      a.click();
-      URL.revokeObjectURL(url);
-      setStatus("<strong>Saved download.</strong> Ready to record again.");
-      btnRec.disabled = false;
-      btnStopRec.disabled = true;
-      btnPerm.disabled = false;
-    };
-    mediaRecorder.start(200);
-    recStart = performance.now();
-    btnRec.disabled = true;
-    btnStopRec.disabled = false;
-    btnPerm.disabled = true;
-    recTimer = setInterval(() => {
-      setStatus(`<strong>Recording</strong> ${formatTime(performance.now() - recStart)} — Stop when finished.`);
-    }, 500);
-    setStatus(
-      "<strong>Recording…</strong> Stop when finished." +
-        (videoSourceSelect.value === "display"
-          ? " Mic + shared window/tab audio (if you enabled audio in the share dialog)."
-          : ""),
-    );
-  } catch (e) {
-    console.warn("[Podcast studio] Record:", e);
-    closeRecordingAudioCtx();
-    setStatus(`<span style='color:#ff8899'>Could not start recording: ${String(e.message || e)}</span>`);
-    btnRec.disabled = false;
-    btnStopRec.disabled = true;
-    btnPerm.disabled = false;
-  }
-});
+btnRecFull?.addEventListener("click", () => void startPodcastRecording("full"));
+btnRecLuna?.addEventListener("click", () => void startPodcastRecording("luna"));
 
 btnStopRec.addEventListener("click", () => {
   if (mediaRecorder && mediaRecorder.state !== "inactive") {
     mediaRecorder.stop();
   } else {
-    closeRecordingAudioCtx();
-  }
-  if (recTimer) {
-    clearInterval(recTimer);
-    recTimer = null;
+    resetRecordingUi();
   }
 });
 

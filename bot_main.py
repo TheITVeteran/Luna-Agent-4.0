@@ -527,6 +527,9 @@ _shared_songs_lock = threading.Lock()
 _twitch_lock = threading.Lock()
 _twitch_ui_events: list[dict] = []
 _twitch_event_id: int = 0
+_lol_chat_lock = threading.Lock()
+_lol_chat_events: list[dict] = []
+_lol_chat_event_id: int = 0
 _twitch_stop_event = threading.Event()
 _twitch_msg_queue: queue.Queue = queue.Queue(maxsize=500)
 _pending_feedback_lock = threading.Lock()
@@ -846,6 +849,25 @@ def _live_chat_public_note(user_message: str) -> str:
     )
 
 
+def _lol_live_context_suffix(max_chars: int = 1500) -> str:
+    """Inject active LoL match context into normal chat replies when available."""
+    try:
+        if not _lol_spectator:
+            return ""
+        getter = getattr(_lol_spectator, "get_live_context", None)
+        if not callable(getter):
+            return ""
+        txt = getter(max_chars=max_chars)  # type: ignore[misc]
+        return txt if isinstance(txt, str) else ""
+    except Exception:
+        return ""
+
+
+def _stream_mode_auto_lol_enabled() -> bool:
+    """Auto-enable stream persona whenever live LoL context is available."""
+    return _env("LUNA_STREAM_MODE_WHILE_LOL", "1").strip().lower() in ("1", "true", "yes", "on")
+
+
 def _chat_fast_from_request(data: dict | None) -> bool | None:
     """Parse web UI / API: True = fast, False = instruction (full), None = use LUNA_CHAT_FAST env."""
     if not data:
@@ -892,9 +914,14 @@ def _prepare_main_chat_system(
     """
     use_fast = _chat_fast_enabled() if fast is None else fast
     live_note = _live_chat_public_note(user_message)
-    stream = _stream_mode_suffix(user_message, force_stream_mode=force_stream_mode)
+    lol_ctx = _lol_live_context_suffix(1400 if use_fast else 1800)
+    auto_stream_from_lol = bool(lol_ctx) and _stream_mode_auto_lol_enabled()
+    stream = _stream_mode_suffix(
+        user_message,
+        force_stream_mode=(force_stream_mode or auto_stream_from_lol),
+    )
     if use_fast:
-        return LUNA_CHAT_COMPACT_INJECTION.strip() + stream + live_note
+        return LUNA_CHAT_COMPACT_INJECTION.strip() + stream + live_note + lol_ctx
     # Instruction / full mode — single extra cost is optional intuition/existential (see _build_luna_chat_system).
     style_key = _choose_luna_style_for_reply(scope, user_message)
     system = _build_luna_chat_system(scope, style_key=style_key)
@@ -904,7 +931,7 @@ def _prepare_main_chat_system(
         if rag_results:
             rag_text = "\n".join(f"- {r['title']}: {r.get('snippet', '')[:150]}" for r in rag_results)
             system = system + "\n\n## Relevant knowledge\n" + rag_text[:1200]
-    return system + stream + _about_me_context_suffix(user_message) + live_note
+    return system + stream + _about_me_context_suffix(user_message) + live_note + lol_ctx
 
 def _build_luna_chat_system(scope: str | None, *, style_key: str | None = None) -> str:
     """Build full system prompt for Luna chat (capabilities + nudges + biology)."""
@@ -1027,6 +1054,26 @@ async def _set_discord_status(text: str, kind: str | None = None) -> tuple[bool,
     k = (kind or DISCORD_STATUS_TYPE or "listening").strip().lower()
     await bot.change_presence(activity=discord.Activity(type=_discord_activity_type_from_text(k), name=txt[:120]))
     return True, f"Discord status set to {k}: {txt[:120]}"
+
+
+def _schedule_discord_presence_for_stream_mode(stream_on: bool) -> None:
+    """When stream persona is toggled (e.g. podcast studio), mirror on Discord bot activity."""
+    try:
+        loop = getattr(bot, "loop", None)
+        if not loop or not loop.is_running():
+            return
+        if stream_on:
+            txt = _env("DISCORD_STREAM_MODE_STATUS", "Stream persona on").strip() or "Stream persona on"
+            k = _env("DISCORD_STREAM_MODE_STATUS_TYPE", "").strip().lower()
+            if k not in ("listening", "playing", "watching", "competing"):
+                k = (DISCORD_STATUS_TYPE or "listening").strip().lower()
+            asyncio.run_coroutine_threadsafe(_set_discord_status(txt, k), loop)
+        else:
+            default_status = DISCORD_STATUS_TEXT or OLLAMA_CHAT
+            asyncio.run_coroutine_threadsafe(_set_discord_status(default_status, DISCORD_STATUS_TYPE), loop)
+    except Exception:
+        pass
+
 
 def _scope_for(author_id: int, guild_id=None) -> str:
     if _linked_int and author_id == _linked_int:
@@ -3464,7 +3511,9 @@ async def _handle_wake_word_activation():
             scope = LINKED_SCOPE or "web"
             tstrip = text.strip()
             _cf = _chat_fast_enabled()
-            system = _prepare_main_chat_system(scope, tstrip, fast=_cf)
+            system = _prepare_main_chat_system(
+                scope, tstrip, fast=_cf, force_stream_mode=_stream_mode_env_on()
+            )
             history = _compact_history(get_recent_conversation(scope, 20), fast=_cf)
             reply = await asyncio.to_thread(
                 lambda: ollama_chat(
@@ -9441,6 +9490,26 @@ def _proactive_set(message: str):
     with _proactive_lock:
         _save_json(_PROACTIVE_PATH, {"message": (message or "").strip()[:500], "ts": time.time()})
 
+
+def _lol_chat_enqueue(luna_reply: str) -> None:
+    """Push a LoL live-commentary line to the web chat UI (poll) and conversation history."""
+    global _lol_chat_event_id
+    text = (luna_reply or "").strip()
+    if not text:
+        return
+    scope = LINKED_SCOPE or "web"
+    stub = "[LoL · live game]"
+    try:
+        append_exchange(scope, stub, text)
+    except Exception:
+        pass
+    with _lol_chat_lock:
+        _lol_chat_event_id += 1
+        eid = _lol_chat_event_id
+        _lol_chat_events.append({"id": eid, "reply": text, "ts": time.time()})
+        while len(_lol_chat_events) > 150:
+            _lol_chat_events.pop(0)
+
 def _proactive_get_and_clear() -> dict | None:
     with _proactive_lock:
         d = _load_json(_PROACTIVE_PATH, {})
@@ -9637,6 +9706,11 @@ try:
     web.register_blueprint(translate_bp)
 except Exception as _translate_err:
     translate_bp = None  # optional module
+
+try:
+    import luna_lol_spectator as _lol_spectator
+except Exception as _lol_spectator_err:
+    _lol_spectator = None  # optional module
 
 # Local VRM avatar viewer (Three.js; set LUNA_VRM_PATH or use ~/Downloads/Luna.vrm)
 try:
@@ -10647,6 +10721,30 @@ def api_twitch_pending():
         events = [e for e in _twitch_ui_events if e.get("id", 0) > since]
     return jsonify({"events": events})
 
+
+@web.route("/api/lol-chat/pending")
+def api_lol_chat_pending():
+    """Hub polls for League live-commentary lines Luna generated in the background. ?since=<last id>"""
+    try:
+        since = int(request.args.get("since", "0"))
+    except ValueError:
+        since = 0
+    with _lol_chat_lock:
+        events = [e for e in _lol_chat_events if e.get("id", 0) > since]
+    return jsonify({"events": events})
+
+
+@web.route("/api/lol-spectator/status")
+def api_lol_spectator_status():
+    """Hub: whether Riot active-game is visible, last HTTP code, region (see luna_lol_spectator.get_spectator_status)."""
+    try:
+        if _lol_spectator and hasattr(_lol_spectator, "get_spectator_status"):
+            return jsonify(_lol_spectator.get_spectator_status())
+    except Exception as e:
+        return jsonify({"configured": False, "message": str(e), "task_running": False})
+    return jsonify({"configured": False, "message": "Module unavailable", "task_running": False})
+
+
 @web.route("/api/stream-mode", methods=["GET"])
 def api_stream_mode_get():
     """Current streamer persona mode used by chat prompt assembly."""
@@ -10676,6 +10774,7 @@ def api_stream_mode_set():
     if not isinstance(raw, bool):
         return jsonify({"error": "Provide stream_mode as true/false (or normal/streamer)."}), 400
     _set_stream_mode_override(raw)
+    _schedule_discord_presence_for_stream_mode(raw)
     return jsonify({"ok": True, "stream_mode": _stream_mode_env_on(), "source": "runtime"})
 
 @web.route("/api/chat", methods=["POST"])
@@ -11116,6 +11215,27 @@ async def on_ready():
     bot.loop.create_task(_clipboard_monitor_loop())
     bot.loop.create_task(_knowledge_embedding_loop())
     bot.loop.create_task(_wake_word_loop())
+    _lol_observer_run = getattr(_lol_spectator, "observer_should_run", None)
+    if _lol_observer_run is None:
+        _lol_observer_run = getattr(_lol_spectator, "is_enabled", lambda: False)
+    if _lol_spectator and _lol_observer_run():
+        bot.loop.create_task(
+            _lol_spectator.commentary_loop(
+                ollama_chat=ollama_chat,
+                ollama_model=OLLAMA_CHAT,
+                on_luna_reply=_lol_chat_enqueue,
+                build_chat_system=lambda: _prepare_main_chat_system(
+                    LINKED_SCOPE or "web",
+                    "[LoL spectator] A JSON snapshot of the user's live League match follows in my next message.",
+                    fast=_chat_fast_enabled(),
+                    force_stream_mode=_stream_mode_env_on(),
+                ),
+            )
+        )
+        print(
+            "[LoL spectator] Commentary task started (RIOT_LOL_USE_LIVE_CLIENT and/or Riot API + PUUID).",
+            flush=True,
+        )
 
 @bot.event
 async def on_message(message: discord.Message):
@@ -11253,7 +11373,13 @@ async def on_message(message: discord.Message):
     # Luna chat
     history = await asyncio.to_thread(get_recent_conversation, scope, 30)
     history = _compact_history(history, fast=_cf)
-    system = await asyncio.to_thread(_prepare_main_chat_system, scope, text, fast=_cf)
+    system = await asyncio.to_thread(
+        _prepare_main_chat_system,
+        scope,
+        text,
+        fast=_cf,
+        force_stream_mode=_stream_mode_env_on(),
+    )
     try:
         reply = await asyncio.to_thread(
             lambda: ollama_chat(
