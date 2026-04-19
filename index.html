@@ -1729,6 +1729,9 @@
       <button type="button" class="cmd-btn" id="yt-like-btn" onclick="ytLikeFromInput()" title="Like one video — paste its URL in the message box, then press (same browser login as YT Comment)">
         <span class="cmd-icon">👍</span> YT Like (1 video)
       </button>
+      <button class="cmd-btn" onclick="(function(){ insertCommand('!yt_watch_react ', 'paste YouTube URL, then Send'); try { window.open(new URL('/podcast/?cowatch=1', window.location.origin).href, '_blank', 'noopener,noreferrer'); } catch (e) {} })()" title="Opens Podcast studio in a new tab (video on main screen, Luna VRM on second); inserts !yt_watch_react — paste URL and Send">
+        <span class="cmd-icon">📺</span> YT Watch react
+      </button>
       <button class="cmd-btn" onclick="openAnalyticsScreenPicker()" title="Choose a window or monitor, then vision reads analytics (OLLAMA_VISION_MODEL).">
         <span class="cmd-icon">👁</span> Read screen analytics
       </button>
@@ -1976,7 +1979,7 @@
         <div class="input-btns">
           <button type="button" class="chat-mode-btn" id="chat-mode-btn" aria-pressed="true">Fast</button>
           <button class="icon-btn" id="mic-btn" title="Hold to record voice">🎙</button>
-          <button class="icon-btn" id="vad-btn" title="Toggle voice activity (hands-free)">VA</button>
+          <button class="icon-btn" id="vad-btn" title="Voice activity (hands-free). Tuning: lunaHubVadThreshold (sensitivity), lunaHubVaAfterReplyMs (pause after Luna speaks, default 3500).">VA</button>
           <button class="icon-btn" id="stop-btn" onclick="stopTTS()" title="Stop voice">◼</button>
           <button class="send-btn" id="send-btn" onclick="sendMessage()">
             Send <span class="send-arrow">›</span>
@@ -2362,6 +2365,23 @@ async function pollLolChat() {
 setInterval(pollLolChat, 3000);
 pollLolChat();
 
+// Stream solo banter (idle/lore/LoL lobby): show in hub; VRM speaks via /vrm/ poll (avoid duplicate BroadcastChannel)
+let streamSoloSince = 0;
+async function pollStreamSoloChat() {
+  try {
+    const res = await fetch('/api/stream-solo/pending?since=' + streamSoloSince);
+    if (!res.ok) return;
+    const data = await res.json();
+    const events = data.events || [];
+    for (const ev of events) {
+      if (ev.reply) appendMsg('luna', ev.reply, { vrmSpeak: false });
+      if (ev.id > streamSoloSince) streamSoloSince = ev.id;
+    }
+  } catch (_) {}
+}
+setInterval(pollStreamSoloChat, 2500);
+pollStreamSoloChat();
+
 function updateLolObserverUI(lo) {
   const strip = document.getElementById('lol-observer-strip');
   const dot = document.getElementById('lol-observer-dot');
@@ -2570,11 +2590,53 @@ let voiceActivitySpeechDetected = false;
 let voiceActivityLastVoiceAtMs = 0;
 let voiceActivityRecordStartedAtMs = 0;
 let voiceActivityShouldTranscribeOnStop = false;
+/** setTimeout id — wait after Luna’s reply before turning the mic back on (avoids TTS/game bleed → gibberish). */
+let voiceActivityRestartTimer = 0;
 
-const HUB_VAD_THRESHOLD = 0.02;
+/** After each chat round-trip, delay before VA listens again (ms). Set localStorage `lunaHubVaAfterReplyMs` to 0 for instant restart. */
+const HUB_VA_COOLDOWN_AFTER_REPLY_MS = 3500;
+
+/** Default RMS threshold for voice-activity (VA); raise if breathing/game bleed triggers false segments. Override: localStorage `lunaHubVadThreshold` (e.g. 0.04–0.07). */
+const HUB_VAD_THRESHOLD_DEFAULT = 0.032;
+function hubVadThreshold() {
+  const v = parseFloat(localStorage.getItem('lunaHubVadThreshold') || '');
+  return Number.isFinite(v) && v > 0 && v < 1 ? v : HUB_VAD_THRESHOLD_DEFAULT;
+}
 const HUB_SILENCE_HOLD_MS = 900;
 const HUB_MIN_SEGMENT_MS = 1000;
 const HUB_MAX_SEGMENT_MS = 9000;
+
+/** WebRTC processing: noise suppression + AEC + AGC (does not remove sound leaking from headphones into the mic). */
+async function lunaGetUserMediaMic() {
+  const constraints = {
+    audio: {
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl: true,
+    },
+  };
+  try {
+    return await navigator.mediaDevices.getUserMedia(constraints);
+  } catch {
+    return await navigator.mediaDevices.getUserMedia({ audio: true });
+  }
+}
+
+function scheduleVoiceActivityRestart() {
+  if (voiceActivityRestartTimer) {
+    clearTimeout(voiceActivityRestartTimer);
+    voiceActivityRestartTimer = 0;
+  }
+  const raw = localStorage.getItem('lunaHubVaAfterReplyMs');
+  const parsed = parseInt(raw || '', 10);
+  const delay = Number.isFinite(parsed) && parsed >= 0 ? parsed : HUB_VA_COOLDOWN_AFTER_REPLY_MS;
+  voiceActivityRestartTimer = setTimeout(() => {
+    voiceActivityRestartTimer = 0;
+    if (voiceActivityEnabled && !voiceActivityBusy && !voiceActivityRecorder && !isRecording && !isSending) {
+      void startVoiceActivityCapture();
+    }
+  }, delay);
+}
 
 const chatEl = document.getElementById('chat');
 const inputEl = document.getElementById('input');
@@ -2614,7 +2676,15 @@ inputEl.addEventListener('keydown', e => {
   }
 });
 
-/** Strip markdown-ish content for Edge / browser TTS from the VRM page. */
+/** Bracket tags that map to short spoken sounds (mirrors bot_main._LUNA_TAG_TTS_SPOKEN). */
+const LUNA_TAG_TTS_SPOKEN_MAP = {
+  SIGH:'Hmph.', LAUGH:'Ha ha!', GIGGLE:'Heh heh!', CHUCKLE:'Heh.', COUGH:'Ahem.',
+  AHEM:'Ahem.', SNORT:'Pfft!', HUFF:'Hmph.', YAWN:'Mmm…', FACEPALM:'Ugh.',
+  SHOCKED:'Whoa!', SURPRISED:'Oh!', SCARED:'Ah!', CLAP:'Nice!', FIGHTING:'Hah!', VICTORY:'Yes!',
+};
+
+/** Strip markdown-ish content for Edge / browser TTS from the VRM page.
+ *  Also expands known [TAG]s to spoken sounds and strips remaining brackets. */
 function plainTextForVrmSpeech(raw) {
   if (!raw || typeof raw !== 'string') return '';
   let s = raw;
@@ -2622,6 +2692,11 @@ function plainTextForVrmSpeech(raw) {
   s = s.replace(/`([^`]+)`/g, '$1');
   s = s.replace(/\*\*([^*]+)\*\*/g, '$1');
   s = s.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');
+  // Expand known vocal tags to spoken sounds.
+  s = s.replace(/\[([A-Za-z][A-Za-z0-9_]*)\]/g, (_, tag) => {
+    const spoken = LUNA_TAG_TTS_SPOKEN_MAP[tag.toUpperCase()];
+    return spoken ? spoken + ' ' : '';
+  });
   s = s.replace(/\s+/g, ' ').trim();
   return s.slice(0, 8000);
 }
@@ -2745,7 +2820,8 @@ function appendStatus(text) {
 /** Match bot_main._LUNA_ALLOWED_INLINE_TAGS — strip [Softly], [Pauses], … keep [HAPPY], [SIGH], … */
 const LUNA_ALLOWED_BRACKET_TAGS = new Set([
   'NEUTRAL','RESET','HAPPY','EXCITED','LAUGH','SAD','DEPRESSED','MAD','ANGRY','FURIOUS','ANNOYED','FRUSTRATED','DISAPPOINTED','SHOCKED','SURPRISED','CONFUSED','BORED','TIRED','SLEEPY','SICK','RELIEVED','EMBARRASSED','CARING','PROUD','IMPRESSED','SMUG','CONFIDENT','TEASING','SHY','CURIOUS','QUESTION','THINKING','DOUBTFUL','WAITING','WORRIED','SCARED','CONCERNED','FIGHTING','HEARTBOX','HEARTEYES',
-  'WAVE','NOD','SHAKE_HEAD','CLAP','POINT','SHRUG','BOW','YAWN','SIGH','STRETCH','FACEPALM','KISS','VICTORY','DANCE','AGREE','DISAGREE'
+  'WAVE','NOD','SHAKE_HEAD','CLAP','POINT','SHRUG','BOW','YAWN','SIGH','STRETCH','FACEPALM','KISS','VICTORY','DANCE','AGREE','DISAGREE',
+  'GIGGLE','CHUCKLE','COUGH','AHEM','SNORT','HUFF',
 ]);
 function stripLunaNarrationBrackets(raw) {
   let s = String(raw || '');
@@ -2870,7 +2946,7 @@ async function sendMessage() {
   sendBtn.classList.remove('loading');
   inputEl.focus();
   if (voiceActivityEnabled && !voiceActivityBusy && !voiceActivityRecorder && !isRecording) {
-    queueMicrotask(() => void startVoiceActivityCapture());
+    scheduleVoiceActivityRestart();
   }
   setTimeout(() => document.getElementById('stat-mode').textContent = 'LUNA', 3000);
 }
@@ -3114,6 +3190,7 @@ const MORE_COMMANDS = {
       { label: 'Share song (cmd)', icon: '𝕏', desc: 'Same as the Share Song button (!share_song)', run: function() { sendQuick('!share_song'); } },
       { label: 'Share Facebook (cmd)', icon: '📘', desc: 'Same as Share Facebook (!share_facebook)', run: function() { sendQuick('!share_facebook'); } },
       { label: 'Read screen analytics', icon: '👁', desc: 'Pick window or monitor, then vision (!analytics_screen)', run: function() { openAnalyticsScreenPicker(); } },
+      { label: 'YT watch stop', icon: '⏹', desc: 'Stop live YT watch-react session (!yt_watch_stop)', run: function() { sendQuick('!yt_watch_stop'); } },
     ]
   },
   media: {
@@ -3810,7 +3887,10 @@ async function applyTranscriptionBlob(blob, opts = {}) {
     const data = await transcribeVoiceBlob(blob);
     const text = (data && data.text ? String(data.text).trim() : '');
     if (!text) {
-      if (!autoSend) showToast((data && data.error) || 'Could not transcribe', true);
+      if (!autoSend) {
+        if (data && data.speaker_match === false) showToast('Voice did not match your profile — ignored.', true);
+        else showToast((data && data.error) || 'Could not transcribe', true);
+      }
       return false;
     }
     updateInputFromTranscription(text);
@@ -3886,7 +3966,7 @@ function monitorVoiceActivityVad() {
   if (!voiceActivityEnabled || voiceActivityBusy || !voiceActivityRecorder || !voiceActivityAnalyser) return;
   const now = performance.now();
   const rms = voiceActivityVadRms();
-  if (rms >= HUB_VAD_THRESHOLD) {
+  if (rms >= hubVadThreshold()) {
     voiceActivitySpeechDetected = true;
     voiceActivityLastVoiceAtMs = now;
   } else if (
@@ -3912,7 +3992,7 @@ async function startVoiceActivityCapture() {
   voiceActivityLastVoiceAtMs = voiceActivityRecordStartedAtMs;
   voiceActivityChunks = [];
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const stream = await lunaGetUserMediaMic();
     if (!voiceActivityEnabled || voiceActivityBusy || isRecording || isSending) {
       stream.getTracks().forEach(t => t.stop());
       return;
@@ -3978,9 +4058,13 @@ function setVoiceActivityEnabled(on) {
   if (!vadBtn) return;
   vadBtn.classList.toggle('vad-on', voiceActivityEnabled);
   vadBtn.title = voiceActivityEnabled
-    ? 'Voice activity ON — click to stop'
-    : 'Toggle voice activity (hands-free)';
+    ? 'Voice activity ON — mic pauses ~3.5s after Luna replies (see lunaHubVaAfterReplyMs). Click to stop.'
+    : 'Voice activity (hands-free). Tuning: lunaHubVadThreshold, lunaHubVaAfterReplyMs — then reload.';
   if (!voiceActivityEnabled) {
+    if (voiceActivityRestartTimer) {
+      clearTimeout(voiceActivityRestartTimer);
+      voiceActivityRestartTimer = 0;
+    }
     stopVoiceActivityRecorder();
     voiceActivityBusy = false;
   }
@@ -4007,7 +4091,7 @@ async function startRecording() {
     showToast('Voice activity paused for push-to-talk');
   }
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const stream = await lunaGetUserMediaMic();
     mediaRecorder = new MediaRecorder(stream);
     audioChunks = [];
     mediaRecorder.ondataavailable = e => audioChunks.push(e.data);

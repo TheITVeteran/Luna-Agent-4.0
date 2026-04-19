@@ -106,6 +106,48 @@
   }
   #panel input[type="range"]#mic-vol { accent-color: #c8a060; }
   video#hidden-feed, video#hidden-feed-aux { position: fixed; width: 2px; height: 2px; opacity: 0; pointer-events: none; left: -99px; }
+
+  /* Voice ID overlay — small screen in studio */
+  #voice-id-overlay {
+    position: fixed; inset: 0; z-index: 50;
+    display: none; align-items: center; justify-content: center;
+    background: rgba(0, 0, 0, 0.55);
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
+    pointer-events: auto;
+  }
+  #voice-id-overlay.open { display: flex; }
+  .voice-id-card {
+    position: relative;
+    width: min(360px, 92vw);
+    max-height: 90vh; overflow: auto;
+    padding: 18px 18px 16px;
+    border-radius: 20px;
+    background: linear-gradient(165deg, rgba(22, 26, 38, 0.98), rgba(8, 10, 18, 0.99));
+    border: 1px solid rgba(100, 140, 220, 0.28);
+    box-shadow: 0 24px 60px rgba(0, 0, 0, 0.75), 0 0 0 1px rgba(255, 255, 255, 0.05) inset;
+    color: #c4d0e5;
+    font-size: 12px;
+  }
+  .voice-id-card h2 {
+    font-size: 14px; font-weight: 600; color: #e8f0ff; margin: 0 0 8px;
+    letter-spacing: 0.04em;
+  }
+  .voice-id-card p { margin: 0 0 12px; line-height: 1.45; color: #8a9bb8; font-size: 11px; }
+  .voice-id-card .voice-id-status {
+    min-height: 36px; padding: 8px 10px; border-radius: 10px;
+    background: rgba(0, 0, 0, 0.35);
+    border: 1px solid rgba(120, 150, 220, 0.15);
+    font-size: 11px; color: #9ab0d0; margin-bottom: 12px;
+  }
+  .voice-id-card .voice-id-status.rec { border-color: rgba(255, 100, 120, 0.45); color: #ffb0b8; }
+  .voice-id-card .row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+  .voice-id-card .row button { flex: 1; min-width: 100px; margin-top: 0; }
+  .voice-id-card button.close-x {
+    position: absolute; top: 10px; right: 12px; width: auto; margin: 0;
+    padding: 4px 10px; font-size: 11px; background: transparent; border: 1px solid rgba(255,255,255,0.12);
+  }
+  .voice-id-wrap { position: relative; }
 </style>
 <script type="importmap">
 {
@@ -125,6 +167,7 @@
 
 <div id="panel" style="visibility:hidden">
   <h1>Studio</h1>
+  <button type="button" class="primary" id="btn-open-voice-id" style="margin-bottom:10px">🎤 Voice ID</button>
   <div class="phone-dock">
     <div class="phone-dock-title">Screen — video / tab sound</div>
     <div class="vol-row">
@@ -182,6 +225,24 @@
   </div>
   <div class="status" id="status"><strong>Recording:</strong> click <strong>Launch OBS + VTuber mode</strong> — that loads <code>/vrm/</code>, asks for the mic, and unlocks <strong>Full screen</strong> / <strong>Luna only</strong>. Use <strong>Enable microphone &amp; video</strong> only if you need webcam or window capture on the virtual screen for the orb (optional for recording).</div>
   <div class="hint"><strong>Scene:</strong> drag orbit · wheel zoom · middle-drag pan · <strong>arrows</strong> move view.</div>
+</div>
+
+<div id="voice-id-overlay" aria-hidden="true">
+  <div class="voice-id-wrap">
+    <div class="voice-id-card">
+      <button type="button" class="close-x" id="voice-id-close" title="Close">✕</button>
+      <h2>Voice ID</h2>
+      <p>Record <strong>5–15 seconds</strong> in your normal speaking voice (same mic you use with Luna). Saved on this PC as your profile — the hub can ignore clips that don’t match. Server needs <code style="color:#8ab4e8">torch</code> + <code style="color:#8ab4e8">resemblyzer</code>. On <strong>Windows + Python 3.13</strong>, run <code style="color:#8ab4e8">pip install webrtcvad-wheels</code> then <code style="color:#8ab4e8">pip install resemblyzer --no-deps</code> (plain <code>pip install resemblyzer</code> fails building webrtcvad).</p>
+      <div class="voice-id-status" id="voice-id-status">Loading…</div>
+      <div class="row">
+        <button type="button" class="primary" id="voice-id-record">● Record</button>
+        <button type="button" id="voice-id-stop" disabled>■ Stop</button>
+      </div>
+      <div class="row">
+        <button type="button" class="danger" id="voice-id-clear">Clear profile</button>
+      </div>
+    </div>
+  </div>
 </div>
 
 <script type="module">
@@ -244,6 +305,10 @@ let screenGroup = null;
 let auxScreenGroup = null;
 /** CSS3D iframe placed on the virtual screen (interactive embed mode). */
 let screenEmbedObject = null;
+/** CSS3D iframe on the aux (second) screen — used for Luna /vrm/ during YouTube co-watch. */
+let auxScreenEmbedObject = null;
+/** True while the aux screen shows the VRM viewer for co-watch (vs camera / capture). */
+let studioCowatchAuxActive = false;
 let auxCaptureStream = null;
 let micStream = null;
 /** Set when using ``getDisplayMedia`` (window/screen/tab); video track kept while mic may swap. */
@@ -264,6 +329,7 @@ let vtuberRecordingReady = false;
 /** Dedicated graph for mixing mic + virtual-screen audio into one recording track. */
 let recordingAudioCtx = null;
 let studioStreamMode = false;
+let studioWatchTargetTs = 0;
 
 const VRM_BASE = new URL("/vrm/", window.location.origin).href;
 const STUDIO_LUNA_MODEL_URL = new URL("model", VRM_BASE).href;
@@ -829,6 +895,7 @@ function stopMicTracksOnly() {
 function stopAllMedia() {
   vtuberRecordingReady = false;
   removeScreenEmbed();
+  removeAuxScreenEmbed();
   stopMicTracksOnly();
   if (screenCaptureStream) {
     screenCaptureStream.getTracks().forEach((t) => t.stop());
@@ -854,6 +921,29 @@ function updateVideoSourceUi() {
   embedRow.style.display = embed ? "block" : "none";
 }
 
+function youtubeEmbedUrlFromAny(raw) {
+  const text = String(raw || "").trim();
+  if (!text) return "";
+  let u = null;
+  try {
+    u = new URL(text);
+  } catch {
+    return "";
+  }
+  const host = (u.hostname || "").toLowerCase();
+  let vid = "";
+  if (host.includes("youtu.be")) {
+    vid = (u.pathname || "").split("/").filter(Boolean)[0] || "";
+  } else if (host.includes("youtube.com")) {
+    if ((u.pathname || "").startsWith("/watch")) vid = u.searchParams.get("v") || "";
+    else if ((u.pathname || "").startsWith("/shorts/")) vid = (u.pathname.split("/")[2] || "").trim();
+    else if ((u.pathname || "").startsWith("/embed/")) vid = (u.pathname.split("/")[2] || "").trim();
+  }
+  vid = (vid || "").replace(/[^A-Za-z0-9_-]/g, "").slice(0, 32);
+  if (!vid) return "";
+  return `https://www.youtube.com/embed/${vid}?autoplay=1&rel=0&modestbranding=1`;
+}
+
 function removeScreenEmbed() {
   if (screenEmbedObject && screenGroup) {
     screenGroup.remove(screenEmbedObject);
@@ -862,16 +952,87 @@ function removeScreenEmbed() {
   if (screenMesh) screenMesh.visible = true;
 }
 
+function removeAuxScreenEmbed() {
+  if (auxScreenEmbedObject && auxScreenGroup) {
+    auxScreenGroup.remove(auxScreenEmbedObject);
+    auxScreenEmbedObject = null;
+  }
+  studioCowatchAuxActive = false;
+  if (auxScreenMesh) auxScreenMesh.visible = true;
+}
+
+/** Stop aux camera / window capture so the aux plane can show a CSS3D embed. */
+function stopAuxCaptureForEmbed() {
+  if (auxCaptureStream) {
+    auxCaptureStream.getTracks().forEach((t) => t.stop());
+    auxCaptureStream = null;
+  }
+  if (hiddenVideoAux) hiddenVideoAux.srcObject = null;
+  if (auxVideoTexture) {
+    auxVideoTexture.dispose();
+    auxVideoTexture = null;
+  }
+  if (auxScreenMesh) {
+    auxScreenMesh.material.map = null;
+    auxScreenMesh.material.color.setHex(0x101018);
+    auxScreenMesh.material.opacity = 0.78;
+    auxScreenMesh.material.needsUpdate = true;
+  }
+}
+
+/** Luna VRM on the small screen (520×295 px → 5.2×2.95 world units at scale 0.01). */
+function loadAuxVrmEmbedForCowatch() {
+  if (!auxScreenGroup) return;
+  stopAuxCaptureForEmbed();
+  removeAuxScreenEmbed();
+  const shell = document.createElement("div");
+  shell.style.width = "520px";
+  shell.style.height = "295px";
+  shell.style.overflow = "hidden";
+  shell.style.borderRadius = "10px";
+  shell.style.background = "#0a0c10";
+  shell.style.boxShadow = "0 0 0 2px rgba(90, 130, 200, 0.28)";
+  shell.style.pointerEvents = "auto";
+  const iframe = document.createElement("iframe");
+  iframe.style.width = "100%";
+  iframe.style.height = "100%";
+  iframe.style.border = "none";
+  iframe.referrerPolicy = "no-referrer-when-downgrade";
+  iframe.allow =
+    "accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; fullscreen; microphone; camera";
+  iframe.sandbox =
+    "allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-presentation allow-downloads allow-modals";
+  iframe.src = VRM_VIEWER_URL;
+  iframe.title = "Luna VRM";
+  shell.appendChild(iframe);
+  const obj = new CSS3DObject(shell);
+  obj.position.set(0, 0, 0.09);
+  obj.scale.set(0.01, 0.01, 0.01);
+  auxScreenGroup.add(obj);
+  auxScreenEmbedObject = obj;
+  if (auxScreenMesh) auxScreenMesh.visible = false;
+  studioCowatchAuxActive = true;
+}
+
 /**
  * Interactive page on the big screen (same aspect as the WebGL plane: 1120×625 px → 11.2×6.25 world units).
+ * @param {{ auxVrm?: boolean }} [opts] — if true, load Luna VRM on the aux screen (YouTube co-watch layout).
  */
-function loadEmbedPageFromUrl(raw) {
+function loadEmbedPageFromUrl(raw, opts) {
+  const auxVrm = Boolean(opts && opts.auxVrm);
   let url = String(raw || "").trim();
   if (!url) {
     setStatus("<span style='color:#ff8899'>Enter a URL first.</span>");
     return;
   }
+  if (!auxVrm && studioCowatchAuxActive) {
+    removeAuxScreenEmbed();
+  }
   if (!/^https?:\/\//i.test(url)) url = `https://${url}`;
+  const ytEmbed = youtubeEmbedUrlFromAny(url);
+  if (ytEmbed) {
+    url = ytEmbed;
+  }
   try {
     void new URL(url);
   } catch {
@@ -910,9 +1071,53 @@ function loadEmbedPageFromUrl(raw) {
   screenEmbedObject = obj;
   if (screenMesh) screenMesh.visible = false;
 
+  if (auxVrm) loadAuxVrmEmbedForCowatch();
+
   setStatus(
-    "<strong>Page loaded on screen.</strong> Click and scroll on the screen. If you see a blank area, that site blocks embedding — try another page or use Screen/window capture instead.",
+    auxVrm
+      ? "<strong>Co-watch layout:</strong> video on the main screen, Luna VRM on the second. TTS uses the same <code>luna-vrm-speech</code> channel as the hub."
+      : "<strong>Page loaded on screen.</strong> Click and scroll on the screen. If you see a blank area, that site blocks embedding — try another page or use Screen/window capture instead.",
   );
+}
+
+async function syncStudioWatchTargetFromServer() {
+  try {
+    const resp = await fetch(new URL("/api/studio/watch-target", window.location.origin).href, { method: "GET" });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) return;
+    const ts = Number(data?.ts || 0);
+    const url = String(data?.url || "").trim();
+    const source = String(data?.source || "").trim();
+    if (!Number.isFinite(ts) || ts <= studioWatchTargetTs) return;
+    studioWatchTargetTs = ts;
+
+    if (!url) {
+      if (videoSourceSelect.value === "embed") removeScreenEmbed();
+      removeAuxScreenEmbed();
+      if (embedUrlInput) embedUrlInput.value = "";
+      setStatus(
+        source === "yt_watch_stop"
+          ? "<strong>Watch-react ended.</strong> Studio watch target cleared."
+          : "<strong>Studio watch target cleared.</strong>",
+      );
+      return;
+    }
+
+    if (videoSourceSelect.value !== "embed") {
+      videoSourceSelect.value = "embed";
+      updateVideoSourceUi();
+    }
+    if (embedUrlInput) embedUrlInput.value = url;
+    const useCowatch = source === "yt_watch_react";
+    loadEmbedPageFromUrl(url, { auxVrm: useCowatch });
+    setStatus(
+      useCowatch
+        ? `<strong>Co-watch:</strong> video on main screen, Luna VRM on second — ${String(data?.title || "Video")}.`
+        : `<strong>Watch target loaded.</strong> ${String(data?.title || "Video")}`,
+    );
+  } catch {
+    /* keep studio running even if API is unavailable */
+  }
 }
 
 function clearVideoScreenPlaceholder() {
@@ -1653,12 +1858,12 @@ function initThree() {
   right.position.set(sw / 2 + t / 2, 0, -d / 2);
   screenGroup.add(top, bot, left, right);
 
-  // Secondary screen (camera / VSeeFace) to the right of the main VTuber screen.
+  // Secondary screen (camera / desktop apps) aligned right beside the main screen.
   auxScreenGroup = new THREE.Group();
-  auxScreenGroup.position.set(9.8, 2.9, -10.55);
+  auxScreenGroup.position.set(8.75, 2.9, -10.8);
   auxScreenGroup.rotation.order = "YXZ";
-  auxScreenGroup.rotation.y = -0.06;
-  auxScreenGroup.rotation.x = 0.05;
+  auxScreenGroup.rotation.y = -0.07;
+  auxScreenGroup.rotation.x = 0.055;
   scene.add(auxScreenGroup);
 
   const sw2 = 5.2;
@@ -1876,6 +2081,7 @@ if (btnAuxCamera) {
   btnAuxCamera.addEventListener("click", async () => {
     btnAuxCamera.disabled = true;
     try {
+      removeAuxScreenEmbed();
       if (!navigator.mediaDevices?.getUserMedia) throw new Error("getUserMedia not supported");
       if (auxCaptureStream) {
         auxCaptureStream.getTracks().forEach((t) => t.stop());
@@ -1900,6 +2106,7 @@ if (btnAuxVseeface) {
   btnAuxVseeface.addEventListener("click", async () => {
     btnAuxVseeface.disabled = true;
     try {
+      removeAuxScreenEmbed();
       if (!navigator.mediaDevices?.getDisplayMedia) throw new Error("getDisplayMedia not supported");
       if (auxCaptureStream) {
         auxCaptureStream.getTracks().forEach((t) => t.stop());
@@ -1927,6 +2134,7 @@ if (btnAuxVseeface) {
 }
 
 async function startAuxDesktopCapture(label = "desktop app window") {
+  removeAuxScreenEmbed();
   if (!navigator.mediaDevices?.getDisplayMedia) throw new Error("getDisplayMedia not supported");
   if (auxCaptureStream) {
     auxCaptureStream.getTracks().forEach((t) => t.stop());
@@ -1964,6 +2172,7 @@ videoSourceSelect.addEventListener("change", () => {
   updateVideoSourceUi();
   if (videoSourceSelect.value !== "embed") {
     removeScreenEmbed();
+    removeAuxScreenEmbed();
   }
   if (btnRecFull && !btnRecFull.disabled) {
     setStatus(
@@ -2120,6 +2329,21 @@ btnPerm.addEventListener("click", async () => {
 
 updateVideoSourceUi();
 void syncStudioStreamModeFromServer();
+void (async () => {
+  await syncStudioWatchTargetFromServer();
+  try {
+    if (new URLSearchParams(window.location.search).get("cowatch") === "1" && !screenEmbedObject) {
+      setStatus(
+        "<strong>Co-watch studio.</strong> Send <code>!yt_watch_react &lt;YouTube URL&gt;</code> from Discord or the hub. The main screen loads the video; the second shows Luna VRM for TTS (same-origin <code>luna-vrm-speech</code> as the hub).",
+      );
+    }
+  } catch {
+    /* */
+  }
+})();
+setInterval(() => {
+  void syncStudioWatchTargetFromServer();
+}, 2500);
 
 function formatTime(ms) {
   const s = Math.floor(ms / 1000);
@@ -2141,6 +2365,155 @@ btnStopRec.addEventListener("click", () => {
 
 initThree();
 animate();
+</script>
+<script>
+(function () {
+  const overlay = document.getElementById("voice-id-overlay");
+  const btnOpen = document.getElementById("btn-open-voice-id");
+  const btnClose = document.getElementById("voice-id-close");
+  const statusEl = document.getElementById("voice-id-status");
+  const btnRec = document.getElementById("voice-id-record");
+  const btnStop = document.getElementById("voice-id-stop");
+  const btnClear = document.getElementById("voice-id-clear");
+  let stream = null;
+  let mediaRec = null;
+  let chunks = [];
+
+  async function getMic() {
+    try {
+      return await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+      });
+    } catch {
+      return await navigator.mediaDevices.getUserMedia({ audio: true });
+    }
+  }
+
+  async function refreshStatus() {
+    try {
+      const r = await fetch("/api/voice-profile");
+      const j = await r.json();
+      if (!j.encoder_ready) {
+        statusEl.textContent =
+          "Server: pip install webrtcvad-wheels, then pip install resemblyzer --no-deps (Windows 3.13). Then restart Luna.";
+        if (btnRec) btnRec.disabled = true;
+        return;
+      }
+      if (btnRec) btnRec.disabled = false;
+      if (j.enrolled) {
+        statusEl.textContent =
+          "Profile on this PC. Hub mic uses it when VOICE_SPEAKER_VERIFY=1 (match ≥ " + j.match_min + ").";
+      } else {
+        statusEl.textContent = "No profile yet — record 5–15s of your normal voice, then Stop.";
+      }
+    } catch {
+      statusEl.textContent = "Could not reach Luna (open studio from the same host:port as the bot, e.g. :5050).";
+      if (btnRec) btnRec.disabled = true;
+    }
+  }
+
+  function openOverlay() {
+    overlay.classList.add("open");
+    overlay.setAttribute("aria-hidden", "false");
+    void refreshStatus();
+  }
+
+  function closeOverlay() {
+    overlay.classList.remove("open");
+    overlay.setAttribute("aria-hidden", "true");
+    if (mediaRec && mediaRec.state !== "inactive") {
+      try {
+        mediaRec.stop();
+      } catch {
+        /* */
+      }
+    }
+    mediaRec = null;
+    chunks = [];
+    if (stream) {
+      stream.getTracks().forEach((t) => t.stop());
+      stream = null;
+    }
+    btnStop.disabled = true;
+    statusEl.classList.remove("rec");
+  }
+
+  btnOpen?.addEventListener("click", openOverlay);
+  btnClose?.addEventListener("click", closeOverlay);
+  overlay?.addEventListener("click", (e) => {
+    if (e.target === overlay) closeOverlay();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && overlay.classList.contains("open")) closeOverlay();
+  });
+
+  btnRec?.addEventListener("click", async () => {
+    await refreshStatus();
+    if (btnRec.disabled) return;
+    try {
+      stream = await getMic();
+      chunks = [];
+      mediaRec = new MediaRecorder(stream);
+      mediaRec.ondataavailable = (ev) => {
+        if (ev.data && ev.data.size) chunks.push(ev.data);
+      };
+      mediaRec.onstop = async () => {
+        const mime = mediaRec.mimeType || "audio/webm";
+        const blob = new Blob(chunks, { type: mime });
+        chunks = [];
+        if (stream) {
+          stream.getTracks().forEach((t) => t.stop());
+          stream = null;
+        }
+        mediaRec = null;
+        btnStop.disabled = true;
+        statusEl.classList.remove("rec");
+        if (blob.size < 800) {
+          statusEl.textContent = "Too short — record at least a few seconds.";
+          await refreshStatus();
+          return;
+        }
+        statusEl.textContent = "Saving profile…";
+        try {
+          const r = await fetch("/api/voice-enroll", {
+            method: "POST",
+            headers: { "Content-Type": "audio/webm" },
+            body: blob,
+          });
+          const j = await r.json().catch(() => ({}));
+          if (j.ok) statusEl.textContent = "Saved. Hub transcription will use this voice.";
+          else statusEl.textContent = j.error || "Enrollment failed.";
+        } catch {
+          statusEl.textContent = "Network error while saving.";
+        }
+        await refreshStatus();
+      };
+      mediaRec.start();
+      btnRec.disabled = true;
+      btnStop.disabled = false;
+      statusEl.classList.add("rec");
+      statusEl.textContent = "Recording… speak naturally, then Stop.";
+    } catch {
+      statusEl.textContent = "Microphone not available.";
+    }
+  });
+
+  btnStop?.addEventListener("click", () => {
+    if (mediaRec && mediaRec.state !== "inactive") mediaRec.stop();
+  });
+
+  btnClear?.addEventListener("click", async () => {
+    if (!confirm("Remove the saved voice profile from this PC?")) return;
+    try {
+      const r = await fetch("/api/voice-profile", { method: "DELETE" });
+      const j = await r.json().catch(() => ({}));
+      statusEl.textContent = j.ok ? "Profile cleared." : j.error || "Could not clear.";
+      await refreshStatus();
+    } catch {
+      statusEl.textContent = "Could not reach server.";
+    }
+  });
+})();
 </script>
 </body>
 </html>

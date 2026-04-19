@@ -12,6 +12,8 @@ Two data sources (can combine):
 If both are enabled, the observer tries the live client first, then falls back to Riot.
 
 Env:
+  RIOT_LOL_COMMENTARY_CONFIG — optional path to JSON (default: ``data/lol_commentary_config.json``): streamer persona, mains, soundboard lines.
+  RIOT_LOL_SOUNDBOARD — ``1`` (default) to run soundboard triggers before LLM commentary; set ``0`` to disable.
   RIOT_LOL_USE_LIVE_CLIENT — ``1`` to read local Live Client Data (same PC as League)
   RIOT_LOL_LIVE_CLIENT_URL — base URL (default: https://127.0.0.1:2999)
   RIOT_API_KEY — Riot API key (only for cloud path)
@@ -26,8 +28,10 @@ Env:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
+import random
 import ssl
 import threading
 import time
@@ -69,6 +73,301 @@ _latest_lock = threading.Lock()
 _latest_snapshot: dict[str, Any] | None = None
 _latest_source: str | None = None
 _latest_ts: float = 0.0
+
+# Soundboard: one-shot per game + K/D deltas vs last poll
+_soundboard_state: dict[str, Any] = {
+    "session_key": None,
+    "fired_ids": set(),
+    "prev_kills": None,
+    "prev_deaths": None,
+    "prev_assists": None,
+}
+_commentary_cfg_cache: dict[str, Any] = {"path": "", "mtime": 0.0, "data": None}
+
+
+def _commentary_config_path() -> str:
+    p = _env(
+        "RIOT_LOL_COMMENTARY_CONFIG",
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "lol_commentary_config.json"),
+    )
+    return os.path.normpath(p)
+
+
+def load_commentary_config() -> dict[str, Any]:
+    """JSON: streamer persona, mains, soundboard triggers. Cached by mtime."""
+    path = _commentary_config_path()
+    try:
+        mtime = os.path.getmtime(path)
+    except Exception:
+        return {}
+    if _commentary_cfg_cache.get("path") == path and abs(float(_commentary_cfg_cache.get("mtime") or 0) - mtime) < 0.01:
+        d = _commentary_cfg_cache.get("data")
+        return d if isinstance(d, dict) else {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+    except Exception:
+        _commentary_cfg_cache["path"] = path
+        _commentary_cfg_cache["mtime"] = mtime
+        _commentary_cfg_cache["data"] = {}
+        return {}
+    data = raw if isinstance(raw, dict) else {}
+    _commentary_cfg_cache["path"] = path
+    _commentary_cfg_cache["mtime"] = mtime
+    _commentary_cfg_cache["data"] = data
+    return data
+
+
+def get_lobby_persona_hint() -> str:
+    """Short text for stream solo `lol_lobby` prompts (between games)."""
+    cfg = load_commentary_config()
+    bits: list[str] = []
+    sn = (cfg.get("streamer_name") or "").strip()
+    if sn:
+        bits.append(f"The streamer's name is {sn}.")
+    rv = (cfg.get("lol_lobby_voice") or "").strip()
+    if rv:
+        bits.append(rv)
+    mains = cfg.get("mains")
+    if isinstance(mains, list) and mains:
+        bits.append(f"They often play: {', '.join(str(x) for x in mains[:8])}.")
+    return " ".join(bits).strip()
+
+
+def _game_session_key(snap: dict[str, Any]) -> str:
+    gid = snap.get("gameId")
+    if gid is not None:
+        return str(gid)
+    try:
+        blob = json.dumps(snap.get("teams") or {}, sort_keys=True, ensure_ascii=False)[:800]
+    except Exception:
+        blob = str(snap.get("gameTimeMmSs") or "")
+    return hashlib.sha256(blob.encode("utf-8", errors="replace")).hexdigest()[:24]
+
+
+def _fnum(x: Any) -> float | None:
+    try:
+        if x is None:
+            return None
+        return float(x)
+    except (TypeError, ValueError):
+        return None
+
+
+def _reset_soundboard_session(key: str) -> None:
+    global _soundboard_state
+    _soundboard_state["session_key"] = key
+    _soundboard_state["fired_ids"] = set()
+    _soundboard_state["prev_kills"] = None
+    _soundboard_state["prev_deaths"] = None
+    _soundboard_state["prev_assists"] = None
+
+
+def _match_soundboard_when(when: dict[str, Any], snap: dict[str, Any]) -> bool:
+    if not isinstance(when, dict) or not when:
+        return False
+    act = snap.get("activeSummoner")
+    if not isinstance(act, dict):
+        act = {}
+    k = _fnum(act.get("kills"))
+    d = _fnum(act.get("deaths"))
+    a = _fnum(act.get("assists"))
+    cs = _fnum(act.get("creepScore"))
+    lvl = _fnum(act.get("level"))
+    gold = _fnum(act.get("currentGold"))
+    champ = ((act.get("champion") or "") if isinstance(act.get("champion"), str) else "") or ""
+
+    def ge(key: str, cur: float | None) -> bool:
+        if key not in when:
+            return True
+        if cur is None:
+            return False
+        try:
+            return cur >= float(when[key])
+        except (TypeError, ValueError):
+            return False
+
+    def le(key: str, cur: float | None) -> bool:
+        if key not in when:
+            return True
+        if cur is None:
+            return False
+        try:
+            return cur <= float(when[key])
+        except (TypeError, ValueError):
+            return False
+
+    if not ge("active_kills_gte", k):
+        return False
+    if not le("active_kills_lte", k):
+        return False
+    if not ge("active_deaths_gte", d):
+        return False
+    if not le("active_deaths_lte", d):
+        return False
+    if not ge("active_assists_gte", a):
+        return False
+    if not le("active_assists_lte", a):
+        return False
+    if not ge("active_cs_gte", cs):
+        return False
+    if not ge("active_level_gte", lvl):
+        return False
+    if not ge("active_gold_gte", gold):
+        return False
+
+    subs = when.get("active_champion_contains")
+    if isinstance(subs, str) and subs.strip():
+        if subs.lower() not in champ.lower():
+            return False
+    if isinstance(subs, list):
+        ok = False
+        for s in subs:
+            if isinstance(s, str) and s.strip() and s.lower() in champ.lower():
+                ok = True
+                break
+        if subs and not ok:
+            return False
+
+    gt = _fnum(snap.get("gameTimeSeconds"))
+    if "game_time_min_gte" in when and gt is not None:
+        try:
+            if (gt / 60.0) < float(when["game_time_min_gte"]):
+                return False
+        except (TypeError, ValueError):
+            return False
+    if "game_time_min_lte" in when and gt is not None:
+        try:
+            if (gt / 60.0) > float(when["game_time_min_lte"]):
+                return False
+        except (TypeError, ValueError):
+            return False
+
+    msub = (when.get("map_contains") or "").strip()
+    if msub:
+        mp = str(snap.get("map") or "")
+        if msub.lower() not in mp.lower():
+            return False
+
+    ev_sub = (when.get("recent_event_contains") or "").strip()
+    if ev_sub:
+        evs = snap.get("recentEvents")
+        if not isinstance(evs, list):
+            return False
+        ev_l = ev_sub.lower()
+        if not any(ev_l in str(x).lower() for x in evs):
+            return False
+
+    pk = _soundboard_state.get("prev_kills")
+    pd = _soundboard_state.get("prev_deaths")
+    pa = _soundboard_state.get("prev_assists")
+    if "kills_delta_gte" in when and k is not None:
+        try:
+            thr = float(when["kills_delta_gte"])
+            delta = (k - pk) if pk is not None else k
+            if delta < thr:
+                return False
+        except (TypeError, ValueError):
+            return False
+    if "deaths_delta_gte" in when and d is not None:
+        try:
+            thr = float(when["deaths_delta_gte"])
+            delta = (d - pd) if pd is not None else d
+            if delta < thr:
+                return False
+        except (TypeError, ValueError):
+            return False
+    if "assists_delta_gte" in when and a is not None:
+        try:
+            thr = float(when["assists_delta_gte"])
+            delta = (a - pa) if pa is not None else a
+            if delta < thr:
+                return False
+        except (TypeError, ValueError):
+            return False
+
+    return True
+
+
+def _update_soundboard_prev_from_snap(snap: dict[str, Any]) -> None:
+    act = snap.get("activeSummoner")
+    if not isinstance(act, dict):
+        return
+    _soundboard_state["prev_kills"] = _fnum(act.get("kills"))
+    _soundboard_state["prev_deaths"] = _fnum(act.get("deaths"))
+    _soundboard_state["prev_assists"] = _fnum(act.get("assists"))
+
+
+def try_soundboard_line(snap: dict[str, Any]) -> str | None:
+    """Deterministic lines from `soundboard` in commentary config; None if no match."""
+    cfg = load_commentary_config()
+    sb = cfg.get("soundboard")
+    if not isinstance(sb, list) or not sb:
+        return None
+    key = _game_session_key(snap)
+    if _soundboard_state.get("session_key") != key:
+        _reset_soundboard_session(key)
+
+    try:
+        chance = float(cfg.get("soundboard_priority") or 1.0)
+    except (TypeError, ValueError):
+        chance = 1.0
+    if chance < 1.0 and random.random() > chance:
+        _update_soundboard_prev_from_snap(snap)
+        return None
+
+    if not isinstance(_soundboard_state.get("fired_ids"), set):
+        _soundboard_state["fired_ids"] = set()
+    fired = _soundboard_state["fired_ids"]
+    for row in sb:
+        if not isinstance(row, dict):
+            continue
+        tid = str(row.get("id") or "").strip() or None
+        when = row.get("when")
+        if not isinstance(when, dict):
+            continue
+        once = row.get("once_per_game", True)
+        if once is not False and tid and tid in fired:
+            continue
+        if not _match_soundboard_when(when, snap):
+            continue
+        lines = row.get("lines")
+        if not isinstance(lines, list) or not lines:
+            continue
+        opts = [str(x).strip() for x in lines if str(x).strip()]
+        if not opts:
+            continue
+        choice = random.choice(opts)
+        if tid:
+            fired.add(tid)
+        _update_soundboard_prev_from_snap(snap)
+        return choice[:500]
+
+    _update_soundboard_prev_from_snap(snap)
+    return None
+
+
+def _persona_prompt_block() -> str:
+    cfg = load_commentary_config()
+    parts: list[str] = []
+    sn = (cfg.get("streamer_name") or "").strip()
+    if sn:
+        parts.append(f"Streamer display name: {sn}.")
+    rns = cfg.get("riot_names")
+    if isinstance(rns, list) and rns:
+        parts.append("Their Riot names in the roster (that's them): " + ", ".join(str(x) for x in rns[:6]) + ".")
+    mains = cfg.get("mains")
+    if isinstance(mains, list) and mains:
+        parts.append("Champions they often play / identify with: " + ", ".join(str(x) for x in mains[:12]) + ".")
+    persona = (cfg.get("persona") or "").strip()
+    if persona:
+        parts.append("Voice and relationship — follow this closely:\n" + persona)
+    rules = (cfg.get("commentary_rules") or "").strip()
+    if rules:
+        parts.append("Extra rules:\n" + rules)
+    if not parts:
+        return ""
+    return "\n\n### Streamer-specific commentary\n" + "\n".join(parts)
 
 
 def _set_ui(**kwargs: Any) -> None:
@@ -535,6 +834,11 @@ def generate_luna_comment(
     model: str,
     build_chat_system: Callable[[], str],
 ) -> str:
+    if _env_truthy("RIOT_LOL_SOUNDBOARD", "1"):
+        sb = try_soundboard_line(snap)
+        if sb:
+            return sb
+
     body = json.dumps(snap, indent=2, ensure_ascii=False)[:6000]
     try:
         system = build_chat_system()
@@ -544,11 +848,17 @@ def generate_luna_comment(
             "You are Luna, a warm witty AI companion. The user is in a League of Legends match; "
             "comment briefly on the JSON snapshot."
         )
+    persona = _persona_prompt_block()
     prompt = (
         "Here is the current League of Legends match snapshot (Riot cloud and/or local Live Client data).\n"
-        "Write **one or two short sentences** of in-character commentary, following the persona in your system message.\n"
-        "React to the moment: game clock, map/queue, rosters, bans, and any numeric stats present in the JSON.\n"
-        "No markdown fences, no bullet list; plain prose only.\n\n"
+        "Write **one or two short sentences** of in-character live commentary, following your system persona"
+        + (" and the streamer-specific block below" if persona else "")
+        + ".\n"
+        "Be **specific**: cite game clock, map or queue, champion names from the JSON, and numbers (K/D/A, CS, gold, level) when present. "
+        "If `recentEvents` lists objective fights, name them. "
+        "Avoid generic filler — react to what is actually happening in the data.\n"
+        "No markdown fences, no bullet list; plain prose only."
+        f"{persona}\n\n"
         f"{body}"
     )
     out = (ollama_chat(prompt, system=system, model=model, compact=True) or "").strip()

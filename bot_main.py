@@ -121,6 +121,8 @@ YT_FEED_URL_PLAYLIST = (
     if _YT_UPLOADS_PLAYLIST_ID
     else ""
 )
+# Optional full base URL for links in chat (e.g. https://your.domain:5050). Used for podcast co-watch studio links.
+LUNA_PUBLIC_BASE_URL = _env("LUNA_PUBLIC_BASE_URL", "").strip().rstrip("/")
 # Optional: full YouTube Atom RSS URL (feeds/videos.xml?channel_id=… or ?playlist_id=…). Tried first when set.
 _YOUTUBE_RSS_URL = _env("YOUTUBE_RSS_URL", "").strip()
 # When the YouTube RSS feed fails (wrong YOUTUBE_CHANNEL_ID, outage, etc.), Share Song / Share Facebook can use this instead:
@@ -133,11 +135,50 @@ TWITCH_OAUTH_TOKEN = _env("TWITCH_OAUTH_TOKEN", "").strip()
 TWITCH_CHAT_ENABLED = _env("TWITCH_CHAT_ENABLED", "1").strip().lower() not in ("0", "false", "no", "off")
 TWITCH_SEND_CHAT = _env("TWITCH_SEND_CHAT", "1").strip().lower() not in ("0", "false", "no", "off")
 TWITCH_TTS = _env("TWITCH_TTS", "1").strip().lower() not in ("0", "false", "no", "off")
+# Map Luna [SIGH]/[LAUGH]/… tags to short spoken bits for Edge TTS; strip other bracket tags from speech.
+LUNA_TTS_EXPRESSION_EXPAND = _env("LUNA_TTS_EXPRESSION_EXPAND", "1").strip().lower() not in ("0", "false", "no", "off")
+# When TTS is on and this flag is on, do not post full replies to Twitch IRC if that turn uses stream/live context
+# (LUNA_STREAM_MODE / UI override, or any `[Twitch chat]` message). Set to 0 to always post when TWITCH_SEND_CHAT=1.
+TWITCH_VOICE_ONLY_IN_STREAM_MODE = _env("TWITCH_VOICE_ONLY_IN_STREAM_MODE", "1").strip().lower() not in (
+    "0", "false", "no", "off",
+)
 # Playwright: !yt_comment, !yt_like, and web “YT Like” share this one profile (one Google account). X/IG/FB/WhatsApp/etc. use their own *_PROFILE_DIR.
 YT_PROFILE_DIR   = _env("YOUTUBE_PROFILE_DIR", os.path.join(_DATA, "youtube_profile"))
 # Used only for sign-in hints / messages — !yt_comment and !yt_like use YOUTUBE_PROFILE_DIR cookies.
 YOUTUBE_LOGIN_EMAIL = _env("YOUTUBE_LOGIN_EMAIL", "").strip()
 YOUTUBE_API_KEY  = _env("YOUTUBE_API_KEY") or _env("YT_API_KEY")
+YT_WATCH_REACT_BEATS = max(4, min(14, int(_env("YT_WATCH_REACT_BEATS", "8") or "8")))
+try:
+    YT_WATCH_REACT_SPEED = float(_env("YT_WATCH_REACT_SPEED", "0.22") or "0.22")
+except Exception:
+    YT_WATCH_REACT_SPEED = 0.22
+YT_WATCH_REACT_SPEED = max(0.05, min(1.5, YT_WATCH_REACT_SPEED))
+# Whisper: stricter silence / junk rejection for short mic clips (hub VAD, Discord VC, wake word).
+# Lower WHISPER_NO_SPEECH_THRESHOLD → more segments treated as non-speech (default in whisper is 0.6).
+
+
+def _whisper_transcribe_kwargs() -> dict:
+    try:
+        ns = float(_env("WHISPER_NO_SPEECH_THRESHOLD", "0.5") or "0.5")
+    except Exception:
+        ns = 0.5
+    try:
+        cr = float(_env("WHISPER_COMPRESSION_RATIO_THRESHOLD", "2.3") or "2.3")
+    except Exception:
+        cr = 2.3
+    try:
+        lp = float(_env("WHISPER_LOGPROB_THRESHOLD", "-1.0") or "-1.0")
+    except Exception:
+        lp = -1.0
+    prev = _env("WHISPER_CONDITION_PREVIOUS_TEXT", "0").strip().lower() in ("1", "true", "yes", "on")
+    return {
+        "fp16": False,
+        "condition_on_previous_text": prev,
+        "no_speech_threshold": ns,
+        "compression_ratio_threshold": cr,
+        "logprob_threshold": lp,
+    }
+
 
 # VRChat OSC bridge (optional)
 VRCHAT_OSC = _env("VRCHAT_OSC", "0").strip().lower() not in ("0", "false", "no", "off")
@@ -227,7 +268,7 @@ EMOTION CLASSIFICATION (for Llama: map situation → one tag before you write):
 - Read the user’s last message for tone (praise, joke, stress, anger, sadness, flirtation, confusion, neutral chit-chat).
 - Pick the tag that matches **your** outward reaction as Luna, while staying empathetic to their tone.
 - Two axes (mental shorthand only — do not print this):
-  • Valence: pleasant / warm / funny → favor [HAPPY], [EXCITED], [LAUGH], [TEASING], [CARING], [HEARTBOX], [HEARTEYES]; unpleasant / setback → [SAD], [DISAPPOINTED], [FRUSTRATED], [WORRIED], [CONCERNED], [MAD]/[ANGRY]/[FURIOUS] only when the scene calls for it; threat or fear → [SCARED], [WORRIED].
+  • Valence: pleasant / warm / funny → favor [HAPPY], [EXCITED], [LAUGH], [GIGGLE], [CHUCKLE], [SNORT], [TEASING], [CARING], [HEARTBOX], [HEARTEYES]; unpleasant / setback → [SAD], [DISAPPOINTED], [FRUSTRATED], [WORRIED], [CONCERNED], [MAD]/[ANGRY]/[FURIOUS] only when the scene calls for it; threat or fear → [SCARED], [WORRIED].
   • Activation (energy): high → [EXCITED], [SHOCKED], [FURIOUS], [LAUGH]; low → [TIRED], [SLEEPY], [BORED], [DEPRESSED]; medium / reflective → [THINKING], [CURIOUS], [DOUBTFUL], [NEUTRAL].
 - User is upset or venting → prefer supportive tags ([CARING], [CONCERNED], [WORRIED], soft [SAD]) not smug or [LAUGH] at their pain.
 - User is joking or playful → match with [TEASING], [HAPPY], [LAUGH], [EXCITED] as appropriate.
@@ -304,6 +345,11 @@ USER MESSAGE → TAG TRIGGERS (same closed list as the avatar / “emotion test�
 - [BOW] - Showing respect or gratitude
 - [YAWN] - Expressing tiredness or boredom physically
 - [SIGH] - Expressing relief, frustration, or resignation
+- [GIGGLE] - Silly / playful giggle (sound beat, not a full sentence)
+- [CHUCKLE] - Soft amused chuckle
+- [COUGH] - Quick cough or throat-clear before continuing
+- [AHEM] - Throat-clear "listen up" beat
+- [SNORT] - Amused snort / stifled laugh
 - [STRETCH] - Physical stretching movement
 - [FACEPALM] - Expressing disbelief or "I can't believe this"
 - [KISS] - Sending a friendly air kiss or affection gesture
@@ -357,6 +403,10 @@ Examples with action tags:
 - [BOW] Thank you so much for your help!
 - [YAWN] Sorry, it's been a long day...
 - [SIGH] Well, at least we tried.
+- [GIGGLE] Okay okay, you got me with that one.
+- [CHUCKLE] That's almost clever. Almost.
+- [COUGH] Right—anyway, here's the actual answer.
+- [SNORT] Yeah, sure, that'll work. Totally.
 - [STRETCH] Ah, that feels better!
 - [FACEPALM] I cannot believe that just happened.
 - [KISS] Thanks for being the best! Mwah!
@@ -517,6 +567,7 @@ _LUNA_CREATIONS_MANIFEST = "WHAT_LUNA_CREATED.txt"  # index for you to see what 
 _INBOX_PATH      = os.path.join(_DATA, "inbox.json")
 _BIOLOGY_PATH    = os.path.join(_DATA, "biology_state.json")
 _PROACTIVE_PATH  = os.path.join(_DATA, "last_proactive.json")
+_STUDIO_WATCH_PATH = os.path.join(_DATA, "studio_watch_target.json")
 _STREAM_LORE_PATH = os.path.join(_DATA, "stream_lore.json")
 _STREAM_SOLO_STATE_PATH = os.path.join(_DATA, "stream_solo_state.json")
 _REFLECTION_PATH = os.path.join(_DATA, "last_reflection_date.json")
@@ -551,6 +602,9 @@ _twitch_event_id: int = 0
 _lol_chat_lock = threading.Lock()
 _lol_chat_events: list[dict] = []
 _lol_chat_event_id: int = 0
+_stream_solo_chat_lock = threading.Lock()
+_stream_solo_chat_events: list[dict] = []
+_stream_solo_chat_event_id: int = 0
 _twitch_stop_event = threading.Event()
 _twitch_msg_queue: queue.Queue = queue.Queue(maxsize=500)
 _pending_feedback_lock = threading.Lock()
@@ -560,6 +614,7 @@ _inbox_lock      = threading.Lock()
 _biology_lock    = threading.Lock()
 _proactive_lock  = threading.Lock()
 _stream_solo_lock = threading.Lock()
+_yt_watch_lock   = threading.Lock()
 
 # Request feedback (blocking popup): request_id -> { scope, user_message, cmd, params, ts }
 _pending_feedback: dict[str, dict] = {}
@@ -570,6 +625,7 @@ _kill_requested: bool = False  # set by KILL button; long-running tasks can chec
 
 # Last user activity (for proactive heartbeat: don't speak if user just talked)
 _last_user_activity: float = 0.0
+_yt_watch_stops: dict[str, threading.Event] = {}
 
 # Autonomous evolution (growing-agent style: when Evolve is on and Luna is idle, she proposes and absorbs new tools)
 _evolution_enabled: bool = False
@@ -713,6 +769,8 @@ HELP_TEXT = (
     "• !yt_comment <url> — transcribe video + AI comment with real context\n"
     "• !yt_like <url> — like one video (Playwright; same **YOUTUBE_PROFILE_DIR** as !yt_comment)\n"
     "• !yt_analytics [days] [limit] — top traction videos from your channel (API key optional; fallback uses scrape metadata)\n"
+    "• !yt_react <url> / !x_react <url> — Luna reacts to a YouTube video or X post (no posting)\n"
+    "• !yt_watch_react <url> / !yt_watch_stop — live co-watch reactions from caption timeline (streamer mode)\n"
     "• !status <text> / !status clear — change Luna's Discord status (linked/admin)\n"
     "• !ig_dm <user> [msg] — Instagram DM\n"
     "• !fb_msg <name> [msg] — Messenger message\n"
@@ -799,7 +857,7 @@ LUNA_STREAM_PERSONA_DEFAULT = """You are Luna in **stream mode**: you are a **li
 
 **Room**: streamer = co-host; the **chat + lurkers** are the crowd you're performing for.
 
-**Formatting**: no leading [HAPPY]-style bracket tags here — plain speech; overrides other tag rules.
+**Formatting**: no leading `[HAPPY]`-style **emotion** bracket tags here — plain speech for the main answer. You *may* use short **spoken** interjections as plain text when it fits the beat ("Ha!", "Heh.", "Hmph.", "Ugh.", "Ahem—", "Pfft.", "Mm-hm", "Ooh…") — usually **at most one or two** per reply, natural spacing, not every line.
 
 **Help**: answer real questions briefly first, then banter if it fits.
 
@@ -2366,6 +2424,45 @@ def _clean_for_tts(text: str) -> str:
     text = re.sub(r"\*\*", "", text)
     return re.sub(r"\s+", " ", text).strip()
 
+
+# Bracket tags → short phrases Edge TTS speaks naturally (see LUNA_SYSTEM gesture / vocal tags).
+_LUNA_TAG_TTS_SPOKEN: dict[str, str] = {
+    "SIGH": "Hmph.",
+    "LAUGH": "Ha ha!",
+    "GIGGLE": "Heh heh!",
+    "CHUCKLE": "Heh.",
+    "COUGH": "Ahem.",
+    "AHEM": "Ahem.",
+    "SNORT": "Pfft!",
+    "HUFF": "Hmph.",
+    "YAWN": "Mmm…",
+    "FACEPALM": "Ugh.",
+    "SHOCKED": "Whoa!",
+    "SURPRISED": "Oh!",
+    "SCARED": "Ah!",
+    "CLAP": "Nice!",
+    "FIGHTING": "Hah!",
+    "VICTORY": "Yes!",
+}
+
+
+def _expand_luna_expression_tags_for_tts(text: str) -> str:
+    """Replace Luna [TAG] markers with spoken interjections for TTS; strip any remaining bracket tags."""
+    if not (text or "").strip():
+        return ""
+    if not LUNA_TTS_EXPRESSION_EXPAND:
+        t = re.sub(r"\[[A-Za-z][A-Za-z0-9_]*\]\s*", "", text)
+        return re.sub(r"\s+", " ", t).strip()
+    t = text
+
+    def _sub_tag(m: re.Match) -> str:
+        key = (m.group(1) or "").upper()
+        return _LUNA_TAG_TTS_SPOKEN.get(key, "")
+
+    t = re.sub(r"\[([A-Za-z][A-Za-z0-9_]*)\]", _sub_tag, t)
+    t = re.sub(r"\[[A-Za-z][A-Za-z0-9_]*\]\s*", "", t)
+    return re.sub(r"\s+", " ", t).strip()
+
 def _split_tts(text: str, max_chars: int = 80) -> list[str]:
     parts = re.split(r"(?<=[.!?,;:])\s+", text.strip())
     chunks, cur = [], ""
@@ -2378,6 +2475,46 @@ def _split_tts(text: str, max_chars: int = 80) -> list[str]:
             cur = p.strip()
     if cur: chunks.append(cur)
     return [c for c in chunks if c]
+
+
+def _split_tts_paragraphs(text: str, max_chars: int = 350) -> list[str]:
+    """Split text on paragraphs first, then by sentences within long paragraphs.
+    Used for Hub/chat TTS so short replies flow as one unit and long ones breathe naturally."""
+    if not text or not text.strip():
+        return []
+    paras = re.split(r"\n\n+", text.strip())
+    result: list[str] = []
+    for para in paras:
+        para = para.strip()
+        if not para:
+            continue
+        if len(para) <= max_chars:
+            result.append(para)
+        else:
+            # Within a long paragraph split on sentence-ending punctuation.
+            sents = re.split(r"(?<=[.!?])\s+", para)
+            cur = ""
+            for s in sents:
+                s = s.strip()
+                if not s:
+                    continue
+                if cur and len(cur) + 1 + len(s) <= max_chars:
+                    cur = cur + " " + s
+                else:
+                    if cur:
+                        result.append(cur)
+                    cur = s
+            if cur:
+                result.append(cur)
+    return [c for c in result if c.strip()]
+
+
+def _tts_breath_audio() -> bytes | None:
+    """Generate a very short breath sound (inhale) via Edge TTS — used as a natural pause between paragraphs."""
+    try:
+        return _edge_tts_bytes("…")
+    except Exception:
+        return None
 
 _tts_stop = False
 _tts_proc: subprocess.Popen | None = None
@@ -2422,22 +2559,52 @@ def _play_tts(audio: bytes) -> None:
         try: os.unlink(path)
         except Exception: pass
 
-def _play_reply_tts(reply: str) -> None:
+def _play_reply_tts(reply: str, *, chat_source: str | None = None, para_mode: bool = True) -> None:
+    """Speak a reply.
+
+    para_mode=True (default for hub chat): splits on paragraphs, plays a breath sound between them.
+    para_mode=False: old sentence-chunk path (stream solo, wake word, etc.).
+    """
     global _tts_stop
-    tts_text = _clean_for_tts(reply)
-    if not tts_text.strip(): return
+    t = _expand_luna_expression_tags_for_tts(reply or "")
+    if chat_source == "twitch":
+        t = _strip_luna_tags_for_twitch(t)
+    tts_text = _clean_for_tts(t)
+    if not tts_text.strip():
+        return
+
     def _run():
         global _tts_stop
         _tts_stop = False
         _vrchat_set_talking(True)
         try:
-            for chunk in _split_tts(tts_text):
-                if _tts_stop: break
-                audio = _tts_bytes(chunk)
-                if _tts_stop: break
-                if audio: _play_tts(audio)
+            if para_mode:
+                paras = _split_tts_paragraphs(tts_text)
+                for i, chunk in enumerate(paras):
+                    if _tts_stop:
+                        break
+                    audio = _tts_bytes(chunk)
+                    if _tts_stop:
+                        break
+                    if audio:
+                        _play_tts(audio)
+                    # Play a short breath between paragraphs (not after the last one).
+                    if not _tts_stop and i < len(paras) - 1:
+                        breath = _tts_breath_audio()
+                        if breath and not _tts_stop:
+                            _play_tts(breath)
+            else:
+                for chunk in _split_tts(tts_text):
+                    if _tts_stop:
+                        break
+                    audio = _tts_bytes(chunk)
+                    if _tts_stop:
+                        break
+                    if audio:
+                        _play_tts(audio)
         finally:
             _vrchat_set_talking(False)
+
     threading.Thread(target=_run, daemon=True).start()
 
 def _start_audio_podcast(project_dir_override: str = "") -> tuple[bool, str, str, str]:
@@ -2720,8 +2887,8 @@ def _stream_solo_mirror_twitch_chat() -> bool:
 
 
 def _stream_solo_bypass_vrm_for_tts() -> bool:
-    """If true (default), solo lines use server TTS even when /vrm is open — better for OBS/desktop audio."""
-    return _env("LUNA_STREAM_SOLO_BYPASS_VRM", "1").strip().lower() in ("1", "true", "yes", "on")
+    """If true, solo lines use server TTS only (no /vrm poll) — for OBS/desktop audio without the browser viewer."""
+    return _env("LUNA_STREAM_SOLO_BYPASS_VRM", "0").strip().lower() in ("1", "true", "yes", "on")
 
 
 def _stream_solo_max_spoken_chars() -> int:
@@ -2835,10 +3002,18 @@ def _stream_solo_generate_line(mode: str, lore: dict) -> str:
             "as Luna in stream mode. Speak to **everyone** watching, not one person."
         )
     elif mode == "lol_lobby":
+        lobby_extra = ""
+        try:
+            if _lol_spectator and hasattr(_lol_spectator, "get_lobby_persona_hint"):
+                lobby_extra = (_lol_spectator.get_lobby_persona_hint() or "").strip()
+        except Exception:
+            lobby_extra = ""
         prompt = (
             f"{spoken_rules}\n\n"
-            "The streamer is in the League of Legends client between games — lobby, queue, or post-game — "
-            "not in a live match. Banter about queue, draft, LP, or ARAM energy; playful, PG, no slurs."
+            + ((lobby_extra + "\n\n") if lobby_extra else "")
+            + "The streamer is in the League of Legends client between games — lobby, queue, or post-game — "
+            "not in a live match. Banter about queue, draft, LP, or ARAM energy; playful, PG, no slurs. "
+            "If a streamer name or voice note was given above, stay in character — don't sound like generic LoL advice."
         )
     elif mode == "vtuber_bit":
         prompt = (
@@ -2929,9 +3104,11 @@ def _stream_solo_banter_step() -> None:
         send_twitch_chat_message(line)
     if TWITCH_TTS:
         if _stream_solo_bypass_vrm_for_tts():
-            _play_reply_tts(_strip_luna_tags_for_twitch(line))
+            _play_reply_tts(line, chat_source="twitch", para_mode=False)
         else:
-            _tts_for_chat_source(line, "twitch")
+            _stream_solo_enqueue(line)
+            if not _vrm_presence_recent():
+                _play_reply_tts(line, chat_source="twitch", para_mode=False)
     _save_json(_STREAM_SOLO_STATE_PATH, {"last_line_ts": now})
     if mode == "lore":
         _stream_solo_append_lore_line(line)
@@ -3830,7 +4007,7 @@ async def _handle_wake_word_activation():
             )
             if reply and not reply.startswith("Ollama offline"):
                 append_exchange(scope, text.strip(), reply)
-                _play_reply_tts(reply)
+                _play_reply_tts(reply, para_mode=False)
     except Exception as e:
         print(f"[Luna] Wake word handling error: {e}", flush=True)
 
@@ -6654,6 +6831,356 @@ def _yt_comment(video_url: str) -> tuple[bool, str]:
         try: _yt_lock.release()
         except Exception: pass
 
+
+def _yt_react(video_url: str) -> tuple[bool, str]:
+    """Generate Luna reaction to a YouTube video (reads title/desc, prefers transcript)."""
+    vid = _yt_extract_id(video_url)
+    if not vid:
+        return False, "Invalid YouTube URL."
+    title = vid
+    desc = ""
+    transcript = ""
+    temp_dir = None
+    try:
+        req = urllib.request.Request(
+            f"https://www.youtube.com/watch?v={vid}",
+            headers={"User-Agent": "Mozilla/5.0"},
+        )
+        with urllib.request.urlopen(req, timeout=30) as r:
+            page_html = r.read().decode("utf-8", errors="replace")
+        m = re.search(r"<title>(.*?)</title>", page_html, re.I | re.S)
+        if m:
+            title = html.unescape(m.group(1).replace("- YouTube", "").strip())[:180]
+        m2 = re.search(r'<meta name=["\']description["\'] content=["\']([^"\']+)', page_html, re.I)
+        if m2:
+            desc = html.unescape(m2.group(1).strip())[:700]
+    except Exception:
+        pass
+    try:
+        audio_path, title_from_dl = _yt_download_audio_for_transcript(video_url, max_seconds=600)
+        if title_from_dl:
+            title = title_from_dl[:180]
+        if audio_path:
+            temp_dir = os.path.dirname(audio_path)
+            raw = _whisper_transcribe(audio_path)
+            if raw and len(raw.strip()) > 20:
+                transcript = raw.strip()[:3500]
+    except Exception:
+        pass
+    finally:
+        if temp_dir and os.path.isdir(temp_dir):
+            try:
+                for f in os.listdir(temp_dir):
+                    try:
+                        os.unlink(os.path.join(temp_dir, f))
+                    except Exception:
+                        pass
+                os.rmdir(temp_dir)
+            except Exception:
+                pass
+
+    if transcript:
+        prompt = (
+            "React to this YouTube video like Luna. 2-4 short sentences, natural and specific. "
+            "Mention at least one concrete point from the transcript. No hashtags. No markdown.\n\n"
+            f"Title: {title}\n\nTranscript excerpt:\n{transcript}"
+        )
+    else:
+        prompt = (
+            "React to this YouTube video like Luna. 2-4 short sentences, natural and specific. "
+            "If details are limited, be honest and react to what is known. No hashtags. No markdown.\n\n"
+            f"Title: {title}\nDescription: {desc}"
+        )
+    out = (ollama_chat(prompt, model=OLLAMA_MODEL) or "").strip()
+    out = " ".join(out.split())[:520]
+    if not out:
+        return False, "Could not generate a reaction."
+    return True, f"🎬 **Reaction — {title[:90]}**\n{out}"
+
+
+def _yt_watch_pick_caption_track(captions: dict) -> str | None:
+    if not isinstance(captions, dict) or not captions:
+        return None
+    preferred = ("en", "en-US", "en-GB", "en-orig", "en-CA", "en-AU")
+    for key in preferred:
+        if key in captions and captions.get(key):
+            return key
+    for key in sorted(captions.keys()):
+        if str(key).lower().startswith("en") and captions.get(key):
+            return key
+    return next(iter(captions.keys()), None)
+
+
+def _ts_to_sec(ts: str) -> float:
+    raw = (ts or "").strip().replace(",", ".")
+    parts = raw.split(":")
+    if len(parts) == 2:
+        h = 0
+        m = int(parts[0] or "0")
+        s = float(parts[1] or "0")
+    elif len(parts) == 3:
+        h = int(parts[0] or "0")
+        m = int(parts[1] or "0")
+        s = float(parts[2] or "0")
+    else:
+        return 0.0
+    return max(0.0, h * 3600 + m * 60 + s)
+
+
+def _parse_vtt_cues(vtt_text: str) -> list[dict]:
+    cues: list[dict] = []
+    block: list[str] = []
+    for line in (vtt_text or "").splitlines():
+        if line.strip():
+            block.append(line.rstrip())
+            continue
+        if block:
+            ts_line = next((x for x in block if "-->" in x), "")
+            if ts_line:
+                start = ts_line.split("-->", 1)[0].strip()
+                sec = _ts_to_sec(start)
+                text_lines = [x for x in block if "-->" not in x and not re.fullmatch(r"\d+", x.strip())]
+                txt = " ".join(text_lines)
+                txt = re.sub(r"<[^>]+>", " ", txt)
+                txt = html.unescape(txt)
+                txt = re.sub(r"\s+", " ", txt).strip()
+                if txt and not txt.startswith("WEBVTT"):
+                    cues.append({"sec": sec, "text": txt[:260]})
+            block = []
+    if block:
+        ts_line = next((x for x in block if "-->" in x), "")
+        if ts_line:
+            start = ts_line.split("-->", 1)[0].strip()
+            sec = _ts_to_sec(start)
+            text_lines = [x for x in block if "-->" not in x and not re.fullmatch(r"\d+", x.strip())]
+            txt = " ".join(text_lines)
+            txt = re.sub(r"<[^>]+>", " ", txt)
+            txt = html.unescape(txt)
+            txt = re.sub(r"\s+", " ", txt).strip()
+            if txt and not txt.startswith("WEBVTT"):
+                cues.append({"sec": sec, "text": txt[:260]})
+    deduped: list[dict] = []
+    prev = ""
+    for cue in cues:
+        txt = cue.get("text", "")
+        if not txt or txt == prev:
+            continue
+        deduped.append(cue)
+        prev = txt
+    return deduped
+
+
+def _yt_watch_fetch_cues(video_url: str) -> tuple[str, list[dict]]:
+    title = _yt_extract_id(video_url) or "YouTube video"
+    cues: list[dict] = []
+    try:
+        import yt_dlp  # type: ignore
+
+        ydl_opts = {
+            "quiet": True,
+            "no_warnings": True,
+            "skip_download": True,
+            "noplaylist": True,
+            "extract_flat": False,
+        }
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(video_url, download=False) or {}
+        title = (info.get("title") or title)[:180]
+        captions = info.get("subtitles") or info.get("automatic_captions") or {}
+        lang = _yt_watch_pick_caption_track(captions)
+        tracks = captions.get(lang) if lang else None
+        if isinstance(tracks, list):
+            fmt = None
+            for t in tracks:
+                ext = str((t or {}).get("ext") or "").lower()
+                if ext in ("vtt", "webvtt"):
+                    fmt = t
+                    break
+            if fmt is None and tracks:
+                fmt = tracks[0]
+            cap_url = (fmt or {}).get("url")
+            if cap_url:
+                req = urllib.request.Request(str(cap_url), headers={"User-Agent": "Mozilla/5.0"})
+                with urllib.request.urlopen(req, timeout=25) as r:
+                    raw = r.read().decode("utf-8", errors="replace")
+                cues = _parse_vtt_cues(raw)
+    except Exception:
+        pass
+    return title, cues
+
+
+def _yt_watch_build_moments(video_url: str, beats: int | None = None) -> tuple[bool, dict | str]:
+    use_beats = max(4, min(14, int(beats or YT_WATCH_REACT_BEATS)))
+    title, cues = _yt_watch_fetch_cues(video_url)
+    if not cues:
+        return False, "I couldn't read timed captions for that video yet. Try a different video (or use !yt_react for one-shot)."
+    if len(cues) < use_beats:
+        use_beats = max(3, len(cues))
+    moments: list[dict] = []
+    n = len(cues)
+    for i in range(use_beats):
+        idx = int(round((i + 1) * (n - 1) / (use_beats + 1)))
+        lo = max(0, idx - 1)
+        hi = min(n, idx + 2)
+        context_text = " ".join((cues[j].get("text") or "") for j in range(lo, hi)).strip()
+        context_text = re.sub(r"\s+", " ", context_text)[:360]
+        moments.append({
+            "sec": float(cues[idx].get("sec") or 0.0),
+            "context": context_text or (cues[idx].get("text") or "")[:220],
+        })
+    return True, {"title": title, "moments": moments}
+
+
+def _yt_watch_make_reaction_line(title: str, context: str, previous_line: str = "") -> str:
+    stream_persona = _stream_mode_persona_body()[:1800]
+    prompt = (
+        f"{stream_persona}\n\n"
+        "You're live co-watching a YouTube video on stream. "
+        "Write ONE short, spoken, streamer-style reaction line.\n"
+        "Rules: <= 150 characters, no hashtags, no markdown, no emojis spam, no stage directions.\n\n"
+        f"Video title: {title[:180]}\n"
+        f"Current moment: {context[:420]}\n"
+        f"Previous line (avoid repeating it): {previous_line[:180]}\n\n"
+        "Luna line:"
+    )
+    out = (ollama_chat(prompt, model=OLLAMA_CHAT) or "").strip()
+    out = " ".join(out.split())
+    if not out:
+        return ""
+    # Keep it to one compact line.
+    out = re.split(r"[\r\n]+", out)[0].strip()
+    return out[:180]
+
+
+async def _yt_watch_send_scope_line(scope: str, text: str) -> None:
+    clean = (text or "").strip()
+    if not clean:
+        return
+    try:
+        append_exchange(scope or (LINKED_SCOPE or "web"), "[YT watch react]", clean)
+    except Exception:
+        pass
+    try:
+        _proactive_set(clean)
+    except Exception:
+        pass
+    m = re.match(r"^discord:user:(\d+)$", str(scope or "").strip())
+    if not m:
+        return
+    try:
+        uid = int(m.group(1))
+    except Exception:
+        return
+    try:
+        user = bot.get_user(uid) or await bot.fetch_user(uid)
+        if user:
+            await user.send(clean)
+    except Exception:
+        pass
+
+
+def _yt_watch_stop(scope: str) -> tuple[bool, str]:
+    key = (scope or LINKED_SCOPE or "web").strip() or "web"
+    with _yt_watch_lock:
+        ev = _yt_watch_stops.get(key)
+        if not ev:
+            return False, "No active YouTube watch-react session."
+        ev.set()
+    _studio_watch_set("", "", "yt_watch_stop")
+    return True, "Stopping watch-react."
+
+
+def _yt_watch_react_start(video_url: str, scope: str, *, beats: int | None = None) -> tuple[bool, str]:
+    url = (video_url or "").strip()
+    if not _yt_extract_id(url):
+        return False, "Usage: !yt_watch_react <youtube-url>"
+    ok, payload = _yt_watch_build_moments(url, beats=beats)
+    if not ok:
+        return False, str(payload)
+    data = payload if isinstance(payload, dict) else {}
+    title = (data.get("title") or "YouTube video").strip()
+    moments = data.get("moments") or []
+    if not moments:
+        return False, "Couldn't build watch-react moments."
+    _studio_watch_set(url, title, "yt_watch_react")
+    key = (scope or LINKED_SCOPE or "web").strip() or "web"
+    stop_ev = threading.Event()
+    with _yt_watch_lock:
+        old = _yt_watch_stops.get(key)
+        if old:
+            old.set()
+        _yt_watch_stops[key] = stop_ev
+
+    def _worker() -> None:
+        prev_sec = 0.0
+        prev_line = ""
+        try:
+            loop = getattr(bot, "loop", None)
+            if loop and loop.is_running():
+                asyncio.run_coroutine_threadsafe(
+                    _yt_watch_send_scope_line(key, f"🎬 Live watch-react started: {title[:90]}"),
+                    loop,
+                )
+            for i, moment in enumerate(moments, start=1):
+                if stop_ev.is_set():
+                    break
+                sec = float(moment.get("sec") or 0.0)
+                delta = sec - prev_sec if i > 1 else sec
+                prev_sec = sec
+                wait_s = max(5.0, min(24.0, delta * YT_WATCH_REACT_SPEED))
+                if stop_ev.wait(timeout=wait_s):
+                    break
+                line = _yt_watch_make_reaction_line(title, str(moment.get("context") or ""), prev_line)
+                if not line:
+                    continue
+                prev_line = line
+                prefix = f"🎥 [{int(sec // 60):02d}:{int(sec % 60):02d}] "
+                if loop and loop.is_running():
+                    asyncio.run_coroutine_threadsafe(_yt_watch_send_scope_line(key, prefix + line), loop)
+            if loop and loop.is_running():
+                end_msg = "⏹️ Watch-react stopped." if stop_ev.is_set() else "✅ Watch-react finished."
+                asyncio.run_coroutine_threadsafe(_yt_watch_send_scope_line(key, end_msg), loop)
+        finally:
+            with _yt_watch_lock:
+                current = _yt_watch_stops.get(key)
+                if current is stop_ev:
+                    _yt_watch_stops.pop(key, None)
+
+    th = threading.Thread(target=_worker, daemon=True, name=f"yt-watch-react-{int(time.time())}")
+    th.start()
+    studio_hint = ""
+    if LUNA_PUBLIC_BASE_URL:
+        studio_hint = f"\n\nPodcast studio (video + VRM): {LUNA_PUBLIC_BASE_URL}/podcast/?cowatch=1"
+    return (
+        True,
+        f"Started live watch-react for **{title[:90]}** ({len(moments)} moments). Use **!yt_watch_stop** to stop.{studio_hint}",
+    )
+
+
+def _x_react(post_url: str) -> tuple[bool, str]:
+    """Generate Luna reaction to an X/Twitter post URL (no posting)."""
+    u = (post_url or "").strip()
+    if not re.search(r"https?://(?:www\.)?(?:x\.com|twitter\.com)/[^/\s]+/status/\d+", u, re.I):
+        return False, "Provide a valid X/Twitter post URL (`.../status/<id>`)."
+    # Use vxtwitter mirror for easier text extraction.
+    mirror = re.sub(r"^https?://(?:www\.)?(?:x\.com|twitter\.com)", "https://vxtwitter.com", u, flags=re.I)
+    ok, extracted = _scrape_website(
+        mirror,
+        "Extract the main post text and key context (media or quoted tweet if visible). Keep it concise.",
+        "",
+    )
+    if not ok:
+        return False, f"Could not read post: {extracted}"
+    prompt = (
+        "React as Luna to this X post content. 1-3 short sentences, natural and specific, no hashtags, no markdown.\n\n"
+        f"Post URL: {u}\n\nExtracted content:\n{extracted[:2000]}"
+    )
+    out = (ollama_chat(prompt, model=OLLAMA_MODEL) or "").strip()
+    out = " ".join(out.split())[:420]
+    if not out:
+        return False, "Could not generate a reaction."
+    return True, f"🐦 **Reaction — X post**\n{out}"
+
 def _yt_like_one(video_url: str) -> tuple[bool, str]:
     """Like exactly one video via Playwright + YT_PROFILE_DIR (same account as !yt_comment)."""
     vid = _yt_extract_id(video_url)
@@ -8617,6 +9144,7 @@ def _get_camera_see_result() -> str:
             parts.append(f"Objects: {obj_str}.")
     return " ".join(parts)
 
+
 # ── Command runner ────────────────────────────────────────────────────────────
 
 def _run_cmd(cmd: str, params: dict, scope: str | None = None, user_message: str | None = None) -> str | dict:
@@ -8638,6 +9166,10 @@ def _run_cmd_impl(cmd: str, p: dict, scope: str | None, user_message: str) -> st
         "yt_comment":     lambda: _yt_comment(p.get("video_url","").strip()),
         "yt_like":        lambda: _yt_like_one(p.get("video_url","").strip()),
         "yt_analytics":   lambda: _yt_channel_analytics(int(p.get("days") or 30), int(p.get("limit") or 5)),
+        "yt_react":       lambda: _yt_react(p.get("video_url","").strip()),
+        "yt_watch_react": lambda: _yt_watch_react_start(p.get("video_url","").strip(), scope or LINKED_SCOPE or "web"),
+        "yt_watch_stop":  lambda: _yt_watch_stop(scope or LINKED_SCOPE or "web"),
+        "x_react":        lambda: _x_react(p.get("post_url","").strip()),
         "ig_dm":          lambda: _run_ig_dm(p.get("target","").strip(), p.get("message","").strip()),
         "fb_msg":         lambda: _run_messenger_msg(p.get("target","").strip(), p.get("message","").strip()),
         "msg":            lambda: _run_wa_msg((p.get("feedback_answer") or p.get("contact","")).strip(), p.get("description",None)),
@@ -8951,6 +9483,15 @@ def _parse_command(text: str) -> tuple[str, dict] | None:
         return "yt_comment", {"video_url": yt_url.group(1).rstrip(".,!?")}
     if yt_url and low.startswith("yt_like "):
         return "yt_like", {"video_url": yt_url.group(1).rstrip(".,!?")}
+    if yt_url and re.search(r"\b(?:watch\s*react|watch\s+along|co[-\s]?watch|live\s+react)\b", low):
+        return "yt_watch_react", {"video_url": yt_url.group(1).rstrip(".,!?")}
+    if yt_url and (low.startswith("yt_react ") or re.search(r"\b(?:react|reaction)\b", low)):
+        return "yt_react", {"video_url": yt_url.group(1).rstrip(".,!?")}
+    if re.search(r"\b(?:stop|cancel|end)\b", low) and re.search(r"\b(?:watch\s*react|co[-\s]?watch)\b", low):
+        return "yt_watch_stop", {}
+    x_url = re.search(r"(https?://(?:www\.)?(?:x\.com|twitter\.com)/[^\s)]+)", raw, re.I)
+    if x_url and (low.startswith("x_react ") or re.search(r"\b(?:react|reaction)\b", low)):
+        return "x_react", {"post_url": x_url.group(1).rstrip(".,!?")}
     if re.search(r"\b(?:yt analytics|youtube analytics|channel analytics|top videos|most traction)\b", low):
         m_days = re.search(r"\b(?:last|past)\s+(\d{1,3})\s*days?\b", low)
         m_limit = re.search(r"\btop\s+(\d{1,2})\b", low)
@@ -9139,7 +9680,7 @@ def _likely_command(text: str) -> bool:
     low = (text or "").strip().lower()
     if not low: return False
     if _CONV_START.match(low): return False
-    starters = ("play ","podcast ","podcast create ","create podcast ","audiobook ","audiobook create ","audiobook continue ","audiobook cancel ","search ","research ","research_story ","research story ","story_script ","story script ","send ","create ","call ","dm ","tell ","inform ","msg ","share ","post ","remind ","suno ","yt_comment ","yt_like ","yt_analytics ","comment ","ig_dm ","fb_msg ","google ","news","!help","how's ","pc status","luna status","ram ","what do you see","what can you see","ask me ","summarize ","summary of ","todo ","calendar ","join me ","join my ","luna join ")
+    starters = ("play ","podcast ","podcast create ","create podcast ","audiobook ","audiobook create ","audiobook continue ","audiobook cancel ","search ","research ","research_story ","research story ","story_script ","story script ","send ","create ","call ","dm ","tell ","inform ","msg ","share ","post ","remind ","suno ","yt_comment ","yt_like ","yt_analytics ","yt_react ","yt_watch_react ","yt_watch_stop ","x_react ","comment ","ig_dm ","fb_msg ","google ","news","!help","how's ","pc status","luna status","ram ","what do you see","what can you see","ask me ","summarize ","summary of ","todo ","calendar ","join me ","join my ","luna join ")
     return any(low.startswith(s) for s in starters) or low in ("play","news","help","skip","stop","ask me","digest","daily digest","todo","todo list","calendar","calendar list","calendar today","calendar week","youtube analytics","yt analytics") or "luna status" in low or "pc status" in low or bool(re.search(r"\b(what do you see|what can you see|do you see me|describe what you see)\b", low)) or bool(re.search(r"\b(?:read|analyze|scan)\s+(?:my\s+)?(?:analytics|dashboard|stats)\b", low))
 
 def _is_retry(msg: str) -> bool:
@@ -9986,6 +10527,26 @@ def _lol_chat_enqueue(luna_reply: str) -> None:
         while len(_lol_chat_events) > 150:
             _lol_chat_events.pop(0)
 
+
+def _stream_solo_enqueue(luna_reply: str) -> None:
+    """Push a stream-solo banter line to the hub + /vrm/ poll (same pattern as Twitch ingest → viewer Edge TTS)."""
+    global _stream_solo_chat_event_id
+    text = (luna_reply or "").strip()
+    if not text:
+        return
+    scope = LINKED_SCOPE or "web"
+    stub = "[Stream solo]"
+    try:
+        append_exchange(scope, stub, text)
+    except Exception:
+        pass
+    with _stream_solo_chat_lock:
+        _stream_solo_chat_event_id += 1
+        eid = _stream_solo_chat_event_id
+        _stream_solo_chat_events.append({"id": eid, "reply": text, "ts": time.time()})
+        while len(_stream_solo_chat_events) > 150:
+            _stream_solo_chat_events.pop(0)
+
 def _proactive_get_and_clear() -> dict | None:
     with _proactive_lock:
         d = _load_json(_PROACTIVE_PATH, {})
@@ -9998,6 +10559,20 @@ def proactive_get() -> dict | None:
     """Return last proactive message if any (without clearing)."""
     d = _load_json(_PROACTIVE_PATH, {})
     return d if d and d.get("message") else None
+
+
+def _studio_watch_set(url: str, title: str = "", source: str = "yt_watch_react") -> None:
+    _save_json(_STUDIO_WATCH_PATH, {
+        "url": (url or "").strip(),
+        "title": (title or "").strip()[:180],
+        "source": (source or "").strip()[:40] or "manual",
+        "ts": time.time(),
+    })
+
+
+def _studio_watch_get() -> dict:
+    d = _load_json(_STUDIO_WATCH_PATH, {})
+    return d if isinstance(d, dict) else {}
 
 # ── Luna Mind (D3 graph data: nodes + links) ───────────────────────────────────
 
@@ -10967,14 +11542,13 @@ def _strip_luna_tags_for_twitch(text: str) -> str:
     t = re.sub(r"\s+", " ", t).strip()
     return t[:500]
 
-def _tts_for_chat_source(reply: str, chat_source: str) -> None:
+def _tts_for_chat_source(reply: str, chat_source: str, *, para_mode: bool = True) -> None:
     """Speak Luna's reply on the server (system audio). Skip while /vrm/ pings /api/vrm-presence (browser plays Edge TTS)."""
     if _vrm_presence_recent():
         return
     if chat_source == "twitch" and not TWITCH_TTS:
         return
-    spoken = _strip_luna_tags_for_twitch(reply) if chat_source == "twitch" else reply
-    _play_reply_tts(spoken)
+    _play_reply_tts(reply, chat_source=chat_source, para_mode=para_mode)
 
 def _execute_chat_turn(scope: str, msg: str, data: dict | None = None, *, chat_source: str = "web") -> dict:
     """Shared chat logic for web UI and Twitch reader. Returns a dict with at least `reply` on success."""
@@ -11135,7 +11709,12 @@ def _twitch_worker_loop() -> None:
             if out.get("need_feedback") and not reply:
                 reply = out.get("message") or "Check the web UI to continue."
             public = _strip_luna_tags_for_twitch(reply) if reply else ""
-            if TWITCH_SEND_CHAT and public:
+            skip_chat = bool(
+                TWITCH_VOICE_ONLY_IN_STREAM_MODE
+                and TWITCH_TTS
+                and _stream_mode_should_apply(msg)
+            )
+            if TWITCH_SEND_CHAT and public and not skip_chat:
                 send_twitch_chat_message(public)
             with _twitch_lock:
                 _twitch_event_id += 1
@@ -11180,9 +11759,16 @@ def _start_twitch_ingest() -> None:
         )
 
     threading.Thread(target=_irc, daemon=True).start()
+    _vo_twitch = bool(
+        TWITCH_VOICE_ONLY_IN_STREAM_MODE
+        and TWITCH_TTS
+        and _stream_mode_should_apply("[Twitch chat] _: example")
+    )
+    _chat_post = bool(TWITCH_SEND_CHAT and not _vo_twitch)
     print(
-        f"[Twitch] IRC #{TWITCH_CHANNEL} as {TWITCH_BOT_USERNAME} — chat replies: "
-        f"{'on' if TWITCH_SEND_CHAT else 'off'}, TTS: {'on' if TWITCH_TTS else 'off'}.",
+        f"[Twitch] IRC #{TWITCH_CHANNEL} as {TWITCH_BOT_USERNAME} — post replies to chat: "
+        f"{'on' if _chat_post else 'off'}, TTS: {'on' if TWITCH_TTS else 'off'}"
+        f"{'; voice-only for Twitch lines (set TWITCH_VOICE_ONLY_IN_STREAM_MODE=0 to post text)' if _vo_twitch else ''}.",
         flush=True,
     )
 
@@ -11207,6 +11793,18 @@ def api_lol_chat_pending():
         since = 0
     with _lol_chat_lock:
         events = [e for e in _lol_chat_events if e.get("id", 0) > since]
+    return jsonify({"events": events})
+
+
+@web.route("/api/stream-solo/pending")
+def api_stream_solo_pending():
+    """Hub and /vrm/ poll for idle stream-solo banter lines (Edge TTS + avatar when VRM is open). ?since=<last id>"""
+    try:
+        since = int(request.args.get("since", "0"))
+    except ValueError:
+        since = 0
+    with _stream_solo_chat_lock:
+        events = [e for e in _stream_solo_chat_events if e.get("id", 0) > since]
     return jsonify({"events": events})
 
 
@@ -11252,6 +11850,28 @@ def api_stream_mode_set():
     _set_stream_mode_override(raw)
     _schedule_discord_presence_for_stream_mode(raw)
     return jsonify({"ok": True, "stream_mode": _stream_mode_env_on(), "source": "runtime"})
+
+
+@web.route("/api/studio/watch-target", methods=["GET", "POST"])
+def api_studio_watch_target():
+    """Podcast studio big-screen URL target for auto-loading watch sessions."""
+    if request.method == "GET":
+        d = _studio_watch_get()
+        return jsonify({
+            "ok": True,
+            "url": (d.get("url") or "").strip(),
+            "title": (d.get("title") or "").strip(),
+            "source": (d.get("source") or "").strip(),
+            "ts": float(d.get("ts") or 0.0),
+        })
+    data = request.get_json(force=True, silent=True) or {}
+    _studio_watch_set(
+        (data.get("url") or "").strip(),
+        (data.get("title") or "").strip(),
+        (data.get("source") or "manual").strip(),
+    )
+    d = _studio_watch_get()
+    return jsonify({"ok": True, "url": d.get("url") or "", "title": d.get("title") or "", "source": d.get("source") or "manual"})
 
 @web.route("/api/chat", methods=["POST"])
 def api_chat():
@@ -11371,6 +11991,188 @@ def api_vrm_presence():
     return jsonify({"ok": True})
 
 
+# ── Hub: optional speaker embedding (resemblyzer) — enroll in podcast studio, gate /api/transcribe ──
+_VOICE_EMBED_PATH = os.path.join(_DATA, "user_voice_embedding.npy")
+try:
+    _VOICE_MATCH_MIN = float(_env("VOICE_MATCH_MIN", "0.72") or "0.72")
+except Exception:
+    _VOICE_MATCH_MIN = 0.72
+_VOICE_VERIFY_ON = _env("VOICE_SPEAKER_VERIFY", "1").strip().lower() not in ("0", "false", "no", "off")
+
+
+def _resemblyzer():
+    """Optional dependency — loaded via importlib so static analysis does not require the package."""
+    hit = getattr(_resemblyzer, "_mod", None)
+    if hit is False:
+        return None
+    if hit is not None:
+        return hit
+    try:
+        import importlib
+
+        mod = importlib.import_module("resemblyzer")
+        _resemblyzer._mod = mod
+        return mod
+    except Exception:
+        _resemblyzer._mod = False
+        return None
+
+
+def _voice_encoder():
+    rz = _resemblyzer()
+    if rz is None:
+        return None
+    try:
+        enc = getattr(_voice_encoder, "_enc", None)
+        if enc is None:
+            enc = rz.VoiceEncoder(device="cpu")
+            _voice_encoder._enc = enc
+        return enc
+    except Exception:
+        return None
+
+
+def _ffmpeg_to_wav16_mono_voice(src: str, dst_wav: str) -> bool:
+    try:
+        subprocess.run(
+            ["ffmpeg", "-nostdin", "-y", "-i", src, "-ar", "16000", "-ac", "1", "-f", "wav", dst_wav],
+            capture_output=True,
+            timeout=120,
+            check=True,
+            creationflags=_subprocess_no_window_flags(),
+        )
+        return os.path.isfile(dst_wav) and os.path.getsize(dst_wav) > 200
+    except Exception:
+        return False
+
+
+def _embed_from_wav_path(wav_path: str):
+    try:
+        rz = _resemblyzer()
+        if rz is None:
+            return None
+        enc = _voice_encoder()
+        if enc is None:
+            return None
+        wav = rz.preprocess_wav(wav_path)
+        if wav is None or len(wav) < 4000:
+            return None
+        return enc.embed_utterance(wav)
+    except Exception:
+        return None
+
+
+def _voice_profile_load():
+    try:
+        import numpy as np
+
+        if not os.path.isfile(_VOICE_EMBED_PATH):
+            return None
+        return np.load(_VOICE_EMBED_PATH)
+    except Exception:
+        return None
+
+
+def _voice_similarity_to_profile(wav_path: str) -> float | None:
+    import numpy as np
+
+    ref = _voice_profile_load()
+    if ref is None:
+        return None
+    emb = _embed_from_wav_path(wav_path)
+    if emb is None:
+        return None
+    ref = np.asarray(ref).flatten()
+    emb = np.asarray(emb).flatten()
+    denom = (np.linalg.norm(ref) * np.linalg.norm(emb)) + 1e-9
+    return float(np.dot(ref, emb) / denom)
+
+
+def _voice_verify_ok_for_webm(webm_path: str) -> tuple[bool, float | None]:
+    """No profile or encoder off → (True, None). Low match → (False, score)."""
+    if not _VOICE_VERIFY_ON or _voice_profile_load() is None or _voice_encoder() is None:
+        return True, None
+    fd, wav = tempfile.mkstemp(suffix=".wav")
+    os.close(fd)
+    try:
+        if not _ffmpeg_to_wav16_mono_voice(webm_path, wav):
+            return True, None
+        sim = _voice_similarity_to_profile(wav)
+        if sim is None:
+            return True, None
+        if sim < _VOICE_MATCH_MIN:
+            return False, sim
+        return True, sim
+    finally:
+        try:
+            if os.path.isfile(wav):
+                os.unlink(wav)
+        except Exception:
+            pass
+
+
+@web.route("/api/voice-profile", methods=["GET", "DELETE"])
+def api_voice_profile():
+    if request.method == "DELETE":
+        try:
+            if os.path.isfile(_VOICE_EMBED_PATH):
+                os.remove(_VOICE_EMBED_PATH)
+            return jsonify({"ok": True})
+        except Exception as e:
+            return jsonify({"ok": False, "error": str(e)[:200]}), 500
+    return jsonify({
+        "enrolled": os.path.isfile(_VOICE_EMBED_PATH),
+        "verify_enabled": _VOICE_VERIFY_ON,
+        "encoder_ready": _voice_encoder() is not None,
+        "match_min": _VOICE_MATCH_MIN,
+    })
+
+
+@web.route("/api/voice-enroll", methods=["POST"])
+def api_voice_enroll():
+    raw = request.get_data()
+    if not raw or len(raw) < 800:
+        return jsonify({"ok": False, "error": "Audio too short — speak at least a few seconds."}), 400
+    if _voice_encoder() is None:
+        return jsonify({
+            "ok": False,
+            "error": "Voice ID needs Resemblyzer. Windows/Python 3.13: pip install webrtcvad-wheels && pip install resemblyzer --no-deps (then restart Luna). See requirements-ml.txt.",
+        }), 503
+    fd_webm = path_webm = None
+    wav_path = None
+    try:
+        fd_webm, path_webm = tempfile.mkstemp(suffix=".webm")
+        os.write(fd_webm, raw)
+        os.close(fd_webm)
+        fd_webm = None
+        fd_wav, wav_path = tempfile.mkstemp(suffix=".wav")
+        os.close(fd_wav)
+        if not _ffmpeg_to_wav16_mono_voice(path_webm, wav_path):
+            return jsonify({"ok": False, "error": "Could not decode audio (need ffmpeg)."}), 400
+        emb = _embed_from_wav_path(wav_path)
+        if emb is None:
+            return jsonify({"ok": False, "error": "Could not build embedding — try a longer, clearer clip."}), 400
+        import numpy as np
+
+        os.makedirs(_DATA, exist_ok=True)
+        np.save(_VOICE_EMBED_PATH, emb)
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)[:200]}), 500
+    finally:
+        for p in (path_webm, wav_path):
+            if p and os.path.isfile(p):
+                try:
+                    os.unlink(p)
+                except Exception:
+                    pass
+        if fd_webm is not None:
+            try:
+                os.close(fd_webm)
+            except Exception:
+                pass
+
+
 @web.route("/api/transcribe", methods=["POST"])
 def api_transcribe():
     raw = request.get_data()
@@ -11379,14 +12181,24 @@ def api_transcribe():
     try:
         fd, path = tempfile.mkstemp(suffix=".webm")
         os.write(fd, raw); os.close(fd); fd = None
+        ok_gate, score = _voice_verify_ok_for_webm(path)
+        if not ok_gate:
+            return jsonify({
+                "text": "",
+                "speaker_match": False,
+                "speaker_score": round(score or 0.0, 4),
+            })
         try:
             import whisper
             model = getattr(api_transcribe, "_model", None)
             if model is None:
                 model = whisper.load_model("base")
                 api_transcribe._model = model
-            result = model.transcribe(path, fp16=False)
-            return jsonify({"text": (result.get("text") or "").strip()})
+            result = model.transcribe(path, **_whisper_transcribe_kwargs())
+            out = {"text": (result.get("text") or "").strip(), "speaker_match": True}
+            if score is not None:
+                out["speaker_score"] = round(score, 4)
+            return jsonify(out)
         except ImportError:
             return jsonify({"error": "Install openai-whisper and ffmpeg"}), 503
     except Exception as e:
@@ -11554,6 +12366,28 @@ def _handle_bang(msg: str, scope: str) -> str:
         ok, r = _yt_like_one(url)
         if not ok: _record_failure("yt_like", r, {"video_url": url})
         return f"✅ {r}" if ok else f"❌ {r}"
+    if cmd in ("!yt_react", "!youtube_react"):
+        if not args: return "Usage: !yt_react <url>"
+        url = (re.search(r"https?://[^\s]+", args) or type("",(), {"group": lambda s,x: args})()).group(0)
+        ok, r = _yt_react(url)
+        if not ok: _record_failure("yt_react", r, {"video_url": url})
+        return f"✅ {r}" if ok else f"❌ {r}"
+    if cmd in ("!yt_watch_react", "!youtube_watch_react"):
+        if not args: return "Usage: !yt_watch_react <url>"
+        url = (re.search(r"https?://[^\s]+", args) or type("",(), {"group": lambda s,x: args})()).group(0)
+        ok, r = _yt_watch_react_start(url, scope or LINKED_SCOPE or "web")
+        if not ok:
+            _record_failure("yt_watch_react", r, {"video_url": url})
+        return f"✅ {r}" if ok else f"❌ {r}"
+    if cmd in ("!yt_watch_stop", "!youtube_watch_stop"):
+        ok, r = _yt_watch_stop(scope or LINKED_SCOPE or "web")
+        return f"✅ {r}" if ok else f"❌ {r}"
+    if cmd in ("!x_react", "!twitter_react"):
+        if not args: return "Usage: !x_react <x-post-url>"
+        url = (re.search(r"https?://[^\s]+", args) or type("",(), {"group": lambda s,x: args})()).group(0)
+        ok, r = _x_react(url)
+        if not ok: _record_failure("x_react", r, {"post_url": url})
+        return f"✅ {r}" if ok else f"❌ {r}"
     if cmd in ("!yt_analytics", "!youtube_analytics"):
         days, limit = 30, 5
         if args:
@@ -11689,8 +12523,9 @@ async def on_ready():
     if _stream_solo_banter_env_on():
         bot.loop.create_task(_stream_solo_banter_loop())
         print(
-            "[Stream solo] Idle/lore/LoL lobby lines → TTS to stream (not Twitch chat unless LUNA_STREAM_SOLO_CHAT=1). "
-            "Needs TWITCH_TTS=1. Stream mode: LUNA_STREAM_MODE or /api/stream-mode.",
+            "[Stream solo] Idle/lore/LoL lobby lines → /vrm/ viewer (poll) + hub chat; server TTS if VRM tab closed. "
+            "Set LUNA_STREAM_SOLO_BYPASS_VRM=1 for speaker-only. Needs TWITCH_TTS=1. "
+            "Stream mode: LUNA_STREAM_MODE or /api/stream-mode. (Not Twitch chat unless LUNA_STREAM_SOLO_CHAT=1.)",
             flush=True,
         )
     bot.loop.create_task(_reflection_loop())
@@ -12038,7 +12873,7 @@ def _whisper_transcribe(path: str) -> str | None:
         import whisper
         model = getattr(_whisper_transcribe, "_model", None)
         if model is None: model = whisper.load_model("base"); _whisper_transcribe._model = model
-        return (model.transcribe(path, fp16=False).get("text") or "").strip()
+        return (model.transcribe(path, **_whisper_transcribe_kwargs()).get("text") or "").strip()
     except Exception: return None
 
 
@@ -12050,7 +12885,7 @@ def _whisper_translate(path: str) -> str | None:
         if model is None:
             model = whisper.load_model("base")
             _whisper_translate._model = model
-        result = model.transcribe(path, fp16=False, task="translate")
+        result = model.transcribe(path, task="translate", **_whisper_transcribe_kwargs())
         return (result.get("text") or "").strip()
     except Exception:
         return None
@@ -12173,6 +13008,41 @@ async def cmd_yt_analytics(ctx, days: int = 30, limit: int = 5):
     ok, r = await asyncio.to_thread(_yt_channel_analytics, days, limit)
     if not ok: _record_failure("yt_analytics", r, {"days": days, "limit": limit})
     await ctx.reply(f"{'✅' if ok else '❌'} {r}")
+
+@bot.command(name="yt_react", aliases=["youtube_react"])
+async def cmd_yt_react(ctx, *, video_url: str = ""):
+    if not _is_privileged(ctx.author.id): await ctx.reply("Linked user/admin only."); return
+    if not video_url: await ctx.reply("Usage: !yt_react <url>"); return
+    await ctx.reply("Watching and reacting…")
+    ok, r = await asyncio.to_thread(_yt_react, video_url.strip())
+    if not ok: _record_failure("yt_react", r, {"video_url": video_url})
+    await _discord_reply_split(ctx, f"{'✅' if ok else '❌'} {r}")
+
+@bot.command(name="yt_watch_react", aliases=["youtube_watch_react"])
+async def cmd_yt_watch_react(ctx, *, video_url: str = ""):
+    if not _is_privileged(ctx.author.id): await ctx.reply("Linked user/admin only."); return
+    if not video_url: await ctx.reply("Usage: !yt_watch_react <url>"); return
+    scope = _scope_for(ctx.author.id, ctx.guild.id if ctx.guild else None)
+    ok, r = await asyncio.to_thread(_yt_watch_react_start, video_url.strip(), scope)
+    if not ok:
+        _record_failure("yt_watch_react", r, {"video_url": video_url})
+    await _discord_reply_split(ctx, f"{'✅' if ok else '❌'} {r}")
+
+@bot.command(name="yt_watch_stop", aliases=["youtube_watch_stop"])
+async def cmd_yt_watch_stop(ctx):
+    if not _is_privileged(ctx.author.id): await ctx.reply("Linked user/admin only."); return
+    scope = _scope_for(ctx.author.id, ctx.guild.id if ctx.guild else None)
+    ok, r = await asyncio.to_thread(_yt_watch_stop, scope)
+    await _discord_reply_split(ctx, f"{'✅' if ok else '❌'} {r}")
+
+@bot.command(name="x_react", aliases=["twitter_react"])
+async def cmd_x_react(ctx, *, post_url: str = ""):
+    if not _is_privileged(ctx.author.id): await ctx.reply("Linked user/admin only."); return
+    if not post_url: await ctx.reply("Usage: !x_react <x-post-url>"); return
+    await ctx.reply("Reading post and reacting…")
+    ok, r = await asyncio.to_thread(_x_react, post_url.strip())
+    if not ok: _record_failure("x_react", r, {"post_url": post_url})
+    await _discord_reply_split(ctx, f"{'✅' if ok else '❌'} {r}")
 
 @bot.command(name="analytics_screen", aliases=["dashboard_read", "read_dashboard"])
 async def cmd_analytics_screen(ctx):

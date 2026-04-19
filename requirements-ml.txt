@@ -8,3 +8,10 @@ numpy>=1.20.0
 
 # Optional: deep learning (for writing PyTorch scripts; not required for !ml tool)
 # torch>=2.0.0
+
+# Optional: Voice ID (podcast studio + hub /api/transcribe speaker gate) — Resemblyzer + torch.
+# Plain `pip install resemblyzer` fails on Windows + Python 3.13: it tries to compile `webrtcvad` (needs full MSVC + SDK).
+# Use prebuilt VAD wheels, then install Resemblyzer without pulling the broken dependency:
+#   pip install webrtcvad-wheels
+#   pip install resemblyzer --no-deps
+# Ensure torch, librosa, scipy, numpy are already installed (Whisper stack usually covers this).

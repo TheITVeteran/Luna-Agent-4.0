@@ -2243,6 +2243,8 @@ function populateVoices() {
 
 /** Dedupe Twitch lines when both / and /vrm/ poll the same events. */
 const spokenTwitchEventIds = new Set();
+/** Dedupe stream-solo banter lines (separate id space from Twitch). */
+const spokenStreamSoloEventIds = new Set();
 
 function plainTextForVrmSpeech(raw) {
   if (!raw || typeof raw !== "string") return "";
@@ -2752,6 +2754,18 @@ async function speakEdgeTts(text, opts = {}) {
     }
   }
 
+  let streamSoloIdReserved = null;
+  const ssid = opts.streamSoloEventId;
+  if (ssid != null && ssid !== "") {
+    const idn = typeof ssid === "number" ? ssid : parseInt(String(ssid), 10);
+    if (!Number.isNaN(idn)) {
+      if (spokenStreamSoloEventIds.has(idn)) return;
+      if (spokenStreamSoloEventIds.size > 250) spokenStreamSoloEventIds.clear();
+      spokenStreamSoloEventIds.add(idn);
+      streamSoloIdReserved = idn;
+    }
+  }
+
   speechSynthesis.cancel();
   stopEdgePlayback();
   const myGen = ++speakGen;
@@ -2843,6 +2857,7 @@ async function speakEdgeTts(text, opts = {}) {
   } catch (e) {
     console.warn(e);
     if (twitchIdReserved != null) spokenTwitchEventIds.delete(twitchIdReserved);
+    if (streamSoloIdReserved != null) spokenStreamSoloEventIds.delete(streamSoloIdReserved);
     if (myGen !== speakGen) return;
     speaking = false;
     lipAudioMode = false;
@@ -3361,6 +3376,30 @@ async function pollTwitchForVrm() {
 }
 setInterval(pollTwitchForVrm, 2500);
 pollTwitchForVrm();
+
+let streamSoloSinceVrm = 0;
+async function pollStreamSoloForVrm() {
+  try {
+    const res = await fetch(new URL("/api/stream-solo/pending?since=" + streamSoloSinceVrm, window.location.origin).href);
+    if (!res.ok) return;
+    const data = await res.json();
+    const events = data.events || [];
+    for (const ev of events) {
+      if (ev.id > streamSoloSinceVrm) streamSoloSinceVrm = ev.id;
+      if (!ev.reply) continue;
+      const raw = String(ev.reply);
+      const tr = raw.trim();
+      if (tr.startsWith("⚠") || tr.startsWith("❌")) continue;
+      const plain = plainTextForVrmSpeech(raw);
+      if (!plain.trim()) continue;
+      speakEdgeTts(plain, { streamSoloEventId: ev.id });
+    }
+  } catch {
+    /* */
+  }
+}
+setInterval(pollStreamSoloForVrm, 2500);
+pollStreamSoloForVrm();
 
 (async () => {
   let status = {};
