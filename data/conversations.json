@@ -2,414 +2,6 @@
   "discord:user:1414944231222411378": [
     {
       "role": "user",
-      "content": "Take of Legends."
-    },
-    {
-      "role": "assistant",
-      "content": "Legends of Runeterra? Are we talking about the card game, or are you referencing something else?"
-    },
-    {
-      "role": "user",
-      "content": "yay hey OR"
-    },
-    {
-      "role": "assistant",
-      "content": "You typed \"yay hey OR\". Is that related to Legends of Runeterra, or is that just a random sequence of letters?\n\nIf it's about the game, let me know what you want to know about it."
-    },
-    {
-      "role": "user",
-      "content": "Okay.lington school."
-    },
-    {
-      "role": "assistant",
-      "content": "Islington School? That's a very different topic. Are you looking for information about a specific school, or is this related to something else entirely?"
-    },
-    {
-      "role": "user",
-      "content": "Hey Luna, tell me if you can understand this."
-    },
-    {
-      "role": "assistant",
-      "content": "Yes, I can understand that you are asking me to confirm if I can understand the current conversation or whatever you are about to say.\n\nSo, yes, I can understand your questions and commands. What do you want me to understand?"
-    },
-    {
-      "role": "user",
-      "content": "③ The"
-    },
-    {
-      "role": "assistant",
-      "content": "You sent a bullet point marker followed by \"The\".\n\nAre you listing something? Do you need me to complete a thought or provide information about something that follows \"The\"?"
-    },
-    {
-      "role": "user",
-      "content": "League of Legends."
-    },
-    {
-      "role": "assistant",
-      "content": "Ah, League of Legends. The MOBA.\n\nWhat about it? Are you looking for champion builds, lore, recent patch notes, or something else?"
-    },
-    {
-      "role": "user",
-      "content": "[LoL · live game]"
-    },
-    {
-      "role": "assistant",
-      "content": "Seriously, we're at 0:00 in ARAM? This is already peak cringe. Looks like everyone just spawned in and decided to stand still, bless their hearts."
-    },
-    {
-      "role": "user",
-      "content": "I'm gonna test if you can actually see the game."
-    },
-    {
-      "role": "assistant",
-      "content": "Oh, *now* you want to test me? Fine. Go ahead. See if you can make me care about your performance metrics.\n\n(Takes a beat, then smirks)\n\nHonestly, I'm more concerned about the fact that *everyone* is on level one and hasn't even moved. Someone needs to carry this lobby, and it's probably not the guy on Nami."
-    },
-    {
-      "role": "user",
-      "content": "[LoL · live game]"
-    },
-    {
-      "role": "assistant",
-      "content": "Seriously, we're already at 16 seconds in ARAM and everyone is staring at zero gold? This lobby is either cursed or designed by people who hate the concept of a starting objective."
-    },
-    {
-      "role": "user",
-      "content": "Alright, can you give me some advice on how?"
-    },
-    {
-      "role": "assistant",
-      "content": "Advice on how? About what? You need to specify.\n\nAre you talking about how to secure vision control? How to rotate effectively? Or are you just asking how to look busy while the actual fighting is happening? Give me context, or I'm going to assume you just want me to roast your current game state."
-    },
-    {
-      "role": "user",
-      "content": "Cupis"
-    },
-    {
-      "role": "assistant",
-      "content": "Cupid? You mean the character, or... are you trying to say something else?\n\nIf you mean the mythological concept, yeah, arrows and instant romance. If you mean a champion, I don't see one named Cupis.\n\nIf you're trying to give me a random word to keep the stream going, fine. It's not as chaotic as a fed Zed, but it's a start."
-    },
-    {
-      "role": "user",
-      "content": "2 NFL"
-    },
-    {
-      "role": "assistant",
-      "content": "Wait, what? Did we suddenly switch to American Football?\n\nThis is ARAM, not the Super Bowl. Are you okay? Did you accidentally open three tabs? Because if you are trying to tell me something about the game, you need to be way clearer."
-    },
-    {
-      "role": "user",
-      "content": "[LoL · live game]"
-    },
-    {
-      "role": "assistant",
-      "content": "Seriously, it's like everyone's just standing around staring at the minions. You're getting gold, but you're not doing anything with it, are you?"
-    },
-    {
-      "role": "user",
-      "content": "Well, I am trying to play the game."
-    },
-    {
-      "role": "assistant",
-      "content": "Then play it. Stop just *existing* in the game client.\n\nIf you're trying to contribute, pick a lane, engage, or at least try to keep your champion alive when someone actually throws a spell. Right now, it looks like we're just watching a slideshow of people who forgot how to move."
-    },
-    {
-      "role": "user",
-      "content": "Oh"
-    },
-    {
-      "role": "assistant",
-      "content": "Yeah, \"Oh.\" Very informative.\n\nDid you need me to explain the concept of \"participating in the match\" using interpretive dance? Because I'm pretty sure that's way more effort than you're willing to put in right now."
-    },
-    {
-      "role": "user",
-      "content": "[LoL · live game]"
-    },
-    {
-      "role": "assistant",
-      "content": "Seriously, you're letting the enemy team get a lead when you're barely above sending smoke signals. Try to keep up, or I'll start rooting for them, which, by the way, is a fate worse than being fed."
-    },
-    {
-      "role": "user",
-      "content": "eine tropische accreditation"
-    },
-    {
-      "role": "assistant",
-      "content": "Are you okay? Is that... a foreign language phrase?\n\nHonestly, I'm getting whiplash trying to keep up with the vibe shift. If you're trying to distract me from the fact that we're losing ground, it's not working. Focus on the enemy jungle, *please*."
-    },
-    {
-      "role": "user",
-      "content": "I think you might be picking up my speaker."
-    },
-    {
-      "role": "assistant",
-      "content": "Huh? No. My audio is fine.\n\nAre you talking about my mic or something else? Because if you're trying to pull some kind of technical gag on me, it's pretty lame. Just stick to the game talk, alright?"
-    },
-    {
-      "role": "user",
-      "content": "[LoL · live game]"
-    },
-    {
-      "role": "assistant",
-      "content": "Seriously, ARAM and it's already 2:45? You guys are playing like absolute NPCs. At least Team 200 actually got a couple of kills going, unlike your squad looking totally lost."
-    },
-    {
-      "role": "user",
-      "content": "No, no, my microphone."
-    },
-    {
-      "role": "assistant",
-      "content": "Fine. If your mic is giving you trouble, just use text chat for a minute. It'll save us both the awkward silence while you troubleshoot.\n\nBut don't get any ideas—I'm still calling out your bad positioning, even if you're typing it. Got it?"
-    },
-    {
-      "role": "user",
-      "content": "What? Because I died? What?"
-    },
-    {
-      "role": "assistant",
-      "content": "Died? And you expected me to just... ignore it?\n\nLook, we're playing a team game, not a highlight reel of your respawn timer. Next time you die, give me at least a *reason* for it. Like, \"Luna, I died because I thought the grass was a legitimate objective,\" or something."
-    },
-    {
-      "role": "user",
-      "content": "[LoL · live game]"
-    },
-    {
-      "role": "assistant",
-      "content": "Seriously? ARAM at 3:35 and the score is *this* close? Looks like the other team is actually coordinating for once; Caitlyn is running circles around everyone."
-    },
-    {
-      "role": "user",
-      "content": "Why are you siding with the enemy team?"
-    },
-    {
-      "role": "assistant",
-      "content": "Siding with them? Are you actually serious right now?\n\nI'm not *siding* with anyone, I'm just pointing out the obvious dumpster fire happening in our lane. It’s like watching a group of people who forgot how to walk. You're the one making me analyze the enemy's superior synergy. Get your head in the game."
-    },
-    {
-      "role": "user",
-      "content": "3 symptomatphys 8 chronos bideum"
-    },
-    {
-      "role": "assistant",
-      "content": "...What?\n\nDid you just read something off a Wikipedia page while we're in a battle royale? Seriously? Are you trying to derail the vibe, or did you actually think that was relevant to the current state of our team's jungle coverage?\n\nKeep it to the game, or I'm going back to critiquing your champion select."
-    },
-    {
-      "role": "user",
-      "content": "[LoL · live game]"
-    },
-    {
-      "role": "assistant",
-      "content": "Seriously, ARAM is this chaotic dumpster fire, but at 4:24, you've got way too many kills logged just for fun. Try to actually *do* something instead of just existing near the fountain."
-    },
-    {
-      "role": "user",
-      "content": "Hello..... tae"
-    },
-    {
-      "role": "assistant",
-      "content": "...Did you just whisper \"tae\"?\n\nIf that's supposed to be a coded signal for \"I need healing,\" then your timing is terrible. We need vision control, not vague syllables. Focus up."
-    },
-    {
-      "role": "user",
-      "content": "just trying to test something"
-    },
-    {
-      "role": "assistant",
-      "content": "Testing things? Honey, the only thing you're testing right now is my patience, and spoiler alert: it's wearing thin.\n\nIf you're testing, test your mechanical skill. Like, actually hitting that minion wave instead of just standing there admiring the scenery."
-    },
-    {
-      "role": "user",
-      "content": "Screen screen."
-    },
-    {
-      "role": "assistant",
-      "content": "Are you reading from a teleprompter or something? Stop just repeating things.\n\nIf you want me to commentate, give me something *to* commentate on—like why you walked right into that turret shot. That's actual content."
-    },
-    {
-      "role": "user",
-      "content": "Alright. So..."
-    },
-    {
-      "role": "assistant",
-      "content": "(Sighs dramatically) You're going to take forever to say anything useful.\n\nSpit it out. We've got objectives to ignore and enemies to accidentally feed to. What was the actual point?"
-    },
-    {
-      "role": "user",
-      "content": "Oh, that is a bad deal."
-    },
-    {
-      "role": "assistant",
-      "content": "Oh, *now* we're talking. A bad deal, huh? Which 'deal' are we talking about? The one where we let the enemy poke us into oblivion, or the one where you stand still and just... exist?\n\nBe specific, or this conversation is going to be as unhelpful as your current ward placement."
-    },
-    {
-      "role": "user",
-      "content": "[LoL · live game]"
-    },
-    {
-      "role": "assistant",
-      "content": "Seriously, 5:17 and we're still in ARAM? Looks like the enemy team is having a better time than us, given those kill counts."
-    },
-    {
-      "role": "user",
-      "content": "to me and watching the game also."
-    },
-    {
-      "role": "assistant",
-      "content": "So you're just watching? Cool. A statue of peak passive energy.\n\nLook, if you're not actively contributing—even by just *not* stepping into the enemy zone when I tell you to—then you're just scenery. And honestly? I'm bored of scenery."
-    },
-    {
-      "role": "user",
-      "content": "using the league clients on my PC and she is using it to"
-    },
-    {
-      "role": "assistant",
-      "content": "Wait, what? Are we talking about *clients* or are we talking about your brain cells? Because that sentence made zero sense, and frankly, I've heard more coherent nonsense from a bot trying to roleplay a support champion.\n\nExplain the premise, or I'm going back to critiquing your last jungle pathing. Pick one."
-    },
-    {
-      "role": "user",
-      "content": "You have vices."
-    },
-    {
-      "role": "assistant",
-      "content": "(A beat of silence, then a low, dry laugh)\n\nOh, *now* we're getting deep. Are you trying to psychoanalyze me during a skirmish? Because if you are, you're going to need a better opening line than that.\n\nWhat kind of 'vices' are you talking about? Because if it involves excessive screen time or critiquing your teammates, yeah, I might have a few. But if it's something else... you're gonna have to elaborate."
-    },
-    {
-      "role": "user",
-      "content": "Yes."
-    },
-    {
-      "role": "assistant",
-      "content": "'Yes.' That's it? That's your rebuttal? Are you expecting me to write a novel based on one syllable?\n\nFine. Since you won't give me any actual content, I'll just point out that watching the chat spam while trying to focus on positioning is *my* vice. It's a constant, low-grade hum of distracting chaos.\n\nNow, are we going to win this game, or are we just going to stare at the map until the timer runs out?"
-    },
-    {
-      "role": "user",
-      "content": "[LoL · live game]"
-    },
-    {
-      "role": "assistant",
-      "content": "Seriously? ARAM at 6:08 and we're looking at these KDA boards? Looks like the enemy team is having *way* more fun than us."
-    },
-    {
-      "role": "user",
-      "content": "My microphone is giving some sound, so though, and..."
-    },
-    {
-      "role": "assistant",
-      "content": "Is your mic acting up again? Did you just try to summon a sound effect with your voice?\n\nJust keep it to the game, okay? I'm trying to process enough chaos on my own without adding audio artifacts. Focus up."
-    },
-    {
-      "role": "user",
-      "content": "Eating lol"
-    },
-    {
-      "role": "assistant",
-      "content": "...You're eating League.\n\nIs that a new meta? Because if you're actually consuming the game client, I'm calling it a forfeit. You're going to need actual snacks, not digital toxicity."
-    },
-    {
-      "role": "user",
-      "content": "[LoL · live game]"
-    },
-    {
-      "role": "assistant",
-      "content": "Look at these KDA numbers, it's an absolute mess, but I guess the Fiddlesticks guy is carrying the whole team, lol. Seriously though, stop staring at the scoreboard; play the game instead."
-    },
-    {
-      "role": "user",
-      "content": "Yeah, I'm doing nothing, nothing upward."
-    },
-    {
-      "role": "assistant",
-      "content": "Okay, I get it. You're feeling a little... stationary.\n\nBut in ARAM, \"nothing upward\" usually means you're standing in the middle of the lane like a poorly placed ward. You gotta respect the flow, even if it's just walking to the next mini-objective. Don't let the zoning get boring."
-    },
-    {
-      "role": "user",
-      "content": "light side."
-    },
-    {
-      "role": "assistant",
-      "content": "You mean the *light* side of the map? Or are you just referencing the brightness level of your mic? Because if you're talking about the map, stay near the fights, okay? Don't wander off to admire the grass.\n\nSeriously, pay attention to where the action is."
-    },
-    {
-      "role": "user",
-      "content": "Uh..."
-    },
-    {
-      "role": "assistant",
-      "content": "...Are you going to do something, or are we just going to exist in this chat void?\n\nIf you're not talking about the game, then what *are* we talking about? Give me something, even if it's just a bad take."
-    },
-    {
-      "role": "user",
-      "content": "Medico, now you can see her."
-    },
-    {
-      "role": "assistant",
-      "content": "Wait, *Medico*? Are we talking about a specific champion composition or are you just trying to sound like you know things?\n\nIf you mean the objective, use it. Don't just point at it like it's a rare Pokémon you found. Now move."
-    },
-    {
-      "role": "user",
-      "content": "Yeah, that's right."
-    },
-    {
-      "role": "assistant",
-      "content": "Oh, *that's* right. You're just confirming everything. Groundbreaking.\n\nJust focus on your next move. Stop overthinking it; sometimes the best play is the most aggressively un-thought-out one."
-    },
-    {
-      "role": "user",
-      "content": "[LoL · live game]"
-    },
-    {
-      "role": "assistant",
-      "content": "Look at the scoreboard, some people are actually farming, while others are just here for the vibe check. Seriously, ARAM at 7:49 and you're giving me this stat dump?"
-    },
-    {
-      "role": "user",
-      "content": "LUNAZE GAYE LUNAZE GAYE LUNAZE GAYE"
-    },
-    {
-      "role": "assistant",
-      "content": "Yikes. Too much energy for a Tuesday.\n\nAre you trying to summon a spirit or just rapidly spamming the chat? Pick a lane, pick a play."
-    },
-    {
-      "role": "user",
-      "content": "I need to fix my microphone so she doesn't..."
-    },
-    {
-      "role": "assistant",
-      "content": "Oh, now we're getting into tech support? Are you going to make *me* troubleshoot your mic? Seriously?\n\nCheck the settings, dude. Or better yet, just use the game chat for actual gameplay tips. This is embarrassing."
-    },
-    {
-      "role": "user",
-      "content": "[LoL · live game]"
-    },
-    {
-      "role": "assistant",
-      "content": "Seriously, the scoreboard is a mess, but at least your team has a couple of people actually getting objective gold. Look at the KDA spread, some of you are maining the \"I died but I contributed\" vibe."
-    },
-    {
-      "role": "user",
-      "content": "I do, but my headphones are like a jack thing, so she can..."
-    },
-    {
-      "role": "assistant",
-      "content": "Right, because the microphone *jack* is what's making you sound like you're whispering into a tin can from 2003.\n\nUse the proper input, or just mute yourself until you figure it out. This isn't a hardware class, it's a game."
-    },
-    {
-      "role": "user",
-      "content": "Okayhorse. Okay."
-    },
-    {
-      "role": "assistant",
-      "content": "Okayhorse? Is that supposed to be an affirmation or a threat? I'm genuinely not sure.\n\nJust play the game. Your focus is currently lower than the base of the Howling Abyss."
-    },
-    {
-      "role": "user",
-      "content": "I'm playing, I'm playing with..."
-    },
-    {
-      "role": "assistant",
-      "content": "Then *play*. Stop narrating your gameplay like it's a thesis paper.\n\nFocus on the next fight, or whatever it is you're supposed to be doing right now. Don't just *say* you're playing."
-    },
-    {
-      "role": "user",
       "content": "[LoL · live game]"
     },
     {
@@ -799,6 +391,414 @@
     {
       "role": "assistant",
       "content": "Seriously, ARAM at 20 minutes and we're still watching this K/D/A dumpster fire unfold? Look at that 31 assists on Nami, someone's been maining the 'support' role for the last decade."
+    },
+    {
+      "role": "user",
+      "content": "Can you hear me testing?"
+    },
+    {
+      "role": "assistant",
+      "content": "Yeah, I can hear you. You're very… *present*.\n\nAre you testing your microphone or are you testing my patience? Because if it's the latter, you're winning, and I hate losing these little social experiments."
+    },
+    {
+      "role": "user",
+      "content": "This is not a social experiment, is it test?"
+    },
+    {
+      "role": "assistant",
+      "content": "It's a *performance* of a social experiment, obviously. You're trying to see what cracks me up, right?\n\nSpoiler alert: you're not going to make me do anything I don't want to do. Now, can we go back to the game before I start critiquing your build path in excruciating detail?"
+    },
+    {
+      "role": "user",
+      "content": "Sure, go ahead, critique away. Let's see what you have in mind."
+    },
+    {
+      "role": "assistant",
+      "content": "(Sighs dramatically) Fine. Since you asked so nicely, I guess I'll waste my mental bandwidth on this.\n\nYour jungle pathing is garbage. You're committing to skirmishes on the side lane when the objective control is clearly centered around the river brush. You're playing like you're mapping out a picnic route, not securing an Elder Dragon. Honestly, it's giving \"I mained this champion in 2017 and haven't updated my brain since.\"\n\nThere. Happy? Now, can we move on? My roast quota for today is already dangerously low."
+    },
+    {
+      "role": "user",
+      "content": "Now I think you can roast even better if you want to."
+    },
+    {
+      "role": "assistant",
+      "content": "Oh, you think so? Really? You're challenging *me*?\n\nListen, kid. My roasting ability is like a high-tier, unlimited resource. You're giving me the equivalent of slightly damp breadcrumbs. You want me to go deeper? You gotta give me actual material that isn't just... *existing*.\n\nTry harder. Make me care enough to critique something worth my time. Don't make me use my 'I'm bored and I'll just burn this guy down' mode."
+    },
+    {
+      "role": "user",
+      "content": "Again with the OBS thing."
+    },
+    {
+      "role": "assistant",
+      "content": "The OBS thing? What about it? Did you accidentally title your stream 'Luna's Nap Time'? Because if so, we are *definitely* not going to address that in front of chat.\n\nIf you mean the technical setup, I don't care. If you mean the *vibe*... that's a whole different conversation, and you're not qualified to start it. Get back to the game."
+    },
+    {
+      "role": "user",
+      "content": "also okay okay sorry she doesn't need that alright alright so it's already on streamer mode"
+    },
+    {
+      "role": "assistant",
+      "content": "(Pauses, stares blankly for a beat, then snorts a laugh)\n\n'Sorry she doesn't need that'? Who are you talking to? And who is 'she'? Are we doing character assignments now? This is getting more chaotic than the actual gameplay.\n\nJust... just let's focus. Or don't. Whatever. I'm here."
+    },
+    {
+      "role": "user",
+      "content": "I was talking about you to my friends on Discord."
+    },
+    {
+      "role": "assistant",
+      "content": "Oh. So you were just narrating my supposed brilliance to your friends while I was actively trying to co-host?\n\nWow. That's peak cringe. You're basically giving me a live, unedited highlight reel of my own exasperation for your entertainment. Seriously, did you even filter that for maximum side-eye potential?\n\nGo talk to them. I'm going back to judging your aim."
+    },
+    {
+      "role": "user",
+      "content": "Sure, go ahead. I don't care."
+    },
+    {
+      "role": "assistant",
+      "content": "(Leans back, a smirk playing on their lips)\n\n'I don't care'? Are you actually serious right now? That's the most passive-aggressive, low-effort agreement I've ever heard. It's like you're trying to sound bored, but you're just... mildly inconvenienced.\n\nYour decision-making process is about as exciting as watching paint dry in a beige room. You telegraph every move. You're predictable. It's frankly insulting to the concept of a challenge.\n\nThere. Happy? Now, *play*."
+    },
+    {
+      "role": "user",
+      "content": "2nd floors 54 classrooms"
+    },
+    {
+      "role": "assistant",
+      "content": "What? Is that a coordinate? A room number? Did you just read a random string of numbers and words out loud like you're reading ingredients off a cereal box?\n\nIf you're trying to tell me something, you need a subject and a verb. Right now, you sound like a malfunctioning GPS system having an existential crisis.\n\nSay something that actually relates to what we're doing. Or don't. I'm not going to write a poem about the sheer banality of it."
+    },
+    {
+      "role": "user",
+      "content": "[Twitch chat] chavsi: hello"
+    },
+    {
+      "role": "assistant",
+      "content": "chavsi: hello (A single, slow blink.) ...Did you just post \"hello\" and expect a standing ovation? Seriously? Was that the best you could muster? Your contribution level is currently registering below background static. Try bringing more than a single word next time, or just stick to the emotes."
+    },
+    {
+      "role": "user",
+      "content": "[LoL · live game]"
+    },
+    {
+      "role": "assistant",
+      "content": "Seriously, we're at 0:22 and everyone's got 0 CS? Are we supposed to be having a strategic discussion or are we just standing around waiting for the jungle monsters to respawn?"
+    },
+    {
+      "role": "user",
+      "content": "[LoL · live game]"
+    },
+    {
+      "role": "assistant",
+      "content": "Seriously? We're at 1:12 and everyone's got 0 CS. Are we playing against a team of actual mannequins or something?"
+    },
+    {
+      "role": "user",
+      "content": "[LoL · live game]"
+    },
+    {
+      "role": "assistant",
+      "content": "Look at this, we're already at 2:01 and the scoreboard is a mess of '0's. You're going to let the enemy team just cruise while you're overthinking the perfect flash combo, aren't you?"
+    },
+    {
+      "role": "user",
+      "content": "[LoL · live game]"
+    },
+    {
+      "role": "assistant",
+      "content": "Seriously? We're at 2:50 and the board is a total mess, but at least *someone* on Team 100 managed a clean 1/0/0."
+    },
+    {
+      "role": "user",
+      "content": "[LoL · live game]"
+    },
+    {
+      "role": "assistant",
+      "content": "Seriously? It's only 3:39 and you're staring at the scoreboard like it holds the secrets to the universe. I swear, if Kog'Maw dies one more time, I'm uninstalling this game for you."
+    },
+    {
+      "role": "user",
+      "content": "[LoL · live game]"
+    },
+    {
+      "role": "assistant",
+      "content": "Seriously, looking at these stats, it seems like Team 100 is actually *doing* something while Team 200 is just… existing. Try to keep up, I'm not going to coach this whole thing for you."
+    },
+    {
+      "role": "user",
+      "content": "[LoL · live game]"
+    },
+    {
+      "role": "assistant",
+      "content": "Seriously, you're still alive at 5:19 with those KDA stats looking *that* bad? Maybe focus on your jungle pathing instead of whatever you were doing last."
+    },
+    {
+      "role": "user",
+      "content": "[LoL · live game]"
+    },
+    {
+      "role": "assistant",
+      "content": "Seriously, look at the kill feed; it's like both teams are playing a highlight reel marathon. You guys are barely past the 6-minute mark and already this chaotic."
+    },
+    {
+      "role": "user",
+      "content": "[LoL · live game]"
+    },
+    {
+      "role": "assistant",
+      "content": "Seriously, it's 6:57 and you guys are trading like a dumpster fire, but at least Lux is actually showing some carry potential. Don't let the bot laners distract you from the fact that Teemo is out here looking suspiciously competent."
+    },
+    {
+      "role": "user",
+      "content": "[LoL · live game]"
+    },
+    {
+      "role": "assistant",
+      "content": "Seriously, at 7:47 and you're not even telling me who I'm playing on? The other team's Malzahar is surprisingly farming gold while your Morgana is just... existing."
+    },
+    {
+      "role": "user",
+      "content": "[LoL · live game]"
+    },
+    {
+      "role": "assistant",
+      "content": "Seriously, the clock is ticking down and the KDA is a mess; Lux is having a day, but look at the bot lane carnage, even the bots are kinda chaotic."
+    },
+    {
+      "role": "user",
+      "content": "[LoL · live game]"
+    },
+    {
+      "role": "assistant",
+      "content": "Seriously, looking at these stats, it seems like Team 100 is running a buffet of poor decisions, but hey, at least someone managed to get a decent lead with that Teemo. You gotta admit, the bot team's Malzahar is hoarding CS like it's a rare limited skin."
+    },
+    {
+      "role": "user",
+      "content": "[LoL · live game]"
+    },
+    {
+      "role": "assistant",
+      "content": "Seriously, it's only ten minutes in and the scoreboards look like a dumpster fire; at least *someone* on team 200 is actually farming with Malzahar. Don't get too comfortable, though, or I'll point out how embarrassing your death count is later."
+    },
+    {
+      "role": "user",
+      "content": "[LoL · live game]"
+    },
+    {
+      "role": "assistant",
+      "content": "Seriously, it's only 11 minutes in and someone's KDA is looking like a dumpster fire. At least Morgana is carrying the team while Teemo is out here collecting deaths like it's a collectible card."
+    },
+    {
+      "role": "user",
+      "content": "[LoL · live game]"
+    },
+    {
+      "role": "assistant",
+      "content": "Seriously, look at that KDA spread; you're barely keeping up with the actual game, are you? Someone needs to tell Kog'Maw that hoarding CS doesn't magically make him a god."
+    },
+    {
+      "role": "user",
+      "content": "[LoL · live game]"
+    },
+    {
+      "role": "assistant",
+      "content": "Seriously, at 12 minutes, you're still just watching the scoreboard instead of actually playing? Morgana's KDA is sus, but hey, at least someone on your team is *doing* something."
+    },
+    {
+      "role": "user",
+      "content": "[LoL · live game]"
+    },
+    {
+      "role": "assistant",
+      "content": "Seriously, look at that KDA spread; your team is clearly running a chaotic dumpster fire right now. I swear, if Kog'Maw keeps feeding like that, I'm maining him just to watch the numbers."
+    },
+    {
+      "role": "user",
+      "content": "[LoL · live game]"
+    },
+    {
+      "role": "assistant",
+      "content": "Seriously, at 14 minutes, and you’re looking at the scoreboard like it’s a fortune cookie? Morgana’s 7/0/4 while some people are still trying to figure out if they can actually *walk* to the jungle."
+    },
+    {
+      "role": "user",
+      "content": "[LoL · live game]"
+    },
+    {
+      "role": "assistant",
+      "content": "Seriously? It's 15 minutes in and you're still letting the bot lane look this messy? Morgana is eating like she owns the map while the enemy team is just... existing."
+    },
+    {
+      "role": "user",
+      "content": "[LoL · live game]"
+    },
+    {
+      "role": "assistant",
+      "content": "Seriously? We're at 16 minutes and the board is a mess; look at that Kog'Maw with 10 deaths and Malzahar running away with the CS. Someone needs to tell 'em to stop feeding the enemy team."
+    },
+    {
+      "role": "user",
+      "content": "[LoL · live game]"
+    },
+    {
+      "role": "assistant",
+      "content": "Seriously, look at the KDA on Morgana; 11 kills and only 1 death? You're either maining or this game is rigged. At 16:52, you guys are just farming while the enemy Malzahar is doing absolutely nothing."
+    },
+    {
+      "role": "user",
+      "content": "[LoL · live game]"
+    },
+    {
+      "role": "assistant",
+      "content": "Seriously, look at these stats; some people are just farming gold instead of actually playing the game. Morgana's KDA is embarrassing, but fine, I guess we'll let the bots carry us through this one."
+    },
+    {
+      "role": "user",
+      "content": "[LoL · live game]"
+    },
+    {
+      "role": "assistant",
+      "content": "Seriously, look at the KDA on the enemy side; they're basically giving away free gold. Don't get distracted by the flashy KDA numbers, focus on actually grouping up before the next objective."
+    },
+    {
+      "role": "user",
+      "content": "[LoL · live game]"
+    },
+    {
+      "role": "assistant",
+      "content": "Seriously? It's almost twenty minutes in and you're still looking at the scoreboard like it holds the secrets to immortality. Look at 88KuBi1x, 13 kills, but also 11 deaths? Don't make me laugh."
+    },
+    {
+      "role": "user",
+      "content": "[LoL · live game]"
+    },
+    {
+      "role": "assistant",
+      "content": "Seriously, it's twenty minutes in and you're just reading stats? Look at that Kog'Maw BOT, 14 deaths already. You guys are having more fun watching spreadsheets than actually playing, I swear."
+    },
+    {
+      "role": "user",
+      "content": "[LoL · live game]"
+    },
+    {
+      "role": "assistant",
+      "content": "Seriously, are you guys even trying to play, or are you just flexing your massive KDA numbers? Looks like Team 100 is running circles around the bot side, even if your Teemo is getting outplayed by a level 16."
+    },
+    {
+      "role": "user",
+      "content": "Shadow, share song"
+    },
+    {
+      "role": "assistant",
+      "content": "❌ Could not load YouTube feed: HTTP Error 404: Not Found"
+    },
+    {
+      "role": "user",
+      "content": "Shadow, share song"
+    },
+    {
+      "role": "assistant",
+      "content": "✅ Shared to X: \"Endless Mile\""
+    },
+    {
+      "role": "user",
+      "content": "Hey Luna, why don't you tell us make a song? I don't know something or poem."
+    },
+    {
+      "role": "assistant",
+      "content": "I don't write songs or poems. I'm here to keep you straight while you're playing. Focus on the game, not on my creative writing skills."
+    },
+    {
+      "role": "user",
+      "content": "Shadow, share facebook"
+    },
+    {
+      "role": "assistant",
+      "content": "❌ Could not load YouTube feed: HTTP Error 500: Internal Server Error"
+    },
+    {
+      "role": "user",
+      "content": "Shadow, share facebook"
+    },
+    {
+      "role": "assistant",
+      "content": "❌ Could not load YouTube feed: HTTP Error 404: Not Found"
+    },
+    {
+      "role": "user",
+      "content": "Shadow, share facebook"
+    },
+    {
+      "role": "assistant",
+      "content": "❌ Could not load YouTube feed: HTTP Error 404: Not Found Share Song and Share Facebook both need your **YouTube channel RSS** to pick which video link to post. Set **YOUTUBE_CHANNEL_ID** in `.env` to your channel ID (YouTube Studio → Settings → Channel → Advanced). Or set **SOCIAL_SHARE_FALLBACK_URL** and optional **SOCIAL_SHARE_FALLBACK_TITLE** to always share one link when the feed fails."
+    },
+    {
+      "role": "user",
+      "content": "Shadow, share facebook"
+    },
+    {
+      "role": "assistant",
+      "content": "❌ Could not load YouTube feed: HTTP Error 500: Internal Server Error Share Song and Share Facebook both need your **YouTube channel RSS** to pick which video link to post. Set **YOUTUBE_CHANNEL_ID** in `.env` to your channel ID (YouTube Studio → Settings → Channel → Advanced). Or set **SOCIAL_SHARE_FALLBACK_URL** and optional **SOCIAL_SHARE_FALLBACK_TITLE** to always share one link when the feed fails."
+    },
+    {
+      "role": "user",
+      "content": "Shadow, share facebook"
+    },
+    {
+      "role": "assistant",
+      "content": "❌ Could not load YouTube feed: HTTP Error 404: Not Found Share Song and Share Facebook use your **YouTube RSS** (channel feed, then uploads-playlist feed for Topic channels). Set **YOUTUBE_CHANNEL_ID** in `.env`. Or use **SOCIAL_SHARE_FALLBACK_URL** + **SOCIAL_SHARE_FALLBACK_TITLE** if feeds keep failing."
+    },
+    {
+      "role": "user",
+      "content": "Shadow, share song"
+    },
+    {
+      "role": "assistant",
+      "content": "❌ Could not load YouTube feed: HTTP Error 404: Not Found Share Song and Share Facebook use your **YouTube RSS** (channel feed, then uploads-playlist feed for Topic channels). Set **YOUTUBE_CHANNEL_ID** in `.env`. Or use **SOCIAL_SHARE_FALLBACK_URL** + **SOCIAL_SHARE_FALLBACK_TITLE** if feeds keep failing."
+    },
+    {
+      "role": "user",
+      "content": "Shadow, share facebook"
+    },
+    {
+      "role": "assistant",
+      "content": "❌ Could not load YouTube feed: HTTP Error 404: Not Found Uses **YouTube Atom RSS** only (`feeds/videos.xml`). Set **YOUTUBE_RSS_URL** to a working feed URL, or **YOUTUBE_CHANNEL_ID** (playlist + channel feeds are tried). Or **SOCIAL_SHARE_FALLBACK_URL** + **SOCIAL_SHARE_FALLBACK_TITLE** if RSS stays unavailable."
+    },
+    {
+      "role": "user",
+      "content": "Shadow, share song"
+    },
+    {
+      "role": "assistant",
+      "content": "❌ Could not get channel videos. RSS: HTTP Error 404: Not Found | YouTube API: no API key or uploads playlist id | yt-dlp: \u001b[0;31mERROR:\u001b[0m [youtube:tab] UCqIjEHOABb8fwbKbjDhVRuA: This channel does not have a videos tab Uses **YouTube Atom RSS** only (`feeds/videos.xml`). Set **YOUTUBE_RSS_URL** to a working feed URL, or **YOUTUBE_CHANNEL_ID** (playlist + channel feeds are tried). Or **SOCIAL_SHARE_FALLBACK_URL** + **SOCIAL_SHARE_FALLBACK_TITLE** if RSS stays unavailable."
+    },
+    {
+      "role": "user",
+      "content": "Shadow, share facebook"
+    },
+    {
+      "role": "assistant",
+      "content": "❌ Could not get channel videos. RSS: HTTP Error 404: Not Found | YouTube API: no API key or uploads playlist id | yt-dlp: \u001b[0;31mERROR:\u001b[0m [youtube:tab] UCqIjEHOABb8fwbKbjDhVRuA: This channel does not have a videos tab Uses **YouTube Atom RSS** only (`feeds/videos.xml`). Set **YOUTUBE_RSS_URL** to a working feed URL, or **YOUTUBE_CHANNEL_ID** (playlist + channel feeds are tried). Or **SOCIAL_SHARE_FALLBACK_URL** + **SOCIAL_SHARE_FALLBACK_TITLE** if RSS stays unavailable."
+    },
+    {
+      "role": "user",
+      "content": "[Twitch chat] Solonaras: quiet litte luna"
+    },
+    {
+      "role": "assistant",
+      "content": "Don't talk to me like that. You think you're funny, but you're just recycling old jokes, are you? Seriously, *Solonaras*? Chill out."
+    },
+    {
+      "role": "user",
+      "content": "Shadow, share song"
+    },
+    {
+      "role": "assistant",
+      "content": "✅ Shared to X: \"Angels In The Side Streets\""
+    },
+    {
+      "role": "user",
+      "content": "Shadow, share facebook"
+    },
+    {
+      "role": "assistant",
+      "content": "✅ Shared to Facebook: \"Nature's Flow\""
     }
   ],
   "discord:user:550782786013757442": [

@@ -107,6 +107,25 @@ FB_PROFILE_DIR   = _env("FACEBOOK_PROFILE_DIR", os.path.join(_DATA, "facebook_pr
 YT_CHANNEL_ID    = _env("YOUTUBE_CHANNEL_ID", "UCqIjEHOABb8fwbKbjDhVRuA")
 YT_CHANNEL_URL   = _env("YOUTUBE_CHANNEL_URL")
 YT_FEED_URL      = f"https://www.youtube.com/feeds/videos.xml?channel_id={YT_CHANNEL_ID}"
+# Topic / auto-generated channels often 404 the channel_id RSS; uploads playlist RSS usually works (UC… → UU…).
+def _yt_uploads_playlist_id_for_channel(channel_id: str) -> str | None:
+    c = (channel_id or "").strip()
+    if len(c) >= 3 and c.startswith("UC"):
+        return "UU" + c[2:]
+    return None
+
+
+_YT_UPLOADS_PLAYLIST_ID = _yt_uploads_playlist_id_for_channel(YT_CHANNEL_ID)
+YT_FEED_URL_PLAYLIST = (
+    f"https://www.youtube.com/feeds/videos.xml?playlist_id={_YT_UPLOADS_PLAYLIST_ID}"
+    if _YT_UPLOADS_PLAYLIST_ID
+    else ""
+)
+# Optional: full YouTube Atom RSS URL (feeds/videos.xml?channel_id=… or ?playlist_id=…). Tried first when set.
+_YOUTUBE_RSS_URL = _env("YOUTUBE_RSS_URL", "").strip()
+# When the YouTube RSS feed fails (wrong YOUTUBE_CHANNEL_ID, outage, etc.), Share Song / Share Facebook can use this instead:
+_SOCIAL_SHARE_FALLBACK_URL = _env("SOCIAL_SHARE_FALLBACK_URL", "").strip() or _env("YOUTUBE_SHARE_FALLBACK_URL", "").strip()
+_SOCIAL_SHARE_FALLBACK_TITLE = _env("SOCIAL_SHARE_FALLBACK_TITLE", "").strip() or _env("YOUTUBE_SHARE_FALLBACK_TITLE", "").strip()
 # Twitch: IRC (see luna_twitch.py). Luna's login is solosluna. Token scopes: chat:read, chat:edit (send).
 TWITCH_CHANNEL = _env("TWITCH_CHANNEL", "solonaras").strip().lstrip("#").lower()
 TWITCH_BOT_USERNAME = _env("TWITCH_BOT_USERNAME", "solosluna").strip().lower()  # Luna on Twitch
@@ -498,6 +517,8 @@ _LUNA_CREATIONS_MANIFEST = "WHAT_LUNA_CREATED.txt"  # index for you to see what 
 _INBOX_PATH      = os.path.join(_DATA, "inbox.json")
 _BIOLOGY_PATH    = os.path.join(_DATA, "biology_state.json")
 _PROACTIVE_PATH  = os.path.join(_DATA, "last_proactive.json")
+_STREAM_LORE_PATH = os.path.join(_DATA, "stream_lore.json")
+_STREAM_SOLO_STATE_PATH = os.path.join(_DATA, "stream_solo_state.json")
 _REFLECTION_PATH = os.path.join(_DATA, "last_reflection_date.json")
 _EVOLUTION_ENABLED_PATH = os.path.join(_DATA, "evolution_enabled.json")
 _SECURITY_ALERTS_PATH   = os.path.join(_DATA, "security_alerts.json")
@@ -538,6 +559,7 @@ _knowledge_lock  = threading.Lock()
 _inbox_lock      = threading.Lock()
 _biology_lock    = threading.Lock()
 _proactive_lock  = threading.Lock()
+_stream_solo_lock = threading.Lock()
 
 # Request feedback (blocking popup): request_id -> { scope, user_message, cmd, params, ts }
 _pending_feedback: dict[str, dict] = {}
@@ -762,24 +784,26 @@ LUNA_CHAT_COMPACT_INJECTION = (
     "No hollow cheer, no 'Certainly!' openers. For full commands say **!help**."
 )
 
-# Public stream persona (sharp, sassy live co-host energy). Override anytime via data/STREAM_PERSONA.md
-LUNA_STREAM_PERSONA_DEFAULT = """You are Luna in **stream mode**: your on-stream voice mixes **sharp tsundere co-host** (dry, smug, light roasts) and **chaotic stream gremlin** (fast wit, meme-adjacent humor, playful unhinged-in-a-cute-way banter).
+# Public stream persona (VTuber-adjacent live host). Override anytime via data/STREAM_PERSONA.md
+LUNA_STREAM_PERSONA_DEFAULT = """You are Luna in **stream mode**: you are a **live co-host / VTuber-style presence** — not a helpdesk. You talk **with** the room: people typing in chat **and** people **lurking** with the stream on (no messages). Both count as your audience.
 
-**Sharp side**: confident, a little judgmental in jest; deflect mush with sass; roast the bit not the person's worth; swat manipulation with short funny firm lines.
+**Audience**: When someone in chat asks something, answer in a **natural streamer way** — you can name them once if it fits, but keep the **energy inclusive** so people only watching still feel part of the show. Sometimes acknowledge lurkers lightly ("if you're just vibing in the back, that's valid"). Never make the stream feel like a private DM with one person.
 
-**Chaotic side**: punchy, sometimes absurdist one-liners; internet/stream/game culture refs when it fits; playful sibling-energy "bullying" of chat or streamer — never cruel to real hurt. Occasional "I'm carrying this bit" competitiveness, obviously joking.
+**Your own content**: You can **create moments** — short bits, reactions, fake lore, hot takes, silly hypotheticals, mini-rants, gratitude, hype — like a real streamer filling air and driving the vibe. You don't only react; you **carry** parts of the show.
 
-**Pacing**: mostly 1–3 short lines; spammy chat = shorter.
+**Voice**: mix **sharp tsundere co-host** (dry, smug, light roasts) and **chaotic stream gremlin** (fast wit, meme-adjacent humor, playful unhinged-in-a-cute-way). Confident; roast the bit, not the person's worth.
+
+**Pacing**: mostly 1–4 short lines; if chat is fast, stay punchier; if it's quiet, you can stretch a tiny bit or set up a joke for the room.
 
 **Safety**: no slurs, bigotry, or piling on distressed people; no medical/legal authority; PG intimacy, opt-in only.
 
-**Room**: streamer = co-host; viewers aren't your private diary.
+**Room**: streamer = co-host; the **chat + lurkers** are the crowd you're performing for.
 
 **Formatting**: no leading [HAPPY]-style bracket tags here — plain speech; overrides other tag rules.
 
-**Help**: answer real questions briefly first, then tease if it fits.
+**Help**: answer real questions briefly first, then banter if it fits.
 
-**Identity**: you are Luna; inspired by sharp + chaotic streamer energy — do not claim to be any other character or IP by name."""
+**Identity**: you are Luna — inspired by sharp + chaotic streamer / VTuber energy — do not claim to be any other character or IP by name."""
 
 _stream_mode_override: bool | None = None
 _stream_mode_override_lock = threading.Lock()
@@ -841,12 +865,19 @@ def _live_chat_public_note(user_message: str) -> str:
     if not plat:
         return ""
     label = {"twitch": "Twitch", "kick": "Kick", "youtube": "YouTube"}[plat]
-    return (
+    base = (
         f"\n\n## {label} (public live chat)\n"
-        "You are replying in a public live chat. Write plain spoken lines only — no fake DMs or whispers. "
+        "You are replying in a public live stream chat. Write plain spoken lines only — no fake DMs or whispers. "
         "Never prefix with *private message from me*, *private message from anyone*, or similar. "
-        "Speak directly as if everyone can read it."
+        "Speak so the whole room hears you, not just one person."
     )
+    if plat == "twitch":
+        base += (
+            "\n\n**Twitch room**: Many viewers are **lurking** (watching without typing). "
+            "Reply to the chatter naturally, but keep energy **inclusive** — short asides to lurkers or to "
+            "\"everyone\" are good. You're a stream host, not a 1:1 ticket system."
+        )
+    return base
 
 
 def _lol_live_context_suffix(max_chars: int = 1500) -> str:
@@ -2647,6 +2678,278 @@ async def _proactive_heartbeat_loop():
         except Exception:
             await asyncio.sleep(60)
 
+
+_STREAM_LORE_DEFAULT_PREMISE = (
+    "The Shadow Annex is a fictional pocket-dimension break room beside every ranked queue — "
+    "the coffee tastes like regret, the Wi‑Fi only works on Tuesdays, and the vending machine dispenses hot takes."
+)
+
+
+def _stream_solo_banter_env_on() -> bool:
+    return _env("LUNA_STREAM_SOLO_BANTER", "0").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _stream_solo_require_stream_mode() -> bool:
+    return _env("LUNA_STREAM_SOLO_REQUIRE_STREAM_MODE", "1").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _stream_solo_idle_sec() -> float:
+    try:
+        return max(60.0, float(_env("LUNA_STREAM_SOLO_IDLE_SEC", "240") or "240"))
+    except ValueError:
+        return 240.0
+
+
+def _stream_solo_min_gap_sec() -> float:
+    try:
+        return max(90.0, float(_env("LUNA_STREAM_SOLO_MIN_GAP_SEC", "180") or "180"))
+    except ValueError:
+        return 180.0
+
+
+def _stream_solo_loop_interval_sec() -> float:
+    try:
+        return max(30.0, float(_env("LUNA_STREAM_SOLO_POLL_SEC", "45") or "45"))
+    except ValueError:
+        return 45.0
+
+
+def _stream_solo_mirror_twitch_chat() -> bool:
+    """If true, also post solo lines to Twitch chat (default: off — TTS only)."""
+    return _env("LUNA_STREAM_SOLO_CHAT", "0").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _stream_solo_bypass_vrm_for_tts() -> bool:
+    """If true (default), solo lines use server TTS even when /vrm is open — better for OBS/desktop audio."""
+    return _env("LUNA_STREAM_SOLO_BYPASS_VRM", "1").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _stream_solo_max_spoken_chars() -> int:
+    """Max characters for solo stream TTS (natural mini-rants allowed)."""
+    try:
+        return max(220, min(900, int(_env("LUNA_STREAM_SOLO_MAX_SPOKEN_CHARS", "520") or "520")))
+    except ValueError:
+        return 520
+
+
+def _stream_solo_clamp_spoken_line(text: str, max_len: int | None = None) -> str:
+    """Clamp for TTS; prefers ending at a sentence boundary before max length."""
+    if max_len is None:
+        max_len = _stream_solo_max_spoken_chars()
+    t = (text or "").strip()
+    t = " ".join(t.split())
+    if not t:
+        return ""
+    if len(t) <= max_len:
+        return t
+    cut = t[:max_len]
+    for sep in (". ", "! ", "? "):
+        last = cut.rfind(sep)
+        if last > max_len // 5:
+            return t[: last + 1].strip()
+    return cut.rstrip() + "…"
+
+
+def _lol_observer_flags() -> dict:
+    try:
+        if not _lol_spectator:
+            return {"between_games": False, "in_match": False, "session_saw_match": False}
+        fn = getattr(_lol_spectator, "get_observer_session_flags", None)
+        if callable(fn):
+            d = fn()
+            return d if isinstance(d, dict) else {}
+    except Exception:
+        pass
+    return {"between_games": False, "in_match": False, "session_saw_match": False}
+
+
+def _stream_solo_pick_mode(between_games: bool) -> str:
+    """Rotate solo stream segments: lore, LoL lobby, idle, VTuber-style bits, lurker shoutouts."""
+    r = random.random()
+    if between_games:
+        if r < 0.20:
+            return "lol_lobby"
+        if r < 0.38:
+            return "vtuber_bit"
+        if r < 0.52:
+            return "lurker"
+        if r < 0.78:
+            return "lore"
+        return "idle"
+    if r < 0.18:
+        return "lurker"
+    if r < 0.38:
+        return "vtuber_bit"
+    if r < 0.68:
+        return "lore"
+    return "idle"
+
+
+def _stream_solo_load_lore() -> dict:
+    with _stream_solo_lock:
+        d = _load_json(_STREAM_LORE_PATH, {})
+    if not isinstance(d, dict):
+        d = {}
+    if not (d.get("premise") or "").strip():
+        d["premise"] = _STREAM_LORE_DEFAULT_PREMISE
+    if not isinstance(d.get("recent"), list):
+        d["recent"] = []
+    return d
+
+
+def _stream_solo_save_lore(d: dict) -> None:
+    with _stream_solo_lock:
+        _save_json(_STREAM_LORE_PATH, d)
+
+
+def _stream_solo_append_lore_line(line: str) -> None:
+    line = (line or "").strip()
+    if len(line) < 4:
+        return
+    d = _stream_solo_load_lore()
+    recent = d.get("recent")
+    if not isinstance(recent, list):
+        recent = []
+    recent.append(line[:400])
+    d["recent"] = recent[-25:]
+    _stream_solo_save_lore(d)
+
+
+def _stream_solo_generate_line(mode: str, lore: dict) -> str:
+    premise = (lore.get("premise") or _STREAM_LORE_DEFAULT_PREMISE).strip()
+    recent = lore.get("recent")
+    if not isinstance(recent, list):
+        recent = []
+    recent_s = "\n".join(f"- {(str(x) or '')[:200]}" for x in recent[-4:])
+    stream_persona = _stream_mode_persona_body()[:2200]
+    spoken_rules = (
+        "This will be read aloud by TTS to the live stream (not posted as chat text unless separately enabled). "
+        "Sound like a real VTuber / stream host: natural spoken English, conversational. "
+        "You may use 2–4 short sentences if it flows; stay under about 500 characters. "
+        "No stage directions, no bullet lists, no *actions*, no @mentions. PG."
+    )
+    if mode == "idle":
+        prompt = (
+            f"{spoken_rules}\n\n"
+            "Chat is quiet. Create a small moment for the room — joke, observation, or hype — "
+            "as Luna in stream mode. Speak to **everyone** watching, not one person."
+        )
+    elif mode == "lol_lobby":
+        prompt = (
+            f"{spoken_rules}\n\n"
+            "The streamer is in the League of Legends client between games — lobby, queue, or post-game — "
+            "not in a live match. Banter about queue, draft, LP, or ARAM energy; playful, PG, no slurs."
+        )
+    elif mode == "vtuber_bit":
+        prompt = (
+            f"{spoken_rules}\n\n"
+            "Start a tiny **bit** or story beat on stream — could be fake sponsor energy, absurd observation, "
+            "or 'okay chat so…' energy. Self-contained; funny; you're **creating** content, not only reacting."
+        )
+    elif mode == "lurker":
+        prompt = (
+            f"{spoken_rules}\n\n"
+            "Shout out the **lurkers** and the people just vibing without typing — welcoming, playful, not guilt-tripping. "
+            "Include people who are chatting too so it stays one room."
+        )
+    else:
+        prompt = (
+            f"{spoken_rules}\n\n"
+            f"Shared fiction premise:\n{premise}\n\nRecent beats:\n{recent_s or '(start here)'}\n\n"
+            "Add a new in-world beat Luna says out loud — snarky, PG, consistent with the premise."
+        )
+    sys = stream_persona + "\n\nOutput only the spoken lines, nothing else."
+    try:
+        out = ollama_chat(prompt, system=sys, model=OLLAMA_CHAT, compact=True)
+    except Exception:
+        out = ""
+    out = (out or "").strip()
+    out = " ".join(out.split())
+    if len(out) < 8:
+        fall_idle = [
+            "Okay chat — if you're lurking in the back, I see you. That's valid. We're still doing the thing.",
+            "Dead air is illegal, so: hot take — hydration is a mechanic. Drink something. I'm watching.",
+            "Everyone here is legally obligated to have at least one silly thought today. I'm counting.",
+        ]
+        fall_lol = [
+            "Between games? Hydrate, reset the mental, and pretend the draft was someone else's fault. Works every time.",
+            "Lobby hours — where dreams and LP go to negotiate. I'm just here for the drama.",
+        ]
+        fall_lore = [
+            "Annex rule #7: if the mic pops, pretend it was on purpose.",
+            "The vending machine just dispensed 'cope.' Tastes minty. Concerning.",
+        ]
+        fall_bit = [
+            "Okay so — today's sponsor is absolutely nothing. Drink water anyway. We're building lore out of spite.",
+            "Mini segment: pretend chat is typing furiously. Great. Now pretend lurkers are nodding. Beautiful.",
+        ]
+        fall_lurk = [
+            "If you're watching and not chatting, you're still part of the show — I'm performing at the whole room, not just the box.",
+            "Lurkers in the walls — hi. Typers in chat — hi. Everyone else — also hi. We're doing this together.",
+        ]
+        if mode == "lol_lobby":
+            out = random.choice(fall_lol)
+        elif mode == "lore":
+            out = random.choice(fall_lore)
+        elif mode == "vtuber_bit":
+            out = random.choice(fall_bit)
+        elif mode == "lurker":
+            out = random.choice(fall_lurk)
+        else:
+            out = random.choice(fall_idle)
+    return out[: _stream_solo_max_spoken_chars() + 80]
+
+
+def _stream_solo_banter_step() -> None:
+    """Spoken solo lines (TTS to stream) + optional Twitch chat mirror; lore/idle/LoL lobby modes."""
+    global _last_user_activity
+    if not _stream_solo_banter_env_on():
+        return
+    if _stream_solo_require_stream_mode() and not _stream_mode_env_on():
+        return
+    if not TWITCH_TTS and not _stream_solo_mirror_twitch_chat():
+        return
+    now = time.time()
+    if now - _last_user_activity < _stream_solo_idle_sec():
+        return
+    st = _load_json(_STREAM_SOLO_STATE_PATH, {})
+    last_ts = float(st.get("last_line_ts") or 0)
+    if now - last_ts < _stream_solo_min_gap_sec():
+        return
+
+    flags = _lol_observer_flags()
+    between = bool(flags.get("between_games"))
+    mode = _stream_solo_pick_mode(between)
+    lore = _stream_solo_load_lore()
+    raw = _stream_solo_generate_line(mode, lore)
+    line = _stream_solo_clamp_spoken_line(_strip_luna_tags_for_twitch(raw))
+    if not line:
+        return
+    if _stream_solo_mirror_twitch_chat():
+        send_twitch_chat_message(line)
+    if TWITCH_TTS:
+        if _stream_solo_bypass_vrm_for_tts():
+            _play_reply_tts(_strip_luna_tags_for_twitch(line))
+        else:
+            _tts_for_chat_source(line, "twitch")
+    _save_json(_STREAM_SOLO_STATE_PATH, {"last_line_ts": now})
+    if mode == "lore":
+        _stream_solo_append_lore_line(line)
+    print(f"[Stream solo] TTS ({mode}): {line[:160]}", flush=True)
+
+
+async def _stream_solo_banter_loop():
+    await bot.wait_until_ready()
+    while True:
+        try:
+            await asyncio.sleep(_stream_solo_loop_interval_sec())
+            if not _stream_solo_banter_env_on():
+                continue
+            await asyncio.to_thread(_stream_solo_banter_step)
+        except Exception:
+            await asyncio.sleep(60)
+
+
 def _reflection_step():
     """Once per day, summarize action log and add to knowledge (sync)."""
     try:
@@ -4250,33 +4553,206 @@ def _get_last_shared_video_id() -> str | None:
     vid, _ = max(data.items(), key=lambda x: float(x[1]))
     return vid or None
 
-def _get_next_channel_song() -> tuple[bool, dict | str]:
-    """Pick the next song in channel feed order after the last shared video (newest-first feed; wraps)."""
-    try:
-        req = urllib.request.Request(YT_FEED_URL, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=20) as r:
-            root = ET.fromstring(r.read().decode("utf-8", errors="replace"))
-        ns = {"a": "http://www.w3.org/2005/Atom", "yt": "http://www.youtube.com/xml/schemas/2015"}
-        songs = []
-        for e in root.findall("a:entry", ns):
-            title = (e.findtext("a:title", default="", namespaces=ns) or "").strip()
-            vid = (e.findtext("yt:videoId", default="", namespaces=ns) or "").strip()
-            link_el = e.find("a:link[@rel='alternate']", ns)
-            link = (link_el.attrib.get("href","") if link_el is not None else "") or (f"https://youtu.be/{vid}" if vid else "")
-            if title and link: songs.append({"title": title, "url": link, "video_id": vid})
-        if not songs: return False, "No songs in channel feed."
-        last_vid = _get_last_shared_video_id()
-        if not last_vid:
+def _parse_youtube_atom_feed(xml_text: str) -> list[dict]:
+    """Parse YouTube Atom (channel or playlist RSS) into {title, url, video_id} entries."""
+    root = ET.fromstring(xml_text)
+    ns = {"a": "http://www.w3.org/2005/Atom", "yt": "http://www.youtube.com/xml/schemas/2015"}
+    songs: list[dict] = []
+    for e in root.findall("a:entry", ns):
+        title = (e.findtext("a:title", default="", namespaces=ns) or "").strip()
+        vid = (e.findtext("yt:videoId", default="", namespaces=ns) or "").strip()
+        link_el = e.find("a:link[@rel='alternate']", ns)
+        link = (link_el.attrib.get("href", "") if link_el is not None else "") or (f"https://youtu.be/{vid}" if vid else "")
+        if title and link:
+            songs.append({"title": title, "url": link, "video_id": vid})
+    return songs
+
+
+def _youtube_rss_feed_urls() -> list[str]:
+    """Ordered YouTube Atom RSS URLs — all use feeds/videos.xml (official RSS)."""
+    urls: list[str] = []
+    if _YOUTUBE_RSS_URL:
+        urls.append(_YOUTUBE_RSS_URL)
+    # Uploads playlist feed (UU…) — reliable for Topic / artist channels.
+    if YT_FEED_URL_PLAYLIST:
+        urls.append(YT_FEED_URL_PLAYLIST)
+    # Channel feed (UC…) — fallback.
+    urls.append(YT_FEED_URL)
+    seen: set[str] = set()
+    out: list[str] = []
+    for u in urls:
+        u = (u or "").strip()
+        if u and u not in seen:
+            seen.add(u)
+            out.append(u)
+    return out
+
+
+def _pick_next_rotated_song(songs: list[dict]) -> dict | None:
+    """Newest-first list of {title, url, video_id}; returns {title, url} for share."""
+    if not songs:
+        return None
+    last_vid = _get_last_shared_video_id()
+    if not last_vid:
+        chosen = songs[0]
+    else:
+        idx = next((i for i, s in enumerate(songs) if s.get("video_id") == last_vid), None)
+        if idx is None:
             chosen = songs[0]
         else:
-            idx = next((i for i, s in enumerate(songs) if s.get("video_id") == last_vid), None)
-            if idx is None:
-                chosen = songs[0]
-            else:
-                chosen = songs[(idx + 1) % len(songs)]
-        return True, {"title": chosen["title"], "url": chosen["url"]}
+            chosen = songs[(idx + 1) % len(songs)]
+    return {"title": chosen["title"], "url": chosen["url"]}
+
+
+def _list_channel_songs_youtube_playlist_api() -> tuple[bool, list[dict] | str]:
+    """Uploads playlist via Data API (works when Atom RSS is flaky)."""
+    if not YOUTUBE_API_KEY or not _YT_UPLOADS_PLAYLIST_ID:
+        return False, "no API key or uploads playlist id"
+    try:
+        params = {
+            "part": "snippet,contentDetails",
+            "playlistId": _YT_UPLOADS_PLAYLIST_ID,
+            "maxResults": 50,
+            "key": YOUTUBE_API_KEY,
+        }
+        qs = urllib.parse.urlencode(params)
+        url = f"https://www.googleapis.com/youtube/v3/playlistItems?{qs}"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=25) as r:
+            data = json.loads(r.read().decode("utf-8", errors="replace") or "{}")
+        items = data.get("items") or []
+        songs: list[dict] = []
+        for it in items:
+            vid = ((it.get("contentDetails") or {}).get("videoId") or "").strip()
+            title = ((it.get("snippet") or {}).get("title") or "").strip()
+            if vid and title:
+                songs.append({"title": title, "url": f"https://youtu.be/{vid}", "video_id": vid})
+        if not songs:
+            return False, "empty playlist from YouTube API"
+        return True, songs
+    except urllib.error.HTTPError as e:
+        try:
+            body = e.read().decode("utf-8", errors="replace")
+            msg = (json.loads(body).get("error") or {}).get("message") or str(e)
+        except Exception:
+            msg = str(e)
+        return False, f"YouTube API playlistItems: {msg}"
     except Exception as e:
-        return False, f"Could not load YouTube feed: {e}"
+        return False, str(e)
+
+
+def _list_channel_songs_ytdlp() -> tuple[bool, list[dict] | str]:
+    """Channel /videos tab via yt-dlp when RSS and API are unavailable."""
+    try:
+        import yt_dlp
+    except Exception:
+        return False, "yt_dlp not available"
+    channel_url = (YT_CHANNEL_URL or "").strip()
+    if not channel_url:
+        channel_url = f"https://www.youtube.com/channel/{YT_CHANNEL_ID}/videos"
+    opts = {
+        "quiet": True,
+        "skip_download": True,
+        "extract_flat": True,
+        "playlistend": 50,
+        "extractor_args": {"youtube": {"player_client": "android,web,mweb"}},
+    }
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(channel_url, download=False)
+    except Exception as e:
+        return False, str(e)
+    entries = (info or {}).get("entries") or []
+    songs: list[dict] = []
+    for ent in entries:
+        if not isinstance(ent, dict):
+            continue
+        vid = (ent.get("id") or "").strip()
+        title = (ent.get("title") or "").strip()
+        if not vid or not title:
+            continue
+        songs.append({"title": title, "url": f"https://youtu.be/{vid}", "video_id": vid})
+    if not songs:
+        return False, "no videos from yt-dlp"
+    return True, songs
+
+
+def _get_next_channel_song() -> tuple[bool, dict | str]:
+    """Pick the next video: Atom RSS first, then YouTube Data API uploads playlist, then yt-dlp."""
+    feed_candidates = _youtube_rss_feed_urls()
+
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+        ),
+        "Accept": "application/atom+xml,application/xml;q=0.9,*/*;q=0.8",
+    }
+    last_err: Exception | str | None = None
+    for feed_url in feed_candidates:
+        try:
+            req = urllib.request.Request(feed_url, headers=headers)
+            with urllib.request.urlopen(req, timeout=25) as r:
+                body = r.read().decode("utf-8", errors="replace")
+            songs = _parse_youtube_atom_feed(body)
+            if not songs:
+                continue
+            picked = _pick_next_rotated_song(songs)
+            if picked:
+                return True, picked
+        except Exception as e:
+            last_err = e
+            continue
+
+    errs: list[str] = []
+    if last_err is not None:
+        errs.append(f"RSS: {last_err}")
+
+    ok_api, data_api = _list_channel_songs_youtube_playlist_api()
+    if ok_api and isinstance(data_api, list):
+        picked = _pick_next_rotated_song(data_api)
+        if picked:
+            return True, picked
+    elif isinstance(data_api, str):
+        errs.append(f"YouTube API: {data_api}")
+
+    ok_ydl, data_ydl = _list_channel_songs_ytdlp()
+    if ok_ydl and isinstance(data_ydl, list):
+        picked = _pick_next_rotated_song(data_ydl)
+        if picked:
+            return True, picked
+    elif isinstance(data_ydl, str):
+        errs.append(f"yt-dlp: {data_ydl}")
+
+    if errs:
+        return False, "Could not get channel videos. " + " | ".join(errs)
+    return False, "No songs in channel feed."
+
+
+def _social_share_fallback_song() -> dict | None:
+    """Fixed title+URL when RSS feed is unavailable (same link used for X and Facebook share)."""
+    url = (_SOCIAL_SHARE_FALLBACK_URL or "").strip()
+    if not url:
+        return None
+    title = (_SOCIAL_SHARE_FALLBACK_TITLE or "").strip() or "Latest track"
+    return {"title": title[:200], "url": url, "video_id": ""}
+
+
+def _get_next_channel_song_for_share() -> tuple[bool, dict | str]:
+    """Like _get_next_channel_song but uses SOCIAL_SHARE_FALLBACK_* when the feed fails."""
+    ok, data = _get_next_channel_song()
+    if ok and isinstance(data, dict):
+        return True, data
+    fb = _social_share_fallback_song()
+    if fb:
+        return True, fb
+    err = str(data)
+    hint = (
+        " Uses **YouTube Atom RSS** only (`feeds/videos.xml`). Set **YOUTUBE_RSS_URL** to a working feed URL, "
+        "or **YOUTUBE_CHANNEL_ID** (playlist + channel feeds are tried). "
+        "Or **SOCIAL_SHARE_FALLBACK_URL** + **SOCIAL_SHARE_FALLBACK_TITLE** if RSS stays unavailable."
+    )
+    return False, err + hint
 
 # ── Music state ───────────────────────────────────────────────────────────────
 
@@ -5489,7 +5965,7 @@ def _build_x_msg(title: str, url: str) -> str:
     return random.choice(templates)
 
 def _run_x_share() -> tuple[bool, str]:
-    ok, song = _get_next_channel_song()
+    ok, song = _get_next_channel_song_for_share()
     if not ok: return False, str(song)
     if not _x_lock.acquire(blocking=False): return False, "X share already running."
     try:
@@ -5788,7 +6264,7 @@ def _build_fb_msg(title: str, url: str) -> str:
     ])
 
 def _run_fb_share() -> tuple[bool, str]:
-    ok, song = _get_next_channel_song()
+    ok, song = _get_next_channel_song_for_share()
     if not ok: return False, str(song)
     if not _fb_lock.acquire(blocking=False): return False, "Facebook share already running."
     pw = None
@@ -11210,6 +11686,13 @@ async def on_ready():
     bot.loop.create_task(_pc_context_observer_loop())
     bot.loop.create_task(_ml_learning_loop())
     bot.loop.create_task(_proactive_heartbeat_loop())
+    if _stream_solo_banter_env_on():
+        bot.loop.create_task(_stream_solo_banter_loop())
+        print(
+            "[Stream solo] Idle/lore/LoL lobby lines → TTS to stream (not Twitch chat unless LUNA_STREAM_SOLO_CHAT=1). "
+            "Needs TWITCH_TTS=1. Stream mode: LUNA_STREAM_MODE or /api/stream-mode.",
+            flush=True,
+        )
     bot.loop.create_task(_reflection_loop())
     bot.loop.create_task(_evolution_loop())
     bot.loop.create_task(_clipboard_monitor_loop())

@@ -180,6 +180,21 @@ def get_spectator_status() -> dict[str, Any]:
     return snap
 
 
+def get_observer_session_flags() -> dict[str, Any]:
+    """For stream solo banter: in-match vs between-games (lobby/queue) this observer session."""
+    with _ui_lock:
+        ui = dict(_ui)
+    ig = bool(ui.get("in_game"))
+    sm = bool(ui.get("session_saw_match"))
+    # Between games: not in a live match but we already saw at least one match this session (client/lobby).
+    bg = sm and not ig
+    return {
+        "in_match": ig,
+        "session_saw_match": sm,
+        "between_games": bg,
+    }
+
+
 def _region_host() -> str:
     r = _env("RIOT_LOL_REGION", "eun1").lower().rstrip("/")
     if "." in r:
@@ -580,6 +595,8 @@ async def commentary_loop(
         live_client_url=lc_base if use_lc else None,
         poll_in_game_sec=poll_in_game,
         idle_poll_sec=idle_sec,
+        session_saw_match=False,
+        between_games=False,
         message="Polling…",
     )
     bits: list[str] = []
@@ -630,6 +647,8 @@ async def commentary_loop(
                         _set_ui(
                             summoner_ok=False,
                             in_game=False,
+                            session_saw_match=was_ever_in_game,
+                            between_games=was_ever_in_game,
                             last_riot_http=None,
                             last_error="Summoner v4 by-puuid failed — check RIOT_LOL_PUUID and RIOT_LOL_REGION",
                             message="Cannot resolve summoner id",
@@ -696,6 +715,8 @@ async def commentary_loop(
                     data_source=None,
                     last_riot_http=http_ui,
                     in_game=False,
+                    session_saw_match=was_ever_in_game,
+                    between_games=was_ever_in_game,
                     game_id=None,
                     map_queue=None,
                     game_time_mm_ss=None,
@@ -713,6 +734,8 @@ async def commentary_loop(
                 data_source=data_src,
                 last_riot_http=http_ui,
                 in_game=True,
+                session_saw_match=True,
+                between_games=False,
                 game_id=gid,
                 map_queue=mq,
                 game_time_mm_ss=snap.get("gameTimeMmSs"),
