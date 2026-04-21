@@ -330,6 +330,24 @@ let vtuberRecordingReady = false;
 let recordingAudioCtx = null;
 let studioStreamMode = false;
 let studioWatchTargetTs = 0;
+/** Co-watch: YouTube IFrame API + caption-timed emits */
+let studioYtPlayer = null;
+let studioYtSchedulePollTimer = null;
+let studioYtSyncTimer = null;
+let studioYtScheduleSessionId = 0;
+let studioYtSchedule = null;
+const studioYtEmittedIds = new Set();
+let studioYtApiLoading = false;
+// postMessage-based time tracking — works even when YT.Player.getCurrentTime() is unavailable
+let ytPmCurrentTime = 0;
+let ytPmIsPlaying = false;
+let ytPmPlayWallMs = 0;
+let ytPmTimeProbeTimer = null;
+let studioTwitchPollTimer = null;
+let studioTwitchSince = 0;
+let studioCowatchResumeTimer = null;
+const ytWatchEmitQueue = [];
+let ytWatchEmitProcessing = false;
 
 const VRM_BASE = new URL("/vrm/", window.location.origin).href;
 const STUDIO_LUNA_MODEL_URL = new URL("model", VRM_BASE).href;
@@ -941,10 +959,363 @@ function youtubeEmbedUrlFromAny(raw) {
   }
   vid = (vid || "").replace(/[^A-Za-z0-9_-]/g, "").slice(0, 32);
   if (!vid) return "";
-  return `https://www.youtube.com/embed/${vid}?autoplay=1&rel=0&modestbranding=1`;
+  // Preserve ?t= / ?start= so the embed begins at the right position
+  let startSec = 0;
+  const tParam = u.searchParams.get("t") || u.searchParams.get("start");
+  if (tParam) startSec = parseInt(tParam, 10) || 0;
+  const origin = encodeURIComponent(window.location.origin);
+  let embedUrl = `https://www.youtube.com/embed/${vid}?autoplay=1&rel=0&modestbranding=1&enablejsapi=1&origin=${origin}`;
+  if (startSec > 0) embedUrl += `&start=${startSec}`;
+  return embedUrl;
+}
+
+/** Send a postMessage command to the YouTube embed iframe (works without full YT.Player init). */
+function ytPmCmd(func, args) {
+  const iframe = document.getElementById("luna-studio-yt-embed");
+  if (!iframe || !iframe.contentWindow) return;
+  try {
+    iframe.contentWindow.postMessage(JSON.stringify({ event: "command", func, args: args || [] }), "*");
+  } catch { /* */ }
+}
+
+/** Pause YT video — freezes our wall-clock estimate then sends the pause command. */
+function ytPause() {
+  // Freeze estimated time so it stays accurate while paused.
+  ytPmCurrentTime = ytEstimatedTime();
+  ytPmIsPlaying = false;
+  ytPmPlayWallMs = 0;
+  if (studioYtPlayer && typeof studioYtPlayer.pauseVideo === "function") {
+    try { studioYtPlayer.pauseVideo(); return; } catch { /* */ }
+  }
+  ytPmCmd("pauseVideo");
+}
+
+/** Resume YT video — restarts wall-clock counting then sends the play command. */
+function ytPlay() {
+  ytPmIsPlaying = true;
+  ytPmPlayWallMs = Date.now();
+  if (studioYtPlayer && typeof studioYtPlayer.playVideo === "function") {
+    try { studioYtPlayer.playVideo(); return; } catch { /* */ }
+  }
+  ytPmCmd("playVideo");
+}
+
+/** No-op kept for compatibility — YouTube doesn't reply to getCurrentTime via postMessage. */
+function ytPmProbeTime() {
+  // Wall-clock tracking in ytEstimatedTime() makes polling unnecessary.
+}
+
+/** Best estimate of the video's current playback time (seconds). */
+function ytEstimatedTime() {
+  if (studioYtPlayer && typeof studioYtPlayer.getCurrentTime === "function") {
+    try {
+      const t = studioYtPlayer.getCurrentTime();
+      if (typeof t === "number" && t > 0) return t;
+    } catch { /* */ }
+  }
+  if (ytPmIsPlaying && ytPmPlayWallMs > 0) {
+    return ytPmCurrentTime + (Date.now() - ytPmPlayWallMs) / 1000;
+  }
+  return ytPmCurrentTime;
+}
+
+// Listen for YouTube IFrame postMessages to track time without YT.Player
+window.addEventListener("message", (ev) => {
+  try {
+    const d = typeof ev.data === "string" ? JSON.parse(ev.data) : ev.data;
+    if (!d || typeof d !== "object") return;
+    if (d.event === "infoDelivery" && d.info) {
+      const ct = d.info.currentTime;
+      if (typeof ct === "number" && ct >= 0) {
+        ytPmCurrentTime = ct;
+        ytPmPlayWallMs = Date.now();
+      }
+      const ps = d.info.playerState;
+      if (ps === 1) { ytPmIsPlaying = true; }
+      else if (ps === 0 || ps === 2) { ytPmIsPlaying = false; }
+    }
+    if (d.event === "onStateChange") {
+      const st = typeof d.info === "number" ? d.info : (d.info && d.info.playerState);
+      if (st === 1) {
+        ytPmIsPlaying = true;
+        ytPmPlayWallMs = Date.now();
+        ytPmProbeTime(); // get exact position once playing
+      } else if (st === 0 || st === 2) {
+        if (ytPmIsPlaying && ytPmPlayWallMs > 0) {
+          ytPmCurrentTime += (Date.now() - ytPmPlayWallMs) / 1000;
+        }
+        ytPmIsPlaying = false;
+        ytPmPlayWallMs = 0;
+      }
+    }
+  } catch { /* */ }
+});
+
+function stopStudioYtWatchSync() {
+  if (studioYtSchedulePollTimer) {
+    clearInterval(studioYtSchedulePollTimer);
+    studioYtSchedulePollTimer = null;
+  }
+  if (studioYtSyncTimer) {
+    clearInterval(studioYtSyncTimer);
+    studioYtSyncTimer = null;
+  }
+  if (studioTwitchPollTimer) {
+    clearInterval(studioTwitchPollTimer);
+    studioTwitchPollTimer = null;
+  }
+  if (studioCowatchResumeTimer) {
+    clearTimeout(studioCowatchResumeTimer);
+    studioCowatchResumeTimer = null;
+  }
+  try {
+    if (studioYtPlayer && typeof studioYtPlayer.destroy === "function") {
+      studioYtPlayer.destroy();
+    }
+  } catch {
+    /* */
+  }
+  studioYtPlayer = null;
+  studioYtSchedule = null;
+  studioYtEmittedIds.clear();
+  studioYtScheduleSessionId = 0;
+  studioTwitchSince = 0;
+  if (ytPmTimeProbeTimer) { clearInterval(ytPmTimeProbeTimer); ytPmTimeProbeTimer = null; }
+  ytPmCurrentTime = 0;
+  ytPmIsPlaying = false;
+  ytPmPlayWallMs = 0;
+}
+
+/** Rough Edge-TTS duration from reply length so the video resumes after Luna finishes answering chat. */
+function estimateTwitchReplyMs(replyText) {
+  const t = String(replyText || "").trim();
+  const n = t.length;
+  return Math.min(120000, Math.max(6500, n * 72 + 4200));
+}
+
+async function initStudioTwitchCursor() {
+  try {
+    const r = await fetch(new URL("/api/twitch/pending?since=0", window.location.origin).href);
+    const j = await r.json();
+    const evs = j.events || [];
+    let m = 0;
+    for (const e of evs) {
+      if (e.id > m) m = e.id;
+    }
+    studioTwitchSince = m;
+  } catch {
+    studioTwitchSince = 0;
+  }
+}
+
+async function pollStudioTwitchForCowatch() {
+  try {
+    const r = await fetch(new URL("/api/twitch/pending?since=" + studioTwitchSince, window.location.origin).href);
+    if (!r.ok) return;
+    const j = await r.json();
+    const events = j.events || [];
+    for (const ev of events) {
+      if (ev.id > studioTwitchSince) studioTwitchSince = ev.id;
+      if (ev.pause_cowatch_video !== true) continue;
+      ytPause();
+      if (studioCowatchResumeTimer) {
+        clearTimeout(studioCowatchResumeTimer);
+        studioCowatchResumeTimer = null;
+      }
+      const ms = estimateTwitchReplyMs(ev.reply || "");
+      studioCowatchResumeTimer = setTimeout(() => {
+        studioCowatchResumeTimer = null;
+        ytPlay();
+      }, ms);
+    }
+  } catch {
+    /* */
+  }
+}
+
+function loadYtIframeApi(callback) {
+  if (window.YT && window.YT.Player) {
+    callback();
+    return;
+  }
+  const prev = window.onYouTubeIframeAPIReady;
+  window.onYouTubeIframeAPIReady = function () {
+    studioYtApiLoading = false;
+    if (typeof prev === "function") prev();
+    callback();
+  };
+  if (!document.querySelector('script[src*="youtube.com/iframe_api"]')) {
+    studioYtApiLoading = true;
+    const tag = document.createElement("script");
+    tag.src = "https://www.youtube.com/iframe_api";
+    document.head.appendChild(tag);
+  }
+}
+
+async function pollStudioYtSchedule() {
+  try {
+    const r = await fetch(new URL("/api/yt-watch-react/schedule", window.location.origin).href);
+    const j = await r.json();
+    if (!j || !j.ok) return;
+    const sid = Number(j.session_id || 0);
+    if (sid > 0 && sid !== studioYtScheduleSessionId) {
+      studioYtScheduleSessionId = sid;
+      studioYtEmittedIds.clear();
+    }
+    if (j.ready && Array.isArray(j.items)) {
+      studioYtSchedule = j;
+    }
+  } catch {
+    /* */
+  }
+}
+
+async function waitForTtsFinished(maxMs = 90000) {
+  // Give TTS a moment to start before we begin polling.
+  await new Promise((r) => setTimeout(r, 700));
+  const deadline = Date.now() + maxMs;
+  while (Date.now() < deadline) {
+    try {
+      const r = await fetch(new URL("/api/tts-busy", window.location.origin).href);
+      if (r.ok) {
+        const j = await r.json();
+        if (!j.busy) return; // TTS finished
+      }
+    } catch { /* network hiccup — keep polling */ }
+    await new Promise((r) => setTimeout(r, 300));
+  }
+}
+
+async function processYtWatchEmitQueue() {
+  if (ytWatchEmitProcessing) return;
+  ytWatchEmitProcessing = true;
+  try {
+    while (ytWatchEmitQueue.length) {
+      const it = ytWatchEmitQueue.shift();
+      const id = Number(it.id);
+      if (!id) continue;
+      try {
+        if (it.pause_before) {
+          ytPause();
+          await new Promise((r) => setTimeout(r, 450));
+        }
+        const r = await fetch(new URL("/api/yt-watch-react/emit", window.location.origin).href, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ id }),
+        });
+        if (!r.ok) {
+          studioYtEmittedIds.delete(id);
+          continue;
+        }
+        const j = await r.json().catch(() => ({}));
+        const skipped = j && j.skipped === true;
+        const holdAfter = Boolean(it.hold_after || (j && j.hold_after === true));
+        if (skipped) {
+          if (it.pause_before && !holdAfter) {
+            // No live line this beat (model returned SKIP), so continue playback immediately.
+            await new Promise((r) => setTimeout(r, 300));
+            ytPlay();
+          }
+          continue;
+        }
+        if (it.pause_before && !holdAfter) {
+          // Wait until TTS actually finishes speaking before resuming the video.
+          const lineLen = String((j && j.line) || it.line || "").length;
+          const safetyMs = Math.min(120000, Math.max(15000, lineLen * 85 + 6000));
+          await waitForTtsFinished(safetyMs);
+          // Brief breath after TTS ends so the transition doesn't feel abrupt.
+          await new Promise((r) => setTimeout(r, 1200));
+          ytPlay();
+        }
+      } catch {
+        studioYtEmittedIds.delete(id);
+      }
+    }
+  } finally {
+    ytWatchEmitProcessing = false;
+    if (ytWatchEmitQueue.length) void processYtWatchEmitQueue();
+  }
+}
+
+function tickStudioYtWatchSync() {
+  if (!studioYtSchedule || !studioYtSchedule.ready) return;
+  if (studioCowatchResumeTimer) return;
+  const t = ytEstimatedTime();
+  if (!(t > 0)) return; // video hasn't started yet
+  const items = [...(studioYtSchedule.items || [])].sort((a, b) => (Number(a.sec) || 0) - (Number(b.sec) || 0));
+  let added = false;
+  for (const it of items) {
+    const id = Number(it.id);
+    if (!id || studioYtEmittedIds.has(id)) continue;
+    const sec = Number(it.sec);
+    if (t < sec - 0.12) continue;
+    studioYtEmittedIds.add(id);
+    ytWatchEmitQueue.push(it);
+    added = true;
+  }
+  if (added) void processYtWatchEmitQueue();
+}
+
+function startStudioYtWatchSyncForCowatch() {
+  stopStudioYtWatchSync();
+  studioYtEmittedIds.clear();
+  studioYtScheduleSessionId = 0;
+
+  // Seed the wall-clock time tracker from the embed's &start= param.
+  // YouTube doesn't reply to getCurrentTime via postMessage, so we derive time ourselves.
+  let seedSec = 0;
+  const ytIframe = document.getElementById("luna-studio-yt-embed");
+  if (ytIframe && ytIframe.src) {
+    try {
+      const u = new URL(ytIframe.src);
+      seedSec = parseInt(u.searchParams.get("start") || "0", 10) || 0;
+    } catch { /* */ }
+  }
+  ytPmCurrentTime = seedSec;
+  ytPmIsPlaying = true;       // autoplay=1 — video starts playing immediately
+  ytPmPlayWallMs = Date.now();
+
+  void pollStudioYtSchedule();
+  if (!studioYtSchedulePollTimer) {
+    studioYtSchedulePollTimer = setInterval(() => void pollStudioYtSchedule(), 1500);
+  }
+  if (!studioYtSyncTimer) {
+    studioYtSyncTimer = setInterval(tickStudioYtWatchSync, 200);
+  }
+  void initStudioTwitchCursor().then(() => {
+    if (!studioTwitchPollTimer) {
+      studioTwitchPollTimer = setInterval(() => void pollStudioTwitchForCowatch(), 900);
+    }
+  });
+  // Also try to connect YT.Player for richer state events (optional — beats work without it)
+  loadYtIframeApi(() => {
+    try {
+      if (!window.YT || !window.YT.Player) return;
+      studioYtPlayer = new YT.Player("luna-studio-yt-embed", {
+        events: {
+          onReady: () => { ytPmProbeTime(); },
+          onStateChange: (ev) => {
+            try {
+              if (window.YT && ev.data === window.YT.PlayerState.ENDED) {
+                void fetch(new URL("/api/yt-watch-react/playback-ended", window.location.origin).href, {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: "{}",
+                }).catch(() => {});
+              }
+            } catch { /* */ }
+          },
+        },
+      });
+    } catch (e) {
+      console.warn("YouTube co-watch player:", e);
+    }
+  });
 }
 
 function removeScreenEmbed() {
+  stopStudioYtWatchSync();
   if (screenEmbedObject && screenGroup) {
     screenGroup.remove(screenEmbedObject);
     screenEmbedObject = null;
@@ -980,16 +1351,16 @@ function stopAuxCaptureForEmbed() {
   }
 }
 
-/** Luna VRM on the small screen (520×295 px → 5.2×2.95 world units at scale 0.01). */
+/** Luna VRM on the second screen — same pixel + world size as the main embed (1120×625 → 11.2×6.25 at scale 0.01). */
 function loadAuxVrmEmbedForCowatch() {
   if (!auxScreenGroup) return;
   stopAuxCaptureForEmbed();
   removeAuxScreenEmbed();
   const shell = document.createElement("div");
-  shell.style.width = "520px";
-  shell.style.height = "295px";
+  shell.style.width = "1120px";
+  shell.style.height = "625px";
   shell.style.overflow = "hidden";
-  shell.style.borderRadius = "10px";
+  shell.style.borderRadius = "14px";
   shell.style.background = "#0a0c10";
   shell.style.boxShadow = "0 0 0 2px rgba(90, 130, 200, 0.28)";
   shell.style.pointerEvents = "auto";
@@ -1062,6 +1433,10 @@ function loadEmbedPageFromUrl(raw, opts) {
     "allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-presentation allow-downloads allow-modals";
   iframe.src = url;
   iframe.title = "Embedded page";
+  const isYtEmbed = /^https:\/\/www\.youtube\.com\/embed\//i.test(url);
+  if (isYtEmbed) {
+    iframe.id = "luna-studio-yt-embed";
+  }
   shell.appendChild(iframe);
 
   const obj = new CSS3DObject(shell);
@@ -1072,10 +1447,13 @@ function loadEmbedPageFromUrl(raw, opts) {
   if (screenMesh) screenMesh.visible = false;
 
   if (auxVrm) loadAuxVrmEmbedForCowatch();
+  if (auxVrm && isYtEmbed) {
+    startStudioYtWatchSyncForCowatch();
+  }
 
   setStatus(
     auxVrm
-      ? "<strong>Co-watch layout:</strong> video on the main screen, Luna VRM on the second. TTS uses the same <code>luna-vrm-speech</code> channel as the hub."
+      ? "<strong>React mode:</strong> YouTube on the big screen, Luna VRM on the second. After Discord says “Watch-react ready”, lines track <strong>video time</strong>. Luna can use <code>PAUSE:</code> / <code>HOLD:</code> in generated lines for freeze-frame beats."
       : "<strong>Page loaded on screen.</strong> Click and scroll on the screen. If you see a blank area, that site blocks embedding — try another page or use Screen/window capture instead.",
   );
 }
@@ -1858,16 +2236,17 @@ function initThree() {
   right.position.set(sw / 2 + t / 2, 0, -d / 2);
   screenGroup.add(top, bot, left, right);
 
-  // Secondary screen (camera / desktop apps) aligned right beside the main screen.
+  // Secondary screen — same width/height as main; shifted right so the two bezels do not overlap.
   auxScreenGroup = new THREE.Group();
-  auxScreenGroup.position.set(8.75, 2.9, -10.8);
+  const gapX = 0.55;
+  auxScreenGroup.position.set(sw / 2 + gapX + sw / 2, 3.68, -10.8);
   auxScreenGroup.rotation.order = "YXZ";
   auxScreenGroup.rotation.y = -0.07;
   auxScreenGroup.rotation.x = 0.055;
   scene.add(auxScreenGroup);
 
-  const sw2 = 5.2;
-  const sh2 = 2.95;
+  const sw2 = sw;
+  const sh2 = sh;
   const haloGeo2 = new THREE.PlaneGeometry(sw2 * 1.12, sh2 * 1.12);
   const haloMat2 = new THREE.MeshBasicMaterial({
     color: 0x5070c0,

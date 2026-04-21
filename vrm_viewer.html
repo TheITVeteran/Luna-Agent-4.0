@@ -2245,10 +2245,16 @@ function populateVoices() {
 const spokenTwitchEventIds = new Set();
 /** Dedupe stream-solo banter lines (separate id space from Twitch). */
 const spokenStreamSoloEventIds = new Set();
+/** Dedupe LoL spectator lines. */
+const spokenLolSpectatorEventIds = new Set();
+/** Dedupe YouTube watch-react timed lines. */
+const spokenYtWatchReactEventIds = new Set();
 
 function plainTextForVrmSpeech(raw) {
   if (!raw || typeof raw !== "string") return "";
   let s = raw;
+  s = s.replace(/^🎥\s*\[\d{1,2}:\d{2}\]\s*/g, "");
+  s = s.replace(/^\[\d{1,2}:\d{2}\]\s*/g, "");
   s = s.replace(/```[\s\S]*?```/g, " ");
   s = s.replace(/`([^`]+)`/g, "$1");
   s = s.replace(/\*\*([^*]+)\*\*/g, "$1");
@@ -2766,6 +2772,44 @@ async function speakEdgeTts(text, opts = {}) {
     }
   }
 
+  let ytWatchIdReserved = null;
+  const ywid = opts.ytWatchReactEventId;
+  if (ywid != null && ywid !== "") {
+    const idn = typeof ywid === "number" ? ywid : parseInt(String(ywid), 10);
+    if (!Number.isNaN(idn)) {
+      if (spokenYtWatchReactEventIds.has(idn)) {
+        try {
+          opts.onEnd?.();
+        } catch {
+          /* */
+        }
+        return;
+      }
+      if (spokenYtWatchReactEventIds.size > 250) spokenYtWatchReactEventIds.clear();
+      spokenYtWatchReactEventIds.add(idn);
+      ytWatchIdReserved = idn;
+    }
+  }
+
+  let lolSpectatorIdReserved = null;
+  const lsid = opts.lolSpectatorEventId;
+  if (lsid != null && lsid !== "") {
+    const idn = typeof lsid === "number" ? lsid : parseInt(String(lsid), 10);
+    if (!Number.isNaN(idn)) {
+      if (spokenLolSpectatorEventIds.has(idn)) {
+        try {
+          opts.onEnd?.();
+        } catch {
+          /* */
+        }
+        return;
+      }
+      if (spokenLolSpectatorEventIds.size > 250) spokenLolSpectatorEventIds.clear();
+      spokenLolSpectatorEventIds.add(idn);
+      lolSpectatorIdReserved = idn;
+    }
+  }
+
   speechSynthesis.cancel();
   stopEdgePlayback();
   const myGen = ++speakGen;
@@ -2858,6 +2902,8 @@ async function speakEdgeTts(text, opts = {}) {
     console.warn(e);
     if (twitchIdReserved != null) spokenTwitchEventIds.delete(twitchIdReserved);
     if (streamSoloIdReserved != null) spokenStreamSoloEventIds.delete(streamSoloIdReserved);
+    if (ytWatchIdReserved != null) spokenYtWatchReactEventIds.delete(ytWatchIdReserved);
+    if (lolSpectatorIdReserved != null) spokenLolSpectatorEventIds.delete(lolSpectatorIdReserved);
     if (myGen !== speakGen) return;
     speaking = false;
     lipAudioMode = false;
@@ -3400,6 +3446,120 @@ async function pollStreamSoloForVrm() {
 }
 setInterval(pollStreamSoloForVrm, 2500);
 pollStreamSoloForVrm();
+
+let ytWatchReactSinceVrm = 0;
+/** Serialize watch-react TTS so a new line does not cancel the previous clip (chat/UI still updates immediately). */
+const ytWatchReactSpeakQueue = [];
+let ytWatchReactSpeakBusy = false;
+
+function ytWatchReactQueueHasId(idn) {
+  for (let i = 0; i < ytWatchReactSpeakQueue.length; i++) {
+    if (ytWatchReactSpeakQueue[i].eventId === idn) return true;
+  }
+  return false;
+}
+
+function enqueueYtWatchReactSpeak(plain, eventId) {
+  const idn = typeof eventId === "number" ? eventId : parseInt(String(eventId), 10);
+  if (Number.isNaN(idn)) return;
+  if (spokenYtWatchReactEventIds.has(idn) || ytWatchReactQueueHasId(idn)) return;
+  ytWatchReactSpeakQueue.push({ plain, eventId: idn });
+  pumpYtWatchReactSpeakQueue();
+}
+
+function pumpYtWatchReactSpeakQueue() {
+  if (ytWatchReactSpeakBusy) return;
+  const item = ytWatchReactSpeakQueue.shift();
+  if (!item) return;
+  ytWatchReactSpeakBusy = true;
+  speakEdgeTts(item.plain, {
+    ytWatchReactEventId: item.eventId,
+    onEnd: () => {
+      ytWatchReactSpeakBusy = false;
+      pumpYtWatchReactSpeakQueue();
+    },
+  });
+}
+
+async function pollYtWatchReactForVrm() {
+  try {
+    const res = await fetch(new URL("/api/yt-watch-react/pending?since=" + ytWatchReactSinceVrm, window.location.origin).href);
+    if (!res.ok) return;
+    const data = await res.json();
+    const events = data.events || [];
+    for (const ev of events) {
+      if (ev.id > ytWatchReactSinceVrm) ytWatchReactSinceVrm = ev.id;
+      if (!ev.reply) continue;
+      const raw = String(ev.reply);
+      const tr = raw.trim();
+      if (tr.startsWith("⚠") || tr.startsWith("❌")) continue;
+      const plain = plainTextForVrmSpeech(raw);
+      if (!plain.trim()) continue;
+      enqueueYtWatchReactSpeak(plain, ev.id);
+    }
+  } catch {
+    /* */
+  }
+}
+setInterval(pollYtWatchReactForVrm, 2500);
+pollYtWatchReactForVrm();
+
+let lolSpectatorSinceVrm = 0;
+/** Serialize LoL spectator lines so they do not overlap/cancel each other. */
+const lolSpectatorSpeakQueue = [];
+let lolSpectatorSpeakBusy = false;
+
+function lolSpectatorQueueHasId(idn) {
+  for (let i = 0; i < lolSpectatorSpeakQueue.length; i++) {
+    if (lolSpectatorSpeakQueue[i].eventId === idn) return true;
+  }
+  return false;
+}
+
+function enqueueLolSpectatorSpeak(plain, eventId) {
+  const idn = typeof eventId === "number" ? eventId : parseInt(String(eventId), 10);
+  if (Number.isNaN(idn)) return;
+  if (spokenLolSpectatorEventIds.has(idn) || lolSpectatorQueueHasId(idn)) return;
+  lolSpectatorSpeakQueue.push({ plain, eventId: idn });
+  pumpLolSpectatorSpeakQueue();
+}
+
+function pumpLolSpectatorSpeakQueue() {
+  if (lolSpectatorSpeakBusy) return;
+  const item = lolSpectatorSpeakQueue.shift();
+  if (!item) return;
+  lolSpectatorSpeakBusy = true;
+  speakEdgeTts(item.plain, {
+    lolSpectatorEventId: item.eventId,
+    onEnd: () => {
+      lolSpectatorSpeakBusy = false;
+      pumpLolSpectatorSpeakQueue();
+    },
+  });
+}
+
+async function pollLolSpectatorForVrm() {
+  try {
+    const res = await fetch(new URL("/api/lol-chat/pending?since=" + lolSpectatorSinceVrm, window.location.origin).href);
+    if (!res.ok) return;
+    const data = await res.json();
+    const events = data.events || [];
+    for (const ev of events) {
+      if (ev.id > lolSpectatorSinceVrm) lolSpectatorSinceVrm = ev.id;
+      if (!ev.reply) continue;
+      const raw = String(ev.reply);
+      const tr = raw.trim();
+      if (tr.startsWith("⚠") || tr.startsWith("❌")) continue;
+      const plain = plainTextForVrmSpeech(raw);
+      if (!plain.trim()) continue;
+      enqueueLolSpectatorSpeak(plain, ev.id);
+    }
+  } catch {
+    /* */
+  }
+}
+setInterval(pollLolSpectatorForVrm, 2500);
+pollLolSpectatorForVrm();
 
 (async () => {
   let status = {};

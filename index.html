@@ -1762,6 +1762,9 @@
       <a class="cmd-btn" href="/translate/" style="text-decoration:none;color:inherit;display:inline-flex;align-items:center;gap:6px;" title="Open Luna's translate module for text or voice clips">
         <span class="cmd-icon">🔊</span> Translate
       </a>
+      <a class="cmd-btn" href="/luna-website/" target="_blank" rel="noopener noreferrer" style="text-decoration:none;color:inherit;display:inline-flex;align-items:center;gap:6px;" title="Open Luna's Website intro page in a new tab">
+        <span class="cmd-icon">🌐</span> Luna's Website
+      </a>
       <input type="file" id="translate-voice-file" accept="audio/*,.ogg,.webm,.mp3,.m4a,.opus" style="display:none"/>
       <button class="cmd-btn" onclick="document.getElementById('translate-voice-file').click()" title="Upload an audio file to translate to English">
         <span class="cmd-icon">📤</span> Upload voice
@@ -1805,7 +1808,7 @@
           <button type="button" class="panel-more-btn" onclick="event.stopPropagation(); openMoreCommands('system');" title="More System commands">⋯</button>
         </div>
         <div class="panel-group-body">
-      <button class="cmd-btn" onclick="sendQuick('Shadow, news')" title="World headlines">
+      <button class="cmd-btn" onclick="sendQuick('Shadow, news')" title="Latest updates from X">
         <span class="cmd-icon">📡</span> News
       </button>
       <button class="cmd-btn" onclick="insertCommand('!search ')" title="Google search — add query in box">
@@ -2381,6 +2384,23 @@ async function pollStreamSoloChat() {
 }
 setInterval(pollStreamSoloChat, 2500);
 pollStreamSoloChat();
+
+// !yt_watch_react timed reactions — show in hub; VRM speaks via /vrm/ poll
+let ytWatchReactSince = 0;
+async function pollYtWatchReactChat() {
+  try {
+    const res = await fetch('/api/yt-watch-react/pending?since=' + ytWatchReactSince);
+    if (!res.ok) return;
+    const data = await res.json();
+    const events = data.events || [];
+    for (const ev of events) {
+      if (ev.reply) appendMsg('luna', ev.reply, { vrmSpeak: false });
+      if (ev.id > ytWatchReactSince) ytWatchReactSince = ev.id;
+    }
+  } catch (_) {}
+}
+setInterval(pollYtWatchReactChat, 2500);
+pollYtWatchReactChat();
 
 function updateLolObserverUI(lo) {
   const strip = document.getElementById('lol-observer-strip');
@@ -4043,7 +4063,7 @@ async function startVoiceActivityCapture() {
         voiceActivityBusy = false;
       }
       if (voiceActivityEnabled && !isRecording && !isSending) {
-        queueMicrotask(() => void startVoiceActivityCapture());
+        scheduleVoiceActivityRestart();
       }
     };
     rec.start(250);

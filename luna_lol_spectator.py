@@ -22,6 +22,7 @@ Env:
   RIOT_LOL_ENCRYPTED_SUMMONER_ID — if set, skip Summoner v4 and call Spectator directly
   RIOT_LOL_IDLE_POLL_SEC — seconds between checks when no active game (default: 300)
   RIOT_LOL_MIN_COMMENT_GAP_SEC — min seconds between Luna lines in one game (default: 40, below poll interval)
+  RIOT_LOL_EMIT_COMMENTARY — ``1`` to emit standalone live-commentary lines; default ``0`` (context only for chat replies)
   RIOT_LOL_DEBUG — set to 1 for verbose ``[LoL spectator]`` logs every poll
 """
 
@@ -32,6 +33,7 @@ import hashlib
 import json
 import os
 import random
+import re
 import ssl
 import threading
 import time
@@ -65,6 +67,11 @@ def is_enabled() -> bool:
 
 def observer_should_run() -> bool:
     return live_client_enabled() or is_enabled()
+
+
+def emit_commentary_enabled() -> bool:
+    """If true, observer emits standalone commentary lines; default on."""
+    return _env_truthy("RIOT_LOL_EMIT_COMMENTARY", "1")
 
 
 _ui_lock = threading.Lock()
@@ -851,12 +858,12 @@ def generate_luna_comment(
     persona = _persona_prompt_block()
     prompt = (
         "Here is the current League of Legends match snapshot (Riot cloud and/or local Live Client data).\n"
-        "Write **one or two short sentences** of in-character live commentary, following your system persona"
+        "Write **one or two short chill spoken sentences** for stream banter, following your system persona"
         + (" and the streamer-specific block below" if persona else "")
         + ".\n"
-        "Be **specific**: cite game clock, map or queue, champion names from the JSON, and numbers (K/D/A, CS, gold, level) when present. "
-        "If `recentEvents` lists objective fights, name them. "
-        "Avoid generic filler — react to what is actually happening in the data.\n"
+        "Do NOT read stats like a news caster. Use the JSON as background context and react naturally to interesting moments.\n"
+        "If there is nothing notable and it would be filler, output exactly: SKIP\n"
+        "When there IS something notable, prefer champion names + key moment context. Mention numbers only when truly relevant.\n"
         "No markdown fences, no bullet list; plain prose only."
         f"{persona}\n\n"
         f"{body}"
@@ -872,8 +879,13 @@ async def commentary_loop(
     ollama_model: str,
     on_luna_reply: Callable[[str], None],
     build_chat_system: Callable[[], str],
+    should_emit: Callable[[], bool] | None = None,
 ) -> None:
-    """Background task: Live Client (local) and/or Riot cloud; push lines via *on_luna_reply*."""
+    """Background task: Live Client (local) and/or Riot cloud.
+
+    Always refreshes latest snapshot for `get_live_context()`.
+    Standalone commentary output is optional via `RIOT_LOL_EMIT_COMMENTARY=1`.
+    """
     if not observer_should_run():
         return
     use_riot = is_enabled()
@@ -1052,10 +1064,17 @@ async def commentary_loop(
                 message="Live game visible — Luna can comment",
             )
             src_l = data_src or "?"
-            print(f"[LoL spectator] Active game via {src_l} (gameId={gid}). Generating line…", flush=True)
+            print(f"[LoL spectator] Active game via {src_l} (gameId={gid}).", flush=True)
+            if not emit_commentary_enabled():
+                _set_ui(message="Live game visible — context synced for chat replies")
+                continue
             now = time.time()
             if now - last_comment_ts < min_gap:
                 continue
+            # Skip generation entirely when the user is actively chatting (caller decides)
+            if should_emit is not None and not should_emit():
+                continue
+            print("[LoL spectator] Generating standalone commentary line…", flush=True)
 
             comment = await asyncio.to_thread(
                 generate_luna_comment, snap, ollama_chat, ollama_model, build_chat_system
@@ -1064,10 +1083,13 @@ async def commentary_loop(
                 _set_ui(message="Model returned empty line (check Ollama)")
                 print("[LoL spectator] Model returned empty commentary.", flush=True)
                 continue
+            if re.fullmatch(r"(?is)\s*(?:SKIP|PASS|NONE|NO_COMMENT|NO COMMENT)\s*", comment):
+                _set_ui(message="No notable LoL moment this poll (skipped)")
+                continue
             last_comment_ts = now
             on_luna_reply(comment)
-            _set_ui(last_comment_ts=now, message="Commented in hub chat")
-            print(f"[LoL spectator] Queued hub chat line ({len(comment)} chars).", flush=True)
+            _set_ui(last_comment_ts=now, message="Comment queued to studio/VRM speech")
+            print(f"[LoL spectator] Queued studio/VRM line ({len(comment)} chars).", flush=True)
         except asyncio.CancelledError:
             raise
         except Exception as e:

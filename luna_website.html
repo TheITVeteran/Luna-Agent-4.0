@@ -1,0 +1,592 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Luna's Website</title>
+  <meta name="description" content="Meet Luna - your AI companion. Learn who she is, watch videos, and interact live." />
+  <style>
+    :root {
+      --bg-0: #060913;
+      --bg-1: #0a1020;
+      --bg-2: #111a34;
+      --luna-cyan: #58d7ff;
+      --luna-blue: #4f7dff;
+      --luna-violet: #8f6bff;
+      --text-main: #e7f4ff;
+      --text-soft: #9fc3dd;
+      --card: rgba(17, 26, 52, 0.72);
+      --border: rgba(88, 215, 255, 0.26);
+      --glow: 0 0 0 1px rgba(88, 215, 255, 0.15), 0 18px 45px rgba(4, 8, 20, 0.55);
+      --radius: 16px;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; font-family: "Segoe UI", Inter, Arial, sans-serif; background: radial-gradient(1200px 700px at 10% -10%, #1a2a58 0%, transparent 50%), radial-gradient(900px 700px at 110% 10%, #2c1d57 0%, transparent 45%), linear-gradient(160deg, var(--bg-0), var(--bg-1) 45%, #090d18); color: var(--text-main); }
+    a { color: inherit; text-decoration: none; }
+    .shell { min-height: 100vh; }
+    .nav {
+      position: sticky; top: 0; z-index: 20;
+      backdrop-filter: blur(12px);
+      background: rgba(8, 14, 28, 0.75);
+      border-bottom: 1px solid rgba(88, 215, 255, 0.18);
+    }
+    .nav-inner {
+      max-width: 1200px; margin: 0 auto; padding: 14px 20px;
+      display: flex; align-items: center; justify-content: space-between; gap: 14px;
+    }
+    .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; }
+    .orb {
+      width: 15px; height: 15px; border-radius: 50%;
+      background: radial-gradient(circle at 28% 25%, #d9f8ff 0 25%, var(--luna-cyan) 45%, #1f6ee8 100%);
+      box-shadow: 0 0 18px rgba(88, 215, 255, 0.8);
+    }
+    .menu { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .menu a {
+      padding: 8px 12px; border-radius: 999px; color: var(--text-soft); font-size: 14px;
+      border: 1px solid transparent; transition: 0.22s ease;
+    }
+    .menu a:hover, .menu a.active {
+      color: #d9f8ff; border-color: var(--border); background: rgba(88, 215, 255, 0.08);
+    }
+    .menu-toggle {
+      display: none;
+      border: 1px solid var(--border);
+      background: rgba(88, 215, 255, 0.08);
+      color: #d7f3ff;
+      border-radius: 10px;
+      width: 38px;
+      height: 34px;
+      font-size: 18px;
+      line-height: 1;
+      cursor: pointer;
+    }
+
+    .container { max-width: 1200px; margin: 0 auto; padding: 34px 20px 54px; }
+    .hero {
+      border: 1px solid var(--border);
+      border-radius: calc(var(--radius) + 6px);
+      padding: 36px;
+      background: linear-gradient(170deg, rgba(88, 215, 255, 0.12), rgba(79, 125, 255, 0.08) 45%, rgba(143, 107, 255, 0.1));
+      box-shadow: var(--glow);
+      display: grid; gap: 14px;
+    }
+    .eyebrow { color: #a9dbf5; letter-spacing: 0.08em; text-transform: uppercase; font-size: 12px; }
+    h1 { margin: 0; font-size: clamp(30px, 5vw, 52px); line-height: 1.03; }
+    .lead { margin: 0; color: #c3e3f7; max-width: 780px; font-size: 17px; line-height: 1.6; }
+    .hero-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 6px; }
+    .btn {
+      border: 1px solid var(--border); border-radius: 10px; padding: 11px 14px; font-weight: 600; font-size: 14px;
+      background: rgba(10, 20, 40, 0.66); color: #d4f2ff; cursor: pointer; transition: 0.2s ease;
+    }
+    .btn:hover { transform: translateY(-1px); background: rgba(88, 215, 255, 0.16); }
+    .btn.primary { background: linear-gradient(135deg, #58d7ff, #7ca5ff); color: #061321; border: none; }
+
+    .section { margin-top: 26px; }
+    .section-card {
+      border: 1px solid rgba(88, 215, 255, 0.22);
+      border-radius: var(--radius);
+      background: var(--card);
+      box-shadow: var(--glow);
+      padding: 22px;
+    }
+    .section h2 { margin: 0 0 8px; font-size: clamp(22px, 3vw, 30px); }
+    .section p { margin: 0; color: var(--text-soft); line-height: 1.65; }
+
+    .about-grid {
+      margin-top: 15px;
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px;
+    }
+    .fact {
+      border: 1px solid rgba(88, 215, 255, 0.2);
+      border-radius: 12px; padding: 13px;
+      background: rgba(9, 16, 31, 0.55);
+    }
+    .fact h3 { margin: 0 0 6px; font-size: 14px; color: #d7f4ff; }
+    .fact p { margin: 0; font-size: 14px; color: var(--text-soft); }
+
+    .videos-grid {
+      margin-top: 14px;
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px;
+    }
+    .video {
+      border: 1px solid rgba(88, 215, 255, 0.2);
+      border-radius: 12px; overflow: hidden; background: rgba(8, 12, 24, 0.65);
+    }
+    .video iframe { width: 100%; aspect-ratio: 16/9; border: 0; display: block; }
+    .video-meta { padding: 10px 12px 13px; }
+    .video-title { margin: 0 0 4px; font-size: 14px; color: #dff6ff; }
+    .video-desc { margin: 0; font-size: 13px; color: var(--text-soft); }
+
+    .upgrades-list {
+      margin-top: 14px;
+      display: grid;
+      gap: 9px;
+    }
+    .upgrade-item {
+      border: 1px solid rgba(88, 215, 255, 0.2);
+      border-radius: 12px;
+      background: rgba(9, 16, 31, 0.55);
+      padding: 12px;
+    }
+    .upgrade-item h3 { margin: 0 0 5px; font-size: 14px; color: #d9f4ff; }
+    .upgrade-item p { margin: 0; font-size: 13px; color: var(--text-soft); }
+
+    .faq-list { margin-top: 14px; display: grid; gap: 8px; }
+    .faq-item {
+      border: 1px solid rgba(88, 215, 255, 0.2);
+      border-radius: 11px;
+      background: rgba(8, 14, 27, 0.6);
+      overflow: hidden;
+    }
+    .faq-item summary {
+      cursor: pointer;
+      list-style: none;
+      padding: 12px 14px;
+      font-weight: 600;
+      color: #d8f4ff;
+      user-select: none;
+    }
+    .faq-item summary::-webkit-details-marker { display: none; }
+    .faq-item p {
+      margin: 0;
+      padding: 0 14px 13px;
+      font-size: 14px;
+      color: var(--text-soft);
+      line-height: 1.6;
+    }
+
+    .links-grid {
+      margin-top: 14px;
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 10px;
+    }
+    .community-link {
+      border: 1px solid rgba(88, 215, 255, 0.2);
+      border-radius: 12px;
+      background: rgba(8, 13, 28, 0.66);
+      padding: 12px;
+      display: grid;
+      gap: 5px;
+      transition: 0.2s ease;
+    }
+    .community-link:hover { transform: translateY(-1px); border-color: rgba(88, 215, 255, 0.45); }
+    .community-link h3 { margin: 0; font-size: 14px; color: #e0f7ff; }
+    .community-link p { margin: 0; font-size: 13px; color: var(--text-soft); }
+
+    .chat-shell {
+      margin-top: 14px;
+      border: 1px solid rgba(88, 215, 255, 0.2);
+      border-radius: 12px;
+      background: rgba(8, 13, 28, 0.66);
+      padding: 12px;
+    }
+    .chat-log {
+      max-height: 290px; overflow: auto;
+      display: flex; flex-direction: column; gap: 10px; padding: 4px;
+    }
+    .bubble {
+      max-width: min(85%, 760px); border-radius: 11px; padding: 9px 11px; line-height: 1.45; font-size: 14px;
+      white-space: pre-wrap;
+    }
+    .bubble.user { align-self: flex-end; background: linear-gradient(135deg, #1d3f78, #2b2867); color: #e9f3ff; }
+    .bubble.luna { align-self: flex-start; background: rgba(88, 215, 255, 0.1); border: 1px solid rgba(88, 215, 255, 0.25); color: #d9f6ff; }
+    .chat-row { margin-top: 10px; display: grid; grid-template-columns: 1fr auto; gap: 8px; }
+    .chat-input {
+      width: 100%; border: 1px solid rgba(88, 215, 255, 0.25); background: rgba(6, 10, 22, 0.85);
+      color: #d7f6ff; border-radius: 10px; padding: 11px 12px; font-size: 14px;
+    }
+    .chat-input:focus { outline: none; border-color: var(--luna-cyan); box-shadow: 0 0 0 2px rgba(88, 215, 255, 0.15); }
+    .chat-status { margin-top: 7px; min-height: 18px; color: #9ec6de; font-size: 12px; }
+    .chips { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 7px; }
+    .chip {
+      border: 1px solid rgba(88, 215, 255, 0.25);
+      background: rgba(88, 215, 255, 0.08);
+      color: #ccefff;
+      border-radius: 999px; font-size: 12px; padding: 7px 10px; cursor: pointer;
+    }
+
+    footer {
+      margin-top: 28px; text-align: center; color: #86acc5; font-size: 12px; padding-bottom: 8px;
+    }
+
+    @media (max-width: 720px) {
+      .hero { padding: 24px 18px; }
+      .nav-inner { padding: 10px 14px; }
+      .menu-toggle { display: inline-flex; align-items: center; justify-content: center; }
+      .menu {
+        position: absolute;
+        left: 10px;
+        right: 10px;
+        top: 56px;
+        background: rgba(8, 14, 28, 0.97);
+        border: 1px solid rgba(88, 215, 255, 0.18);
+        border-radius: 12px;
+        padding: 8px;
+        display: none;
+        flex-direction: column;
+        align-items: stretch;
+        gap: 6px;
+      }
+      .menu.open { display: flex; }
+      .menu a { text-align: center; width: 100%; }
+      .chat-row { grid-template-columns: 1fr; }
+      .chat-row .btn { width: 100%; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <nav class="nav">
+      <div class="nav-inner">
+        <div class="brand">
+          <span class="orb" aria-hidden="true"></span>
+          <span>Luna's Website</span>
+        </div>
+        <button class="menu-toggle" id="menu-toggle" aria-label="Toggle navigation">☰</button>
+        <div class="menu" id="menu">
+          <a href="#home" class="active">Home</a>
+          <a href="#about">About</a>
+          <a href="#latest-upgrades">Latest Upgrades</a>
+          <a href="#videos">Videos</a>
+          <a href="#faq">FAQ</a>
+          <a href="#community">Community</a>
+        </div>
+      </div>
+    </nav>
+
+    <main class="container">
+      <section id="home" class="hero">
+        <span class="eyebrow">AI companion experience</span>
+        <h1>Meet Luna</h1>
+        <p class="lead">
+          Luna is a live AI companion built to think, react, and talk with personality. This page is the public intro:
+          explore who she is, watch her moments, and chat with her directly.
+        </p>
+        <div class="hero-actions">
+          <button class="btn primary" type="button" id="talk-btn">Talk to Luna</button>
+        </div>
+      </section>
+
+      <section id="about" class="section">
+        <div class="section-card">
+          <h2>About Luna</h2>
+          <p>
+            Luna combines conversational AI, memory, voice, and live context awareness to feel less like a chatbot and
+            more like a digital partner. She can support daily productivity, create content, and react in real time.
+          </p>
+          <div class="about-grid">
+            <article class="fact">
+              <h3>Personality-first</h3>
+              <p>Warm, playful, and expressive with a clear on-stream identity.</p>
+            </article>
+            <article class="fact">
+              <h3>Live interaction</h3>
+              <p>Designed for active conversation and audience engagement moments.</p>
+            </article>
+            <article class="fact">
+              <h3>Creative assistant</h3>
+              <p>Helps with ideas, scripts, research, and social-ready content.</p>
+            </article>
+            <article class="fact">
+              <h3>Always evolving</h3>
+              <p>Luna's modules grow over time, adding new capabilities and polish.</p>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section id="videos" class="section">
+        <div class="section-card">
+          <h2>Videos</h2>
+          <p>
+            Official videos from
+            <a href="https://www.youtube.com/@lunawolfsolo" target="_blank" rel="noopener noreferrer" style="text-decoration:underline;">@lunawolfsolo</a>.
+          </p>
+          <div class="videos-grid" id="videos-grid">
+            <article class="video">
+              <div class="video-meta">
+                <p class="video-title">Loading official channel videos...</p>
+                <p class="video-desc">Please wait a moment.</p>
+              </div>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section id="latest-upgrades" class="section">
+        <div class="section-card">
+          <h2>Latest Upgrades</h2>
+          <p>Recent improvements shipping to Luna and her website experience.</p>
+          <div class="upgrades-list">
+            <article class="upgrade-item">
+              <h3>Live website context in chat</h3>
+              <p>Luna now receives page-aware context (active section and loaded videos) while replying here.</p>
+            </article>
+            <article class="upgrade-item">
+              <h3>Official channel video sync</h3>
+              <p>The video menu now loads directly from <code>@lunawolfsolo</code> so only official uploads appear.</p>
+            </article>
+            <article class="upgrade-item">
+              <h3>Real-time watch-react flow</h3>
+              <p>Watch-react comments are generated live during playback rather than prebuilt candidate lines.</p>
+            </article>
+            <article class="upgrade-item">
+              <h3>Cleaner interaction focus</h3>
+              <p>Idle chatter is reduced during watch sessions so reactions stay focused on active content.</p>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section id="faq" class="section">
+        <div class="section-card">
+          <h2>FAQ</h2>
+          <p>Quick answers for first-time visitors.</p>
+          <div class="faq-list">
+            <details class="faq-item">
+              <summary>What is Luna?</summary>
+              <p>Luna is an interactive AI companion designed for live conversation, content support, and reactive experiences around media and streaming.</p>
+            </details>
+            <details class="faq-item">
+              <summary>How should I interact with Luna here?</summary>
+              <p>Use the chat box with clear prompts or click a starter chip. Luna performs best when you ask specific questions or request specific actions.</p>
+            </details>
+            <details class="faq-item">
+              <summary>Does the video section show only official uploads?</summary>
+              <p>Yes. The Videos section is restricted to official content from the <code>@lunawolfsolo</code> YouTube channel feed.</p>
+            </details>
+            <details class="faq-item">
+              <summary>Is this page mobile friendly?</summary>
+              <p>Yes. Navigation collapses into a mobile menu, chat controls stack for small screens, and content cards adapt to phone layouts.</p>
+            </details>
+          </div>
+        </div>
+      </section>
+
+      <section id="community" class="section">
+        <div class="section-card">
+          <h2>Community Links</h2>
+          <p>Follow Luna and stay updated across official channels.</p>
+          <div class="links-grid" id="community-links-grid">
+            <a class="community-link" href="https://www.youtube.com/@lunawolfsolo" target="_blank" rel="noopener noreferrer">
+              <h3>YouTube</h3>
+              <p>Loading your community profiles...</p>
+            </a>
+          </div>
+        </div>
+      </section>
+
+      <section class="section">
+        <div class="section-card">
+          <h2>Interact With Luna</h2>
+          <p>Ask a question and Luna replies live from this page.</p>
+          <div class="chat-shell">
+            <div class="chat-log" id="chat-log" aria-live="polite">
+              <div class="bubble luna">Hi, I am Luna. Ask me anything.</div>
+            </div>
+            <form class="chat-row" id="chat-form">
+              <input class="chat-input" id="chat-input" placeholder="Type your message for Luna..." maxlength="500" />
+              <button class="btn primary" type="submit">Send</button>
+            </form>
+            <div class="chips">
+              <button class="chip" type="button" data-msg="Who are you and what can you do?">Who are you?</button>
+              <button class="chip" type="button" data-msg="Give me a quick tour of your best features.">Feature tour</button>
+              <button class="chip" type="button" data-msg="How can viewers interact with you during a stream?">Viewer interaction</button>
+            </div>
+            <div class="chat-status" id="chat-status"></div>
+          </div>
+        </div>
+      </section>
+
+      <footer>
+        Luna's Website - Home / About / Videos - Live companion experience
+      </footer>
+    </main>
+  </div>
+
+  <script>
+    (function () {
+      const menu = document.getElementById("menu");
+      const menuToggle = document.getElementById("menu-toggle");
+      const links = Array.from(menu.querySelectorAll('a[href^="#"]'));
+      const sections = links
+        .map((a) => document.querySelector(a.getAttribute("href")))
+        .filter(Boolean);
+
+      function closeMobileMenu() {
+        menu.classList.remove("open");
+      }
+      if (menuToggle) {
+        menuToggle.addEventListener("click", function () {
+          menu.classList.toggle("open");
+        });
+      }
+      links.forEach((a) => {
+        a.addEventListener("click", function () {
+          closeMobileMenu();
+        });
+      });
+
+      function setActiveByScroll() {
+        let active = links[0];
+        const y = window.scrollY + 140;
+        for (const sec of sections) {
+          if (sec.offsetTop <= y) {
+            const id = "#" + sec.id;
+            const matched = links.find((a) => a.getAttribute("href") === id);
+            if (matched) active = matched;
+          }
+        }
+        links.forEach((a) => a.classList.toggle("active", a === active));
+      }
+      window.addEventListener("scroll", setActiveByScroll, { passive: true });
+      setActiveByScroll();
+
+      const talkBtn = document.getElementById("talk-btn");
+      const input = document.getElementById("chat-input");
+      const form = document.getElementById("chat-form");
+      const log = document.getElementById("chat-log");
+      const statusEl = document.getElementById("chat-status");
+      const videosGrid = document.getElementById("videos-grid");
+      const communityGrid = document.getElementById("community-links-grid");
+      const websiteSections = ["Home", "About", "Latest Upgrades", "Videos", "FAQ", "Community", "Interact With Luna"];
+      let latestVideoTitles = [];
+
+      talkBtn.addEventListener("click", function () {
+        input.focus();
+        input.scrollIntoView({ behavior: "smooth", block: "center" });
+      });
+
+      function addBubble(text, type) {
+        const div = document.createElement("div");
+        div.className = "bubble " + type;
+        div.textContent = String(text || "").trim();
+        log.appendChild(div);
+        log.scrollTop = log.scrollHeight;
+      }
+
+      async function sendToLuna(message) {
+        const m = String(message || "").trim();
+        if (!m) return;
+        addBubble(m, "user");
+        statusEl.textContent = "Luna is thinking...";
+        input.value = "";
+        try {
+          const activeSection = (links.find((a) => a.classList.contains("active")) || {}).textContent || "Home";
+          const res = await fetch("/api/luna-website/chat", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              message: m,
+              source: "luna_website",
+              page_state: {
+                page_name: "Luna's Website",
+                active_section: String(activeSection).trim(),
+                sections: websiteSections,
+                videos_channel: "@lunawolfsolo",
+                current_video_titles: latestVideoTitles.slice(0, 9)
+              }
+            })
+          });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) throw new Error(data.error || "Request failed");
+          addBubble(data.reply || "I am here.", "luna");
+          statusEl.textContent = "";
+        } catch (err) {
+          addBubble("I hit a connection issue. Please try again.", "luna");
+          statusEl.textContent = "Error: " + (err && err.message ? err.message : "unknown");
+        }
+      }
+
+      form.addEventListener("submit", function (e) {
+        e.preventDefault();
+        void sendToLuna(input.value);
+      });
+
+      document.querySelectorAll(".chip").forEach((chip) => {
+        chip.addEventListener("click", function () {
+          const msg = chip.getAttribute("data-msg") || "";
+          input.value = msg;
+          void sendToLuna(msg);
+        });
+      });
+
+      async function loadOfficialVideos() {
+        if (!videosGrid) return;
+        try {
+          const r = await fetch("/api/luna-website/videos");
+          const j = await r.json().catch(() => ({}));
+          if (!r.ok || !j.ok || !Array.isArray(j.items) || !j.items.length) {
+            throw new Error((j && j.error) || "No videos found");
+          }
+          latestVideoTitles = j.items.map((x) => String(x.title || "").trim()).filter(Boolean);
+          videosGrid.innerHTML = "";
+          for (const it of j.items) {
+            const title = String(it.title || "Untitled");
+            const embed = String(it.embed_url || "");
+            const watchUrl = String(it.url || "");
+            const card = document.createElement("article");
+            card.className = "video";
+            card.innerHTML = `
+              <iframe src="${embed}" title="${title.replace(/"/g, "&quot;")}" loading="lazy" allowfullscreen></iframe>
+              <div class="video-meta">
+                <p class="video-title">${title}</p>
+                <p class="video-desc"><a href="${watchUrl}" target="_blank" rel="noopener noreferrer" style="text-decoration:underline;">Watch on YouTube</a></p>
+              </div>
+            `;
+            videosGrid.appendChild(card);
+          }
+        } catch (err) {
+          latestVideoTitles = [];
+          videosGrid.innerHTML = `
+            <article class="video">
+              <div class="video-meta">
+                <p class="video-title">Could not load @lunawolfsolo videos right now.</p>
+                <p class="video-desc">Please refresh the page or open the channel directly.</p>
+              </div>
+            </article>
+          `;
+        }
+      }
+
+      async function loadCommunityLinks() {
+        if (!communityGrid) return;
+        try {
+          const r = await fetch("/api/luna-website/community-links");
+          const j = await r.json().catch(() => ({}));
+          if (!r.ok || !j.ok || !Array.isArray(j.items) || !j.items.length) {
+            throw new Error((j && j.error) || "No links found");
+          }
+          communityGrid.innerHTML = "";
+          for (const it of j.items) {
+            const label = String(it.label || "Community");
+            const desc = String(it.description || "");
+            const url = String(it.url || "");
+            const card = document.createElement("a");
+            card.className = "community-link";
+            card.href = url;
+            card.target = "_blank";
+            card.rel = "noopener noreferrer";
+            card.innerHTML = `
+              <h3>${label}</h3>
+              <p>${desc}</p>
+            `;
+            communityGrid.appendChild(card);
+          }
+        } catch (err) {
+          communityGrid.innerHTML = `
+            <a class="community-link" href="https://www.youtube.com/@lunawolfsolo" target="_blank" rel="noopener noreferrer">
+              <h3>YouTube</h3>
+              <p>@lunawolfsolo official channel.</p>
+            </a>
+          `;
+        }
+      }
+
+      void loadOfficialVideos();
+      void loadCommunityLinks();
+    })();
+  </script>
+</body>
+</html>

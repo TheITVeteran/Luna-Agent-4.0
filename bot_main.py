@@ -153,6 +153,21 @@ try:
 except Exception:
     YT_WATCH_REACT_SPEED = 0.22
 YT_WATCH_REACT_SPEED = max(0.05, min(1.5, YT_WATCH_REACT_SPEED))
+try:
+    YT_WATCH_REACT_TARGET_SEC_PER_BEAT = float(_env("YT_WATCH_REACT_TARGET_SEC_PER_BEAT", "80") or "80")
+except Exception:
+    YT_WATCH_REACT_TARGET_SEC_PER_BEAT = 80.0
+YT_WATCH_REACT_TARGET_SEC_PER_BEAT = max(35.0, min(180.0, YT_WATCH_REACT_TARGET_SEC_PER_BEAT))
+try:
+    YT_WATCH_REACT_MIN_GAP_SEC = float(_env("YT_WATCH_REACT_MIN_GAP_SEC", "40") or "40")
+except Exception:
+    YT_WATCH_REACT_MIN_GAP_SEC = 40.0
+YT_WATCH_REACT_MIN_GAP_SEC = max(8.0, min(120.0, YT_WATCH_REACT_MIN_GAP_SEC))
+# VTuber react: every schedule beat pauses video → speak → resume in Podcast studio (set 0 for voice-over only).
+def _yt_watch_force_pause_beats() -> bool:
+    return _env("LUNA_YT_WATCH_FORCE_PAUSE_BEATS", "1").strip().lower() in ("1", "true", "yes", "on")
+
+
 # Whisper: stricter silence / junk rejection for short mic clips (hub VAD, Discord VC, wake word).
 # Lower WHISPER_NO_SPEECH_THRESHOLD → more segments treated as non-speech (default in whisper is 0.6).
 
@@ -568,6 +583,7 @@ _INBOX_PATH      = os.path.join(_DATA, "inbox.json")
 _BIOLOGY_PATH    = os.path.join(_DATA, "biology_state.json")
 _PROACTIVE_PATH  = os.path.join(_DATA, "last_proactive.json")
 _STUDIO_WATCH_PATH = os.path.join(_DATA, "studio_watch_target.json")
+_YT_WATCH_SCHEDULE_PATH = os.path.join(_DATA, "yt_watch_react_schedule.json")
 _STREAM_LORE_PATH = os.path.join(_DATA, "stream_lore.json")
 _STREAM_SOLO_STATE_PATH = os.path.join(_DATA, "stream_solo_state.json")
 _REFLECTION_PATH = os.path.join(_DATA, "last_reflection_date.json")
@@ -605,6 +621,15 @@ _lol_chat_event_id: int = 0
 _stream_solo_chat_lock = threading.Lock()
 _stream_solo_chat_events: list[dict] = []
 _stream_solo_chat_event_id: int = 0
+_yt_watch_react_ui_lock = threading.Lock()
+_yt_watch_react_ui_events: list[dict] = []
+_yt_watch_react_ui_event_id: int = 0
+_yt_watch_schedule_lock = threading.Lock()
+_yt_watch_emitted_lock = threading.Lock()
+_yt_watch_emitted_ids: set[int] = set()
+_yt_watch_playback_ended_for_session: float = 0.0  # dedupe YT ENDED → Discord once per schedule session_id
+_yt_watch_live_prev_lock = threading.Lock()
+_yt_watch_live_prev_by_session: dict[str, str] = {}
 _twitch_stop_event = threading.Event()
 _twitch_msg_queue: queue.Queue = queue.Queue(maxsize=500)
 _pending_feedback_lock = threading.Lock()
@@ -625,6 +650,8 @@ _kill_requested: bool = False  # set by KILL button; long-running tasks can chec
 
 # Last user activity (for proactive heartbeat: don't speak if user just talked)
 _last_user_activity: float = 0.0
+# Seconds of user silence before LoL commentary TTS plays (set LUNA_LOL_COMMENTARY_QUIET_SEC to override)
+_LOL_COMMENTARY_USER_QUIET_SEC: float = max(30.0, float(_env("LUNA_LOL_COMMENTARY_QUIET_SEC", "90") or "90"))
 _yt_watch_stops: dict[str, threading.Event] = {}
 
 # Autonomous evolution (growing-agent style: when Evolve is on and Luna is idle, she proposes and absorbs new tools)
@@ -2519,6 +2546,9 @@ def _tts_breath_audio() -> bytes | None:
 _tts_stop = False
 _tts_proc: subprocess.Popen | None = None
 _tts_lock = threading.Lock()
+_tts_turn_queue: queue.Queue = queue.Queue(maxsize=120)  # serialize spoken turns; no overlap
+_tts_worker_thread: threading.Thread | None = None
+_tts_worker_lock = threading.Lock()
 _audio_podcast_proc: subprocess.Popen | None = None
 _audio_podcast_lock = threading.Lock()
 
@@ -2527,6 +2557,12 @@ def _stop_tts():
     with _tts_lock:
         _tts_stop = True
         p, _tts_proc = _tts_proc, None
+    try:
+        while True:
+            _tts_turn_queue.get_nowait()
+            _tts_turn_queue.task_done()
+    except queue.Empty:
+        pass
     if p and p.poll() is None:
         try: p.terminate(); p.wait(2)
         except Exception:
@@ -2559,6 +2595,64 @@ def _play_tts(audio: bytes) -> None:
         try: os.unlink(path)
         except Exception: pass
 
+
+def _tts_run_turn(tts_text: str, para_mode: bool) -> None:
+    """Speak one queued TTS turn (runs inside the single TTS worker)."""
+    global _tts_stop
+    _tts_stop = False
+    _vrchat_set_talking(True)
+    try:
+        if para_mode:
+            paras = _split_tts_paragraphs(tts_text)
+            for i, chunk in enumerate(paras):
+                if _tts_stop:
+                    break
+                audio = _tts_bytes(chunk)
+                if _tts_stop:
+                    break
+                if audio:
+                    _play_tts(audio)
+                # Play a short breath between paragraphs (not after the last one).
+                if not _tts_stop and i < len(paras) - 1:
+                    breath = _tts_breath_audio()
+                    if breath and not _tts_stop:
+                        _play_tts(breath)
+        else:
+            for chunk in _split_tts(tts_text):
+                if _tts_stop:
+                    break
+                audio = _tts_bytes(chunk)
+                if _tts_stop:
+                    break
+                if audio:
+                    _play_tts(audio)
+    finally:
+        _vrchat_set_talking(False)
+
+
+def _ensure_tts_worker_started() -> None:
+    global _tts_worker_thread
+    with _tts_worker_lock:
+        if _tts_worker_thread is not None and _tts_worker_thread.is_alive():
+            return
+        def _worker() -> None:
+            while True:
+                item = _tts_turn_queue.get()
+                try:
+                    if not isinstance(item, dict):
+                        continue
+                    text = str(item.get("text") or "").strip()
+                    para_mode = bool(item.get("para_mode", True))
+                    if not text:
+                        continue
+                    _tts_run_turn(text, para_mode)
+                except Exception:
+                    pass
+                finally:
+                    _tts_turn_queue.task_done()
+        _tts_worker_thread = threading.Thread(target=_worker, daemon=True, name="luna-tts-worker")
+        _tts_worker_thread.start()
+
 def _play_reply_tts(reply: str, *, chat_source: str | None = None, para_mode: bool = True) -> None:
     """Speak a reply.
 
@@ -2572,40 +2666,20 @@ def _play_reply_tts(reply: str, *, chat_source: str | None = None, para_mode: bo
     tts_text = _clean_for_tts(t)
     if not tts_text.strip():
         return
-
-    def _run():
-        global _tts_stop
-        _tts_stop = False
-        _vrchat_set_talking(True)
+    _ensure_tts_worker_started()
+    try:
+        _tts_turn_queue.put_nowait({"text": tts_text, "para_mode": bool(para_mode)})
+    except queue.Full:
+        # Keep speech timely: drop oldest queued item, then enqueue newest.
         try:
-            if para_mode:
-                paras = _split_tts_paragraphs(tts_text)
-                for i, chunk in enumerate(paras):
-                    if _tts_stop:
-                        break
-                    audio = _tts_bytes(chunk)
-                    if _tts_stop:
-                        break
-                    if audio:
-                        _play_tts(audio)
-                    # Play a short breath between paragraphs (not after the last one).
-                    if not _tts_stop and i < len(paras) - 1:
-                        breath = _tts_breath_audio()
-                        if breath and not _tts_stop:
-                            _play_tts(breath)
-            else:
-                for chunk in _split_tts(tts_text):
-                    if _tts_stop:
-                        break
-                    audio = _tts_bytes(chunk)
-                    if _tts_stop:
-                        break
-                    if audio:
-                        _play_tts(audio)
-        finally:
-            _vrchat_set_talking(False)
-
-    threading.Thread(target=_run, daemon=True).start()
+            _tts_turn_queue.get_nowait()
+            _tts_turn_queue.task_done()
+        except queue.Empty:
+            pass
+        try:
+            _tts_turn_queue.put_nowait({"text": tts_text, "para_mode": bool(para_mode)})
+        except queue.Full:
+            pass
 
 def _start_audio_podcast(project_dir_override: str = "") -> tuple[bool, str, str, str]:
     global _audio_podcast_proc
@@ -2809,6 +2883,10 @@ def _proactive_heartbeat_step():
         state = biology_tick()
         now = time.time()
         if now - _last_user_activity < 120:
+            _set_planning("")
+            return
+        # Skip unprompted messages while a watch-react session is active — Luna is focused on the video.
+        if _yt_watch_cowatch_active():
             _set_planning("")
             return
         nudges = get_nudges(LINKED_SCOPE or "web")
@@ -3041,37 +3119,41 @@ def _stream_solo_generate_line(mode: str, lore: dict) -> str:
     out = (out or "").strip()
     out = " ".join(out.split())
     if len(out) < 8:
-        fall_idle = [
-            "Okay chat — if you're lurking in the back, I see you. That's valid. We're still doing the thing.",
-            "Dead air is illegal, so: hot take — hydration is a mechanic. Drink something. I'm watching.",
-            "Everyone here is legally obligated to have at least one silly thought today. I'm counting.",
-        ]
-        fall_lol = [
-            "Between games? Hydrate, reset the mental, and pretend the draft was someone else's fault. Works every time.",
-            "Lobby hours — where dreams and LP go to negotiate. I'm just here for the drama.",
-        ]
-        fall_lore = [
-            "Annex rule #7: if the mic pops, pretend it was on purpose.",
-            "The vending machine just dispensed 'cope.' Tastes minty. Concerning.",
-        ]
-        fall_bit = [
-            "Okay so — today's sponsor is absolutely nothing. Drink water anyway. We're building lore out of spite.",
-            "Mini segment: pretend chat is typing furiously. Great. Now pretend lurkers are nodding. Beautiful.",
-        ]
-        fall_lurk = [
-            "If you're watching and not chatting, you're still part of the show — I'm performing at the whole room, not just the box.",
-            "Lurkers in the walls — hi. Typers in chat — hi. Everyone else — also hi. We're doing this together.",
-        ]
-        if mode == "lol_lobby":
-            out = random.choice(fall_lol)
-        elif mode == "lore":
-            out = random.choice(fall_lore)
+        # No canned fallback: force one more fresh generation pass, then skip the cycle if still empty.
+        if mode == "idle":
+            retry_prompt = (
+                f"{spoken_rules}\n\n"
+                "Chat is still quiet. Write ONE fresh, spontaneous idle line Luna says right now. "
+                "Must sound off-the-cuff, no templates, no recycled catchphrases, PG."
+            )
+        elif mode == "lol_lobby":
+            retry_prompt = (
+                f"{spoken_rules}\n\n"
+                "The streamer is between League games. Write ONE fresh lobby banter line with playful energy, PG."
+            )
         elif mode == "vtuber_bit":
-            out = random.choice(fall_bit)
+            retry_prompt = (
+                f"{spoken_rules}\n\n"
+                "Write ONE fresh mini VTuber bit to spark the room right now. No template phrasing."
+            )
         elif mode == "lurker":
-            out = random.choice(fall_lurk)
+            retry_prompt = (
+                f"{spoken_rules}\n\n"
+                "Write ONE fresh line welcoming lurkers and typers together, warm and playful, PG."
+            )
         else:
-            out = random.choice(fall_idle)
+            retry_prompt = (
+                f"{spoken_rules}\n\n"
+                f"Premise:\n{premise}\n\nRecent beats:\n{recent_s or '(start here)'}\n\n"
+                "Write ONE fresh in-world beat Luna says out loud, no recycled phrasing."
+            )
+        try:
+            out = (ollama_chat(retry_prompt, system=sys, model=OLLAMA_CHAT, compact=True) or "").strip()
+        except Exception:
+            out = ""
+        out = " ".join(out.split())
+    if len(out) < 8:
+        return ""
     return out[: _stream_solo_max_spoken_chars() + 80]
 
 
@@ -3083,6 +3165,9 @@ def _stream_solo_banter_step() -> None:
     if _stream_solo_require_stream_mode() and not _stream_mode_env_on():
         return
     if not TWITCH_TTS and not _stream_solo_mirror_twitch_chat():
+        return
+    # Don't produce idle banter while a watch-react session is running — Luna is focused on the video.
+    if _yt_watch_cowatch_active():
         return
     now = time.time()
     if now - _last_user_activity < _stream_solo_idle_sec():
@@ -3949,18 +4034,20 @@ async def _wake_word_loop():
         stream = pa.open(format=pyaudio.paInt16, channels=1, rate=16000, input=True, frames_per_buffer=1280)
         _wake_word_running = True
         print("[Luna] Wake word listener active (say 'Hey Luna').", flush=True)
-        while _wake_word_running:
+        import numpy as np
+
+        def _poll_wake_word():
             audio = stream.read(1280, exception_on_overflow=False)
-            import numpy as np
             audio_np = np.frombuffer(audio, dtype=np.int16)
-            prediction = oww.predict(audio_np)
+            return oww.predict(audio_np)
+
+        while _wake_word_running:
+            prediction = await asyncio.to_thread(_poll_wake_word)
             for mdl_name, score in prediction.items():
                 if score > 0.5:
                     print(f"[Luna] Wake word detected! ({mdl_name}: {score:.2f})", flush=True)
                     oww.reset()
-                    # Trigger a short recording + transcription + chat
                     await _handle_wake_word_activation()
-            await asyncio.sleep(0.01)
     except ImportError:
         print("[Luna] Wake word: openwakeword or pyaudio not installed. Skipping.", flush=True)
     except Exception as e:
@@ -5000,49 +5087,89 @@ async def _on_track_end(guild_id: int, err=None):
 
 # ── News ──────────────────────────────────────────────────────────────────────
 
-def _fetch_news(limit: int = 8) -> tuple[bool, str]:
-    items = []
-    for url in WORLD_NEWS_FEEDS:
+def _x_profile_username() -> str:
+    """Best-effort X username from configured profile/handle."""
+    u = (X_PROFILE_URL or "").strip()
+    try:
+        p = urllib.parse.urlparse(u)
+        if p.netloc and ("x.com" in p.netloc.lower() or "twitter.com" in p.netloc.lower()):
+            parts = [seg for seg in p.path.split("/") if seg]
+            if parts:
+                cand = parts[0].strip().lstrip("@")
+                if re.fullmatch(r"[A-Za-z0-9_]{1,30}", cand):
+                    return cand
+    except Exception:
+        pass
+    h = (X_HANDLE or "").strip().lstrip("@")
+    if re.fullmatch(r"[A-Za-z0-9_]{1,30}", h):
+        return h
+    return ""
+
+
+def _fetch_x_headlines(limit: int = 8) -> tuple[bool, list[dict] | str]:
+    """Fetch recent posts from X profile via public RSS mirrors."""
+    user = _x_profile_username()
+    if not user:
+        return False, "X profile username is not configured."
+    mirrors = [
+        f"https://nitter.net/{user}/rss",
+        f"https://nitter.poast.org/{user}/rss",
+        f"https://nitter.1d4.us/{user}/rss",
+    ]
+    last_err = "Could not reach X feed mirrors."
+    for feed_url in mirrors:
         try:
-            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            req = urllib.request.Request(feed_url, headers={"User-Agent": "Mozilla/5.0"})
             with urllib.request.urlopen(req, timeout=12) as r:
-                root = ET.fromstring(r.read().decode("utf-8", errors="replace"))
+                raw = r.read().decode("utf-8", errors="replace")
+            root = ET.fromstring(raw)
+            rows: list[dict] = []
             for item in root.findall(".//item"):
                 t = (item.findtext("title") or "").strip()
                 l = (item.findtext("link") or "").strip()
-                p = (item.findtext("pubDate") or item.findtext("published") or "").strip()
-                if t and l: items.append({"title": t, "link": l, "published": p})
-        except Exception: continue
-    if not items: return False, "Could not fetch news."
-    seen, uniq = set(), []
-    for it in items:
-        k = (it["title"].lower(), it["link"])
-        if k not in seen: seen.add(k); uniq.append(it)
-    def _ts(pub):
-        try:
-            from email.utils import parsedate_to_datetime as pdt
-            return pdt(pub).timestamp()
-        except Exception: pass
-        try: return datetime.fromisoformat(pub.replace("Z","+00:00")).timestamp()
-        except Exception: return 0.0
-    uniq.sort(key=lambda x: _ts(x.get("published","")), reverse=True)
-    today = datetime.now().date()
-    todays = [it for it in uniq if _ts(it.get("published","")) and
-              datetime.fromtimestamp(_ts(it["published"])).date() == today]
-    top = (todays or uniq)[:limit]
-    headlines_only = [it["title"] for it in top]
+                p = (item.findtext("pubDate") or "").strip()
+                if not t:
+                    continue
+                if t.lower().startswith("rt by @"):
+                    continue
+                if t.lower().startswith(f"@{user.lower()}:"):
+                    t = t.split(":", 1)[1].strip() or t
+                rows.append({"title": t, "link": l, "published": p})
+                if len(rows) >= max(1, limit):
+                    break
+            if rows:
+                return True, rows
+            last_err = "X feed returned no recent posts."
+        except Exception as ex:
+            last_err = str(ex)[:160] or "X feed fetch failed."
+            continue
+    return False, last_err
+
+
+def _fetch_news(limit: int = 8) -> tuple[bool, str]:
+    ok_x, x_rows = _fetch_x_headlines(limit=max(4, min(12, int(limit or 8))))
+    if not ok_x:
+        return False, f"Could not fetch latest from X: {x_rows}"
+    top = x_rows if isinstance(x_rows, list) else []
+    if not top:
+        return False, "Could not fetch latest from X."
+    headlines_only = [str(it.get("title") or "").strip() for it in top if str(it.get("title") or "").strip()]
+    x_user = _x_profile_username() or "profile"
     try:
         summary = ollama_chat(
-            "Summarize these world news headlines in a short, readable paragraph (2–4 sentences). Do not include any URLs, links, or sources. Just the summary.\n\nHeadlines:\n" + "\n".join(f"• {h}" for h in headlines_only),
-            system="You are a news summarizer. Output only the summary, no preamble or bullets.",
+            "Summarize these latest X updates in a short, readable paragraph (2–4 sentences). "
+            "Keep it factual and concise. Do not include URLs.\n\nUpdates:\n" + "\n".join(f"• {h}" for h in headlines_only),
+            system="You are a concise social feed summarizer. Output only the summary.",
             model=OLLAMA_MODEL,
         )
         summary = (summary or "").strip()
         if summary:
-            return True, "📰 **World news:**\n\n" + summary
+            return True, f"📰 **Latest from X (@{x_user}):**\n\n" + summary
     except Exception:
         pass
-    return True, "📰 **World news:**\n\n" + "\n\n".join(f"{i}. {it['title']}" for i, it in enumerate(top, 1))
+    return True, f"📰 **Latest from X (@{x_user}):**\n\n" + "\n\n".join(
+        f"{i}. {str(it.get('title') or '').strip()}" for i, it in enumerate(top, 1)
+    )
 
 # ── Search ────────────────────────────────────────────────────────────────────
 
@@ -7010,49 +7137,271 @@ def _yt_watch_fetch_cues(video_url: str) -> tuple[str, list[dict]]:
 
 
 def _yt_watch_build_moments(video_url: str, beats: int | None = None) -> tuple[bool, dict | str]:
-    use_beats = max(4, min(14, int(beats or YT_WATCH_REACT_BEATS)))
+    requested_beats = max(4, min(14, int(beats or YT_WATCH_REACT_BEATS)))
     title, cues = _yt_watch_fetch_cues(video_url)
     if not cues:
         return False, "I couldn't read timed captions for that video yet. Try a different video (or use !yt_react for one-shot)."
-    if len(cues) < use_beats:
-        use_beats = max(3, len(cues))
-    moments: list[dict] = []
+    duration_sec = float(cues[-1].get("sec") or 0.0) if cues else 0.0
+    # Build candidate moments, then Luna chooses which ones to keep by returning SKIP.
+    # More candidates than final comments = she chooses when to speak.
+    target_comments = requested_beats
+    if beats is None and duration_sec > 0:
+        auto_cap = int(round(duration_sec / YT_WATCH_REACT_TARGET_SEC_PER_BEAT))
+        auto_cap = max(3, min(12, auto_cap))
+        target_comments = min(target_comments, auto_cap)
+    candidate_target = max(target_comments * 3, target_comments + 4)
+    candidate_target = min(36, max(6, candidate_target))
+    if len(cues) < candidate_target:
+        candidate_target = len(cues)
+    if candidate_target <= 0:
+        return False, "No caption cues were available for watch-react timing."
+
+    # Build a video-level summary from sampled captions so Luna knows the overall topic.
     n = len(cues)
-    for i in range(use_beats):
-        idx = int(round((i + 1) * (n - 1) / (use_beats + 1)))
+    # Take the first ~20% (sets up context) plus evenly-spaced samples across the full video.
+    summary_idx: list[int] = list(range(0, min(n, max(6, n // 5))))
+    step = max(1, n // 20)
+    for j in range(0, n, step):
+        summary_idx.append(j)
+    summary_idx = sorted(set(summary_idx))[:40]
+    video_summary = re.sub(
+        r"\s+", " ",
+        " ".join((cues[j].get("text") or "").strip() for j in summary_idx if (cues[j].get("text") or "").strip()),
+    ).strip()[:1000]
+
+    moments: list[dict] = []
+    last_sec = -99999.0
+    for i in range(candidate_target):
+        idx = int(round((i + 1) * (n - 1) / (candidate_target + 1)))
         lo = max(0, idx - 1)
         hi = min(n, idx + 2)
-        context_text = " ".join((cues[j].get("text") or "") for j in range(lo, hi)).strip()
-        context_text = re.sub(r"\s+", " ", context_text)[:360]
+        sec = float(cues[idx].get("sec") or 0.0)
+        if sec - last_sec < max(12.0, YT_WATCH_REACT_MIN_GAP_SEC * 0.5):
+            continue
+        # Exact caption at beat (3 cues wide)
+        context_text = re.sub(
+            r"\s+", " ",
+            " ".join((cues[j].get("text") or "") for j in range(lo, hi)).strip(),
+        )[:360]
+        # Preceding 90 seconds of captions — narrative run-up to this moment
+        preceding_parts = [
+            (cues[j].get("text") or "").strip()
+            for j in range(n)
+            if 0.0 < sec - float(cues[j].get("sec") or 0.0) <= 92.0
+        ]
+        preceding_text = re.sub(r"\s+", " ", " ".join(preceding_parts)).strip()[:700]
         moments.append({
-            "sec": float(cues[idx].get("sec") or 0.0),
+            "sec": sec,
             "context": context_text or (cues[idx].get("text") or "")[:220],
+            "preceding": preceding_text,
+            "video_summary": video_summary,
         })
+        last_sec = sec
+    if not moments:
+        return False, "Could not build candidate moments from captions."
     return True, {"title": title, "moments": moments}
 
 
-def _yt_watch_make_reaction_line(title: str, context: str, previous_line: str = "") -> str:
+def _yt_watch_parse_reaction_controls(raw: str) -> tuple[str, bool, bool]:
+    """Strip PAUSE:/HOLD: markers for VTuber-style freeze-frame beats (Podcast studio reads flags)."""
+    s = (raw or "").strip()
+    if re.fullmatch(r"(?is)\s*(?:SKIP|PASS|NONE|NO_COMMENT|NO COMMENT)\s*", s):
+        return ("", False, False)
+    pause_before = bool(re.match(r"(?is)^PAUSE:\s*", s))
+    if pause_before:
+        s = re.sub(r"(?is)^PAUSE:\s*", "", s, count=1).strip()
+    hold_after = bool(re.search(r"(?is)\s+HOLD:\s*$", s))
+    if hold_after:
+        s = re.sub(r"(?is)\s+HOLD:\s*$", "", s).strip()
+    s = " ".join(s.split())
+    return (s[:180], pause_before, hold_after)
+
+
+def _yt_watch_line_looks_like_caption_read(line: str, context: str) -> bool:
+    """Heuristic: detect lines that mostly restate caption text instead of adding commentary."""
+    l = re.sub(r"\s+", " ", (line or "").strip().lower())
+    c = re.sub(r"\s+", " ", (context or "").strip().lower())
+    if not l or not c:
+        return False
+    lw = [w for w in re.findall(r"[a-z0-9']+", l) if len(w) >= 4]
+    cw = [w for w in re.findall(r"[a-z0-9']+", c) if len(w) >= 4]
+    if not lw or not cw:
+        return False
+    ls, cs = set(lw), set(cw)
+    overlap = len(ls & cs) / max(1, len(ls))
+    if overlap >= 0.72:
+        return True
+    # Also catch obvious near-copy with short rewrites.
+    if len(l) >= 40 and (l in c or c[: min(len(c), 120)] in l):
+        return True
+    return False
+
+
+def _yt_watch_make_reaction_line(
+    title: str,
+    context: str,
+    previous_line: str = "",
+    *,
+    beat_index: int = 1,
+    beat_total: int = 1,
+    sec: float = 0.0,
+    preceding: str = "",
+    video_summary: str = "",
+) -> str:
     stream_persona = _stream_mode_persona_body()[:1800]
+    mm = int(max(0.0, sec) // 60)
+    ss = int(max(0.0, sec) % 60)
+    is_final = beat_index >= max(1, beat_total)
+
+    video_ctx = ""
+    if video_summary.strip():
+        video_ctx = f"## Full video context (sampled captions — read this to understand what the video is actually about)\n{video_summary.strip()}\n\n"
+
+    preceding_ctx = ""
+    if preceding.strip() and preceding.strip() != context.strip():
+        preceding_ctx = f"## What was said in the 90 seconds before this moment\n{preceding.strip()}\n\n"
+
     prompt = (
         f"{stream_persona}\n\n"
-        "You're live co-watching a YouTube video on stream. "
-        "Write ONE short, spoken, streamer-style reaction line.\n"
-        "Rules: <= 150 characters, no hashtags, no markdown, no emojis spam, no stage directions.\n\n"
+        f"{video_ctx}"
+        f"{preceding_ctx}"
+        "You are watching this YouTube video live on stream and have just paused it at the moment below.\n"
+        "Write a spoken commentary of 2-4 sentences that:\n"
+        "  • Reacts to something SPECIFIC from the preceding section (name it — a person, event, claim, moment, technique, quote, etc.).\n"
+        "  • Shows genuine emotion: surprise, excitement, skepticism, humor, awe — whatever fits the scene.\n"
+        "  • Builds on what just happened; do NOT give a generic observation that could apply to any video.\n"
+        "  • Sounds like natural speech — no markdown, no hashtags, no stage directions, no emoji spam.\n"
+        "  • Total length: 80-480 characters (PAUSE:/HOLD: markers excluded).\n"
+        "NEVER say things like 'Interesting point' / 'Good stuff' / 'I see' / 'That makes sense' — be specific.\n"
+        "Do NOT quote the captions word-for-word. React to them.\n"
+        "If the preceding section has genuinely nothing worth commenting on, output exactly: SKIP\n"
+        + ("This is NOT the final beat — do not close out or wrap up the video.\n" if not is_final else "This is the last beat — a brief genuine wrap-up reaction is fine.\n")
+        + "\n"
+        "Controls (optional, prepend/append to your line):\n"
+        "  PAUSE: — keep video frozen while you speak (video already paused at this beat).\n"
+        "  HOLD: at end — leave paused after you finish (use if you want more time on this frame).\n\n"
         f"Video title: {title[:180]}\n"
-        f"Current moment: {context[:420]}\n"
-        f"Previous line (avoid repeating it): {previous_line[:180]}\n\n"
-        "Luna line:"
+        f"Beat {beat_index}/{beat_total} at {mm:02d}:{ss:02d}\n"
+        f"## Caption at this exact moment\n{context[:500]}\n"
+        f"Previous comment (do not repeat or echo this): {previous_line[:220]}\n\n"
+        "Luna's spoken commentary:"
     )
     out = (ollama_chat(prompt, model=OLLAMA_CHAT) or "").strip()
     out = " ".join(out.split())
     if not out:
         return ""
-    # Keep it to one compact line.
-    out = re.split(r"[\r\n]+", out)[0].strip()
-    return out[:180]
+
+    # Genericness check — if the output is a hollow observation, retry once with a stricter prompt.
+    _generic_phrases = (
+        "interesting point", "good stuff", "that's interesting", "that makes sense",
+        "i see", "wow okay", "oh wow", "makes you think", "pretty cool", "not bad",
+        "i guess", "okay then", "sure okay", "alright then", "fair enough",
+    )
+    is_generic = any(p in out.lower() for p in _generic_phrases) or len(out) < 50
+    if is_generic or _yt_watch_line_looks_like_caption_read(out, context):
+        retry_prompt = (
+            f"{stream_persona}\n\n"
+            f"{video_ctx}"
+            f"{preceding_ctx}"
+            "The draft commentary below is too vague or reads like a transcript. Rewrite it.\n"
+            "Pick ONE specific thing from the preceding captions (a name, a fact, a moment, a claim) and react to it genuinely.\n"
+            "2-4 sentences, 80-480 chars, natural spoken voice, no markdown.\n"
+            "If there's truly nothing worth saying, output exactly: SKIP\n\n"
+            f"Video title: {title[:180]}\n"
+            f"Caption moment: {context[:500]}\n"
+            f"Bad draft: {out[:300]}\n"
+            f"Previous comment: {previous_line[:220]}\n\n"
+            "Rewritten Luna commentary:"
+        )
+        out2 = (ollama_chat(retry_prompt, model=OLLAMA_CHAT) or "").strip()
+        out2 = " ".join(out2.split())
+        if out2:
+            out = out2
+
+    # Collapse multi-line to a single spoken block, cap length.
+    out = " ".join(line.strip() for line in re.split(r"[\r\n]+", out) if line.strip())
+    return out[:480]
 
 
-async def _yt_watch_send_scope_line(scope: str, text: str) -> None:
+def _yt_watch_react_ui_enqueue(line: str) -> None:
+    """Push a watch-react line to hub + /vrm/ poll (append_exchange is done in _yt_watch_send_scope_line)."""
+    global _yt_watch_react_ui_event_id
+    text = (line or "").strip()
+    if not text:
+        return
+    with _yt_watch_react_ui_lock:
+        _yt_watch_react_ui_event_id += 1
+        eid = _yt_watch_react_ui_event_id
+        _yt_watch_react_ui_events.append({"id": eid, "reply": text, "ts": time.time()})
+        while len(_yt_watch_react_ui_events) > 200:
+            _yt_watch_react_ui_events.pop(0)
+
+
+def _yt_watch_schedule_save(d: dict) -> None:
+    with _yt_watch_schedule_lock:
+        _save_json(_YT_WATCH_SCHEDULE_PATH, d)
+
+
+def _yt_watch_schedule_clear() -> None:
+    """Clear timed schedule (call on stop / new session)."""
+    global _yt_watch_playback_ended_for_session
+    with _yt_watch_schedule_lock:
+        _save_json(
+            _YT_WATCH_SCHEDULE_PATH,
+            {"ready": False, "items": [], "session_id": 0.0, "title": "", "url": "", "scope": "web", "error": ""},
+        )
+    with _yt_watch_emitted_lock:
+        _yt_watch_emitted_ids.clear()
+    with _yt_watch_live_prev_lock:
+        _yt_watch_live_prev_by_session.clear()
+    _yt_watch_playback_ended_for_session = 0.0
+
+
+def _yt_watch_cowatch_active() -> bool:
+    """True while a watch-react schedule is ready (Podcast co-watch may sync video + Twitch)."""
+    with _yt_watch_schedule_lock:
+        d = _load_json(_YT_WATCH_SCHEDULE_PATH, {})
+    if not isinstance(d, dict) or not d.get("ready"):
+        return False
+    items = d.get("items")
+    return isinstance(items, list) and len(items) > 0
+
+
+def _cowatch_should_pause_for_twitch_reply(reply: str, viewer_line: str) -> bool:
+    """Heuristic: pause co-watch video so Luna can answer chat without talking over the video."""
+    if _env("LUNA_COWATCH_TWITCH_PAUSE", "1").strip().lower() in ("0", "false", "no", "off"):
+        return False
+    r = (reply or "").strip()
+    v = (viewer_line or "").strip()
+    if len(r) < 14:
+        return False
+    if "?" in v or "?" in r:
+        return True
+    if len(r) >= 96:
+        return True
+    low = r.lower()
+    if low in ("ok", "sure", "thanks", "thank you", "lol", "lmao", "haha", "nice", "got it", "yep", "yeah", "cool"):
+        return False
+    if len(low) <= 28 and not any(ch.isalpha() for ch in low):
+        return False
+    return len(r) >= 42
+
+
+def _yt_watch_text_for_speaker(raw: str) -> str:
+    """Strip UI emoji/timestamp prefixes so server TTS matches what the VRM viewer speaks."""
+    t = (raw or "").strip()
+    t = re.sub(r"^[\s\U0001F300-\U0001FAFF]+", "", t)
+    t = re.sub(r"^🎥\s*\[\d{1,2}:\d{2}\]\s*", "", t)
+    return _clean_for_tts(t)
+
+
+async def _yt_watch_send_scope_line(
+    scope: str,
+    text: str,
+    *,
+    reaction_line: bool = False,
+) -> None:
+    """Push watch-react text to UI/VRM. Timed reaction lines skip proactive + Discord DM spam (studio executes the beat)."""
     clean = (text or "").strip()
     if not clean:
         return
@@ -7060,33 +7409,40 @@ async def _yt_watch_send_scope_line(scope: str, text: str) -> None:
         append_exchange(scope or (LINKED_SCOPE or "web"), "[YT watch react]", clean)
     except Exception:
         pass
+    if not reaction_line:
+        try:
+            _proactive_set(clean)
+        except Exception:
+            pass
     try:
-        _proactive_set(clean)
+        _yt_watch_react_ui_enqueue(clean)
     except Exception:
         pass
-    m = re.match(r"^discord:user:(\d+)$", str(scope or "").strip())
-    if not m:
-        return
+    # Speak the line via local TTS unless the VRM viewer is handling audio.
+    # reaction_line=True means this is a timed studio beat — always speak it locally.
+    # reaction_line=False means a setup/status message — only speak if not already handled elsewhere.
     try:
-        uid = int(m.group(1))
-    except Exception:
-        return
-    try:
-        user = bot.get_user(uid) or await bot.fetch_user(uid)
-        if user:
-            await user.send(clean)
+        if not _vrm_presence_recent():
+            spoken = _yt_watch_text_for_speaker(clean)
+            if spoken.strip():
+                _play_reply_tts(spoken, chat_source="twitch", para_mode=False)
     except Exception:
         pass
+    return
 
 
 def _yt_watch_stop(scope: str) -> tuple[bool, str]:
     key = (scope or LINKED_SCOPE or "web").strip() or "web"
     with _yt_watch_lock:
-        ev = _yt_watch_stops.get(key)
+        ev = _yt_watch_stops.pop(key, None)
         if not ev:
             return False, "No active YouTube watch-react session."
-        ev.set()
+    ev.set()
     _studio_watch_set("", "", "yt_watch_stop")
+    try:
+        _yt_watch_schedule_clear()
+    except Exception:
+        pass
     return True, "Stopping watch-react."
 
 
@@ -7110,50 +7466,149 @@ def _yt_watch_react_start(video_url: str, scope: str, *, beats: int | None = Non
         if old:
             old.set()
         _yt_watch_stops[key] = stop_ev
+    try:
+        _yt_watch_schedule_clear()
+    except Exception:
+        pass
+    session_id = time.time()
+    _yt_watch_schedule_save(
+        {
+            "ready": False,
+            "session_id": session_id,
+            "title": title,
+            "url": url,
+            "scope": key,
+            "items": [],
+            "error": "",
+        }
+    )
+    try:
+        _proactive_set(f"🎬 Building live watch-react beat map from captions… ({len(moments)} beats)")
+    except Exception:
+        pass
 
-    def _worker() -> None:
-        prev_sec = 0.0
-        prev_line = ""
+    def _precompute_worker() -> None:
+        """Build beat timestamps + context only; commentary is generated live at each beat."""
+        items: list[dict] = []
+        loop = getattr(bot, "loop", None)
         try:
-            loop = getattr(bot, "loop", None)
-            if loop and loop.is_running():
-                asyncio.run_coroutine_threadsafe(
-                    _yt_watch_send_scope_line(key, f"🎬 Live watch-react started: {title[:90]}"),
-                    loop,
-                )
-            for i, moment in enumerate(moments, start=1):
+            out_id = 0
+            for i, moment in enumerate(moments):
                 if stop_ev.is_set():
                     break
                 sec = float(moment.get("sec") or 0.0)
-                delta = sec - prev_sec if i > 1 else sec
-                prev_sec = sec
-                wait_s = max(5.0, min(24.0, delta * YT_WATCH_REACT_SPEED))
-                if stop_ev.wait(timeout=wait_s):
-                    break
-                line = _yt_watch_make_reaction_line(title, str(moment.get("context") or ""), prev_line)
-                if not line:
-                    continue
-                prev_line = line
-                prefix = f"🎥 [{int(sec // 60):02d}:{int(sec % 60):02d}] "
+                out_id += 1
+                items.append(
+                    {
+                        "id": out_id,
+                        "sec": sec,
+                        "context": str(moment.get("context") or ""),
+                        "preceding": str(moment.get("preceding") or ""),
+                        "video_summary": str(moment.get("video_summary") or ""),
+                        "pause_before": bool(_yt_watch_force_pause_beats()),
+                        "hold_after": False,
+                    }
+                )
+            if stop_ev.is_set():
+                _yt_watch_schedule_save(
+                    {
+                        "ready": False,
+                        "session_id": session_id,
+                        "title": title,
+                        "url": url,
+                        "scope": key,
+                        "items": items,
+                        "error": "stopped",
+                    }
+                )
+                return
+            with _yt_watch_emitted_lock:
+                _yt_watch_emitted_ids.clear()
+            with _yt_watch_live_prev_lock:
+                _yt_watch_live_prev_by_session.pop(f"{key}|{session_id:.6f}", None)
+            if not items:
+                _yt_watch_schedule_save(
+                    {
+                        "ready": False,
+                        "session_id": session_id,
+                        "title": title,
+                        "url": url,
+                        "scope": key,
+                        "items": [],
+                        "error": "No notable moments to comment yet (all beats skipped). Try fewer beats or another video.",
+                    }
+                )
                 if loop and loop.is_running():
-                    asyncio.run_coroutine_threadsafe(_yt_watch_send_scope_line(key, prefix + line), loop)
+                    asyncio.run_coroutine_threadsafe(
+                        _yt_watch_send_scope_line(
+                            key,
+                            "🎬 Watch-react could not build any usable beat timestamps from captions. "
+                            "Try again with fewer beats or a different video.",
+                        ),
+                        loop,
+                    )
+                return
+            _yt_watch_schedule_save(
+                {
+                    "ready": True,
+                    "session_id": session_id,
+                    "title": title,
+                    "url": url,
+                    "scope": key,
+                    "items": items,
+                    "error": "",
+                }
+            )
             if loop and loop.is_running():
-                end_msg = "⏹️ Watch-react stopped." if stop_ev.is_set() else "✅ Watch-react finished."
-                asyncio.run_coroutine_threadsafe(_yt_watch_send_scope_line(key, end_msg), loop)
+                n = len(items)
+                asyncio.run_coroutine_threadsafe(
+                    _yt_watch_send_scope_line(
+                        key,
+                        f"🎬 **Watch-react is live** — {n} timed beats on the **video clock** (not Discord time).\n"
+                        f"**You must open Podcast studio** on the same PC as Luna: `/podcast/?cowatch=1` — "
+                        "press **Play** on the embed: I **pause → react live to what just happened → resume** as playback progresses. "
+                        "Discord cannot play that video for me; this message is only the start signal. "
+                        f"Pause style: **{'forced every beat (VTuber)' if _yt_watch_force_pause_beats() else 'from captions / PAUSE:'}**. "
+                        "**!yt_watch_stop** when done.",
+                    ),
+                    loop,
+                )
+        except Exception as ex:
+            with _yt_watch_lock:
+                if _yt_watch_stops.get(key) is stop_ev:
+                    _yt_watch_stops.pop(key, None)
+            _yt_watch_schedule_save(
+                {
+                    "ready": False,
+                    "session_id": session_id,
+                    "title": title,
+                    "url": url,
+                    "scope": key,
+                    "items": items,
+                    "error": str(ex)[:200],
+                }
+            )
+            if loop and loop.is_running():
+                asyncio.run_coroutine_threadsafe(
+                    _yt_watch_send_scope_line(key, f"⚠ Watch-react setup failed: {str(ex)[:160]}"),
+                    loop,
+                )
         finally:
             with _yt_watch_lock:
-                current = _yt_watch_stops.get(key)
-                if current is stop_ev:
+                cur = _yt_watch_stops.get(key)
+                if cur is stop_ev and stop_ev.is_set():
                     _yt_watch_stops.pop(key, None)
 
-    th = threading.Thread(target=_worker, daemon=True, name=f"yt-watch-react-{int(time.time())}")
+    th = threading.Thread(target=_precompute_worker, daemon=True, name=f"yt-watch-precompute-{int(time.time())}")
     th.start()
     studio_hint = ""
     if LUNA_PUBLIC_BASE_URL:
         studio_hint = f"\n\nPodcast studio (video + VRM): {LUNA_PUBLIC_BASE_URL}/podcast/?cowatch=1"
     return (
         True,
-        f"Started live watch-react for **{title[:90]}** ({len(moments)} moments). Use **!yt_watch_stop** to stop.{studio_hint}",
+        f"Started live watch-react for **{title[:90]}** ({len(moments)} beats). "
+        f"Open **Podcast studio** `/podcast/?cowatch=1` for synced video + avatar react. "
+        f"**!yt_watch_stop** ends the session.{studio_hint}",
     )
 
 
@@ -10509,23 +10964,28 @@ def _proactive_set(message: str):
 
 
 def _lol_chat_enqueue(luna_reply: str) -> None:
-    """Push a LoL live-commentary line to the web chat UI (poll) and conversation history."""
+    """Push a LoL spectator line to /vrm/ poll queue and speak it locally when the user is idle.
+
+    TTS only fires when the user hasn't chatted within _LOL_COMMENTARY_USER_QUIET_SEC seconds and
+    nothing is currently playing — so commentary never cuts off or stacks behind a chat reply.
+    """
     global _lol_chat_event_id
     text = (luna_reply or "").strip()
     if not text:
         return
-    scope = LINKED_SCOPE or "web"
-    stub = "[LoL · live game]"
-    try:
-        append_exchange(scope, stub, text)
-    except Exception:
-        pass
     with _lol_chat_lock:
         _lol_chat_event_id += 1
         eid = _lol_chat_event_id
         _lol_chat_events.append({"id": eid, "reply": text, "ts": time.time()})
         while len(_lol_chat_events) > 150:
             _lol_chat_events.pop(0)
+    # Speak via server TTS only when the user has been quiet and TTS is fully idle.
+    # This guarantees commentary never queues in front of (or behind) a pending chat reply.
+    if time.time() - _last_user_activity >= _LOL_COMMENTARY_USER_QUIET_SEC:
+        with _tts_lock:
+            tts_free = _tts_proc is None
+        if tts_free and _tts_turn_queue.empty():
+            _play_reply_tts(text, para_mode=False)
 
 
 def _stream_solo_enqueue(luna_reply: str) -> None:
@@ -10810,6 +11270,194 @@ def serve_evolution():
 @web.route("/podcast/")
 def serve_podcast_studio():
     return send_from_directory(_BASE, "podcast_studio.html")
+
+@web.route("/luna-website")
+@web.route("/luna-website/")
+def serve_luna_website():
+    return send_from_directory(_BASE, "luna_website.html")
+
+_LUNA_WEBSITE_YT_CHANNEL_ID = "UCfykJSG5joJyKYSGd0uDybw"
+_LUNA_WEBSITE_YT_HANDLE_VIDEOS_URL = "https://www.youtube.com/@lunawolfsolo/videos"
+_LUNA_WEBSITE_CONTEXT = (
+    "You are Luna speaking on your public introduction site called 'Luna's Website'. "
+    "This site has three core sections: Home (intro and call-to-action), About (identity and capabilities), "
+    "and Videos (official videos only from the lunawolfsolo YouTube channel). "
+    "When visitors chat here, keep replies welcoming, concise, and oriented to onboarding new people. "
+    "If asked about videos, refer only to the official lunawolfsolo channel content."
+)
+
+
+@web.route("/api/luna-website/videos", methods=["GET"])
+def api_luna_website_videos():
+    """Latest official YouTube videos for Luna's Website video section."""
+    # Primary path: read the exact handle videos page requested by user.
+    try:
+        import yt_dlp  # type: ignore
+
+        ydl_opts = {
+            "quiet": True,
+            "no_warnings": True,
+            "skip_download": True,
+            "extract_flat": "in_playlist",
+            "playlistend": 9,
+        }
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(_LUNA_WEBSITE_YT_HANDLE_VIDEOS_URL, download=False) or {}
+        channel_id = str(info.get("channel_id") or _LUNA_WEBSITE_YT_CHANNEL_ID).strip() or _LUNA_WEBSITE_YT_CHANNEL_ID
+        items: list[dict] = []
+        for e in (info.get("entries") or [])[:9]:
+            row = e or {}
+            vid = str(row.get("id") or "").strip()
+            title = str(row.get("title") or "").strip()
+            if not vid or not title:
+                continue
+            raw_url = str(row.get("url") or "").strip()
+            watch_url = raw_url if raw_url.startswith("http") else f"https://www.youtube.com/watch?v={vid}"
+            if "watch?v=" not in watch_url:
+                watch_url = f"https://www.youtube.com/watch?v={vid}"
+            items.append(
+                {
+                    "video_id": vid,
+                    "title": title[:180],
+                    "url": watch_url,
+                    "published": str(row.get("upload_date") or row.get("release_date") or "").strip(),
+                    "thumbnail": f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg",
+                    "embed_url": f"https://www.youtube.com/embed/{vid}?rel=0&modestbranding=1",
+                }
+            )
+        if items:
+            return jsonify({"ok": True, "channel_id": channel_id, "source": "yt_dlp_handle", "items": items})
+    except Exception:
+        pass
+
+    # Fallback path: channel RSS feed.
+    feed_url = f"https://www.youtube.com/feeds/videos.xml?channel_id={_LUNA_WEBSITE_YT_CHANNEL_ID}"
+    req = urllib.request.Request(feed_url, headers={"User-Agent": "Mozilla/5.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            raw = r.read().decode("utf-8", errors="replace")
+        root = ET.fromstring(raw)
+        ns = {
+            "atom": "http://www.w3.org/2005/Atom",
+            "yt": "http://www.youtube.com/xml/schemas/2015",
+            "media": "http://search.yahoo.com/mrss/",
+        }
+        items: list[dict] = []
+        for entry in root.findall("atom:entry", ns)[:9]:
+            vid = (entry.findtext("yt:videoId", default="", namespaces=ns) or "").strip()
+            title = (entry.findtext("atom:title", default="", namespaces=ns) or "").strip()
+            published = (entry.findtext("atom:published", default="", namespaces=ns) or "").strip()
+            link_el = entry.find("atom:link", ns)
+            url = ""
+            if link_el is not None:
+                url = str(link_el.attrib.get("href") or "").strip()
+            if not url and vid:
+                url = f"https://www.youtube.com/watch?v={vid}"
+            thumb_el = entry.find("media:group/media:thumbnail", ns)
+            thumb = ""
+            if thumb_el is not None:
+                thumb = str(thumb_el.attrib.get("url") or "").strip()
+            if vid and title:
+                items.append(
+                    {
+                        "video_id": vid,
+                        "title": title[:180],
+                        "url": url,
+                        "published": published,
+                        "thumbnail": thumb,
+                        "embed_url": f"https://www.youtube.com/embed/{vid}?rel=0&modestbranding=1",
+                    }
+                )
+        return jsonify({"ok": True, "channel_id": _LUNA_WEBSITE_YT_CHANNEL_ID, "source": "rss", "items": items})
+    except Exception as ex:
+        return jsonify({"ok": False, "error": f"Could not load @lunawolfsolo videos: {str(ex)[:160]}", "items": []}), 502
+
+
+@web.route("/api/luna-website/community-links", methods=["GET"])
+def api_luna_website_community_links():
+    """Configured social/community profiles for Luna website."""
+    links: list[dict] = []
+
+    def _add(label: str, url: str, desc: str) -> None:
+        u = (url or "").strip()
+        if not u.startswith("http"):
+            return
+        links.append({"label": label, "url": u, "description": desc})
+
+    _add("YouTube", "https://www.youtube.com/@lunawolfsolo", "Official Luna uploads and updates.")
+    _add("Latest Videos", "https://www.youtube.com/@lunawolfsolo/videos", "Newest uploads from the channel.")
+    _add("X (Twitter)", X_PROFILE_URL, "Luna-related posts and updates.")
+    _add("Facebook", FACEBOOK_PROFILE, "Facebook page and community posts.")
+    _add("Twitch", f"https://www.twitch.tv/{TWITCH_CHANNEL}", "Live stream presence and chat.")
+
+    insta_public = _env("INSTAGRAM_PROFILE_URL", "").strip()
+    if insta_public:
+        _add("Instagram", insta_public, "Short-form posts and highlights.")
+
+    discord_invite = _env("DISCORD_INVITE_URL", "").strip()
+    if discord_invite:
+        _add("Discord", discord_invite, "Join the Luna community server.")
+
+    # Solonaras links Luna uses with Playwright profiles.
+    yt_profile_url = (YT_CHANNEL_URL or "").strip()
+    if not yt_profile_url:
+        yt_profile_url = f"https://www.youtube.com/channel/{YT_CHANNEL_ID}"
+    fb_profile_url = (FACEBOOK_PROFILE or "").strip() or "https://www.facebook.com/solonaras"
+    twitch_profile_url = f"https://www.twitch.tv/{TWITCH_CHANNEL or 'solonaras'}"
+
+    _add("YouTube (Playwright profile)", "https://www.youtube.com/@Solonaras1", "Primary YouTube profile for Luna browser automation.")
+    _add("Facebook (Playwright profile)", fb_profile_url, "Facebook profile Luna uses in browser automation.")
+    _add("YouTube (Solonaras Productions)", "https://www.youtube.com/@SolonarasProductions", "Secondary productions channel.")
+    _add("Twitch (Playwright profile)", twitch_profile_url, "Twitch profile Luna uses in browser automation.")
+
+    # Remove duplicates by URL while preserving order.
+    dedup: list[dict] = []
+    seen: set[str] = set()
+    for it in links:
+        u = (it.get("url") or "").strip().lower()
+        if not u or u in seen:
+            continue
+        seen.add(u)
+        dedup.append(it)
+
+    return jsonify({"ok": True, "items": dedup})
+
+
+@web.route("/api/luna-website/chat", methods=["POST"])
+def api_luna_website_chat():
+    """Chat endpoint with built-in full-site context for the public Luna website."""
+    global _last_user_activity
+    _last_user_activity = time.time()
+    ip = request.remote_addr or "unknown"
+    if not _rate_ok(ip):
+        return jsonify({"error": "Too many requests. Slow down."}), 429
+    data = request.get_json(force=True, silent=True) or {}
+    msg = (data.get("message") or "").strip()
+    if not msg:
+        return jsonify({"error": "No message"}), 400
+    page_state = data.get("page_state") if isinstance(data.get("page_state"), dict) else {}
+    try:
+        page_state_s = json.dumps(page_state, ensure_ascii=False)[:1200]
+    except Exception:
+        page_state_s = "{}"
+    contextual_msg = (
+        f"[Website context]\n{_LUNA_WEBSITE_CONTEXT}\n"
+        f"[Live page state]\n{page_state_s}\n"
+        f"[Visitor message]\n{msg}"
+    )
+    scope = "web:luna_website"
+    out = _execute_chat_turn(scope, contextual_msg, data, chat_source="web")
+    if out.get("need_feedback"):
+        return jsonify(
+            {
+                "reply": out.get("message") or "Luna is asking...",
+                "need_feedback": True,
+                "request_id": out.get("request_id"),
+                "message": out.get("message"),
+                "options": out.get("options"),
+            }
+        )
+    return jsonify({"reply": out.get("reply", "")})
 
 @web.route("/api/status")
 def api_status():
@@ -11716,6 +12364,13 @@ def _twitch_worker_loop() -> None:
             )
             if TWITCH_SEND_CHAT and public and not skip_chat:
                 send_twitch_chat_message(public)
+            reply_show = public if public else reply
+            pause_cowatch = bool(
+                _yt_watch_cowatch_active()
+                and reply_show
+                and not str(reply_show).lstrip().startswith("⚠")
+                and _cowatch_should_pause_for_twitch_reply(str(reply_show), text)
+            )
             with _twitch_lock:
                 _twitch_event_id += 1
                 eid = _twitch_event_id
@@ -11723,8 +12378,9 @@ def _twitch_worker_loop() -> None:
                     "id": eid,
                     "user": label,
                     "text": text,
-                    "reply": public if public else reply,
+                    "reply": reply_show,
                     "ts": time.time(),
+                    "pause_cowatch_video": pause_cowatch,
                 })
                 while len(_twitch_ui_events) > 100:
                     _twitch_ui_events.pop(0)
@@ -11738,6 +12394,7 @@ def _twitch_worker_loop() -> None:
                     "text": text,
                     "reply": f"⚠ {e}",
                     "ts": time.time(),
+                    "pause_cowatch_video": False,
                 })
 
 def _start_twitch_ingest() -> None:
@@ -11806,6 +12463,152 @@ def api_stream_solo_pending():
     with _stream_solo_chat_lock:
         events = [e for e in _stream_solo_chat_events if e.get("id", 0) > since]
     return jsonify({"events": events})
+
+
+@web.route("/api/yt-watch-react/pending")
+def api_yt_watch_react_pending():
+    """Hub and /vrm/ poll for !yt_watch_react timed lines (co-watch avatar + Edge TTS). ?since=<last id>"""
+    try:
+        since = int(request.args.get("since", "0"))
+    except ValueError:
+        since = 0
+    with _yt_watch_react_ui_lock:
+        events = [e for e in _yt_watch_react_ui_events if e.get("id", 0) > since]
+    return jsonify({"events": events})
+
+
+@web.route("/api/yt-watch-react/schedule", methods=["GET"])
+def api_yt_watch_react_schedule():
+    """Caption-time reaction schedule for Podcast studio (client syncs emits to YouTube currentTime)."""
+    with _yt_watch_schedule_lock:
+        d = _load_json(_YT_WATCH_SCHEDULE_PATH, {})
+    if not isinstance(d, dict):
+        d = {}
+    items = d.get("items")
+    if not isinstance(items, list):
+        items = []
+    return jsonify({
+        "ok": True,
+        "ready": bool(d.get("ready")),
+        "session_id": float(d.get("session_id") or 0),
+        "title": (d.get("title") or "").strip(),
+        "url": (d.get("url") or "").strip(),
+        "items": items,
+        "error": (d.get("error") or "").strip(),
+    })
+
+
+@web.route("/api/yt-watch-react/emit", methods=["POST"])
+def api_yt_watch_react_emit():
+    """Podcast studio: generate+emit one LIVE reaction when playback crosses a beat time."""
+    data = request.get_json(force=True, silent=True) or {}
+    try:
+        eid = int(data.get("id") or 0)
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "bad id"}), 400
+    if eid <= 0:
+        return jsonify({"ok": False, "error": "bad id"}), 400
+    with _yt_watch_schedule_lock:
+        sched = _load_json(_YT_WATCH_SCHEDULE_PATH, {})
+    if not isinstance(sched, dict) or not sched.get("ready"):
+        return jsonify({"ok": False, "error": "schedule not ready"}), 409
+    item = None
+    for it in sched.get("items") or []:
+        if int(it.get("id") or 0) == eid:
+            item = it
+            break
+    if not item:
+        return jsonify({"ok": False, "error": "unknown id"}), 404
+    with _yt_watch_emitted_lock:
+        if eid in _yt_watch_emitted_ids:
+            return jsonify({"ok": True, "duplicate": True})
+        _yt_watch_emitted_ids.add(eid)
+    scope = str(sched.get("scope") or "web").strip() or "web"
+    title = str(sched.get("title") or "").strip() or "YouTube video"
+    try:
+        sid = float(sched.get("session_id") or 0.0)
+    except (TypeError, ValueError):
+        sid = 0.0
+    items = sched.get("items") or []
+    beat_total = max(1, len(items))
+    try:
+        sec = float(item.get("sec") or 0.0)
+    except (TypeError, ValueError):
+        sec = 0.0
+    context = str(item.get("context") or "")
+    preceding = str(item.get("preceding") or "")
+    video_summary = str(item.get("video_summary") or "")
+    if not context.strip():
+        with _yt_watch_emitted_lock:
+            _yt_watch_emitted_ids.discard(eid)
+        return jsonify({"ok": False, "error": "missing context"}), 400
+    session_key = f"{scope}|{sid:.6f}"
+    with _yt_watch_live_prev_lock:
+        prev_line = _yt_watch_live_prev_by_session.get(session_key, "")
+    try:
+        raw_line = _yt_watch_make_reaction_line(
+            title,
+            context,
+            prev_line,
+            beat_index=eid,
+            beat_total=beat_total,
+            sec=sec,
+            preceding=preceding,
+            video_summary=video_summary,
+        )
+        text, pause_before, hold_after = _yt_watch_parse_reaction_controls(raw_line)
+        if _yt_watch_force_pause_beats():
+            pause_before = True
+    except Exception as ex:
+        with _yt_watch_emitted_lock:
+            _yt_watch_emitted_ids.discard(eid)
+        return jsonify({"ok": False, "error": f"live generation failed: {str(ex)[:120]}"}), 500
+    if not text.strip():
+        # SKIP is valid for live mode; keep id marked emitted so the beat isn't retried.
+        return jsonify({"ok": True, "skipped": True, "pause_before": bool(pause_before), "hold_after": bool(hold_after)})
+    with _yt_watch_live_prev_lock:
+        _yt_watch_live_prev_by_session[session_key] = text
+    loop = getattr(bot, "loop", None)
+    if loop and loop.is_running():
+        asyncio.run_coroutine_threadsafe(_yt_watch_send_scope_line(scope, text, reaction_line=True), loop)
+    else:
+        try:
+            append_exchange(scope or (LINKED_SCOPE or "web"), "[YT watch react]", text)
+        except Exception:
+            pass
+        try:
+            _yt_watch_react_ui_enqueue(text)
+        except Exception:
+            pass
+    return jsonify({"ok": True, "line": text, "pause_before": bool(pause_before), "hold_after": bool(hold_after)})
+
+
+@web.route("/api/yt-watch-react/playback-ended", methods=["POST"])
+def api_yt_watch_react_playback_ended():
+    """Podcast studio: YouTube IFrame API reported ENDED — optional one-line notice to Discord/Twitch scope."""
+    global _yt_watch_playback_ended_for_session
+    with _yt_watch_schedule_lock:
+        sched = _load_json(_YT_WATCH_SCHEDULE_PATH, {})
+        if not isinstance(sched, dict) or not sched.get("ready"):
+            return jsonify({"ok": True, "ignored": True})
+        try:
+            sid = float(sched.get("session_id") or 0.0)
+        except (TypeError, ValueError):
+            sid = 0.0
+        if sid <= 0:
+            return jsonify({"ok": True, "ignored": True})
+        if sid == _yt_watch_playback_ended_for_session:
+            return jsonify({"ok": True, "duplicate": True})
+        _yt_watch_playback_ended_for_session = sid
+        scope = str(sched.get("scope") or "web").strip() or "web"
+    msg = (
+        "✅ **Video finished** in Podcast studio. This watch-react run is complete. "
+        "Use **!yt_watch_stop** to clear the session, or start another **!yt_watch_react** with a URL."
+    )
+    loop = getattr(bot, "loop", None)
+    if loop and loop.is_running():
+        asyncio.run_coroutine_threadsafe(_yt_watch_send_scope_line(scope, msg, reaction_line=False), loop)
+    return jsonify({"ok": True})
 
 
 @web.route("/api/lol-spectator/status")
@@ -11977,6 +12780,14 @@ def api_tts():
 @web.route("/api/tts-stop", methods=["POST"])
 def api_tts_stop():
     _stop_tts(); return jsonify({"ok": True})
+
+@web.route("/api/tts-busy")
+def api_tts_busy():
+    """Returns whether TTS is currently playing or queued. Podcast studio polls this to know when to resume video."""
+    with _tts_lock:
+        proc_active = _tts_proc is not None and _tts_proc.poll() is None
+    queue_pending = not _tts_turn_queue.empty()
+    return jsonify({"busy": proc_active or queue_pending})
 
 
 @web.route("/api/vrm-presence", methods=["POST"])
@@ -12548,10 +13359,13 @@ async def on_ready():
                     fast=_chat_fast_enabled(),
                     force_stream_mode=_stream_mode_env_on(),
                 ),
+                # Only generate a commentary line when the user hasn't been talking recently
+                should_emit=lambda: time.time() - _last_user_activity >= _LOL_COMMENTARY_USER_QUIET_SEC,
             )
         )
         print(
-            "[LoL spectator] Commentary task started (RIOT_LOL_USE_LIVE_CLIENT and/or Riot API + PUUID).",
+            f"[LoL spectator] Observer task started. Commentary ON by default — speaks when user idle >{_LOL_COMMENTARY_USER_QUIET_SEC:.0f}s. "
+            "Set RIOT_LOL_EMIT_COMMENTARY=0 to disable, LUNA_LOL_COMMENTARY_QUIET_SEC to tune silence window.",
             flush=True,
         )
 
