@@ -25,10 +25,15 @@ She is not a chatbot wrapper. She is a continuous presence that learns from what
 - **Live Discord status control**: `!status <text>` / `!status clear` / `!status <type> <text>`.
 - **Optional local GGUF chat** via `LUNA_CHAT_GGUF` + `OLLAMA_CHAT_MODEL` routing.
 - **Claude-like communication tuning** in system prompt (less robotic / less canned assistant phrasing).
+- **Luna's Website module**: standalone page at `/luna-website/` with Home/About/Videos/FAQ/Community and live chat.
+- **Live YouTube watch-react**: timestamp beats are mapped first, then Luna generates each reaction live at pause-time (no candidate comment cache).
+- **`!news` now summarizes latest updates from configured X profile** (with feed fallback behavior).
 
 | Interface | What you do there |
 |-----------|-------------------|
 | **Web UI** (`http://127.0.0.1:5050`) | Chat, quick-action buttons, camera, nudges, action log, Luna's Mind graph |
+| **Luna's Website** (`/luna-website/`) | Public-facing intro, official videos, FAQ/community links, and live visitor chat |
+| **Podcast Studio** (`/podcast/?cowatch=1`) | Co-watch mode: pause video, generate live reaction, speak, resume |
 | **Discord** | Same Luna — commands, music, voice, DMs, automation, reminders |
 
 ---
@@ -123,7 +128,7 @@ Every chat query is semantically matched against the knowledge base (`data/knowl
 ### Commands (`!` prefix or natural language via Shadow)
 | Command | What it does |
 |---------|--------------|
-| `!news` | World headlines (BBC, NYT, Al Jazeera) |
+| `!news` | Latest updates from configured X profile (summarized) |
 | `!search <query>` | Google search results |
 | `!scrape <url> <what to extract> [post:#channel]` | Fetch a page, extract specific info with LLM, optionally post to Discord |
 | `!summarize <url or text>` | Concise summary + key points |
@@ -137,6 +142,8 @@ Every chat query is semantically matched against the knowledge base (`data/knowl
 | `!yt_comment <url>` | Transcribe YouTube video + post AI comment with real context |
 | `!yt_like <url>` | Like one YouTube video via Playwright (same YouTube profile) |
 | `!yt_analytics [days] [limit]` | Rank top channel videos by traction (views velocity + engagement); uses API if key exists, otherwise scrape fallback |
+| `!yt_watch_react <youtube-url>` | Starts co-watch schedule for Podcast Studio; Luna pauses at timed beats and reacts live with TTS |
+| `!yt_watch_stop` | Stops active co-watch session and clears watch-react state |
 | `!status <text>` / `!status clear` | Change Luna's live Discord bot status (linked/admin) |
 | `!ig_dm <user> [message]` | Instagram DM (browser automation, Luna rephrases) |
 | `!fb_msg <name> [message]` | Facebook Messenger DM (browser automation, Luna rephrases) |
@@ -203,6 +210,14 @@ Toggle with the Evolve switch in Luna's Mind UI.
 - `!scrape <url> <instruction>` — fetches page HTML, strips to plain text, uses LLM to extract exactly what you asked for
 - Optional `post:#channel-name` to send results to a Discord channel
 - Works with any publicly accessible URL
+
+### Luna's Website Module
+- Route: **`/luna-website/`**
+- Sections: Home, About, Latest Upgrades, Videos, FAQ, Community, Interact
+- Videos source: official `@lunawolfsolo` channel data
+- Live chat API: `POST /api/luna-website/chat` (injects full website context + page state)
+- Videos API: `GET /api/luna-website/videos`
+- Community links API: `GET /api/luna-website/community-links`
 
 ---
 
@@ -382,6 +397,8 @@ shadow_agent.py         Shadow command parsing
 celine.py               Voice clip utilities
 luna_transcribeme.py    TranscribeMe Flask blueprint
 index.html              Web chat UI
+podcast_studio.html     Podcast co-watch studio (YouTube + live timed reactions)
+luna_website.html       Public-facing Luna website module
 transcribeme.html       TranscribeMe page
 translate.html          Translation page
 requirements.txt        Python dependencies
