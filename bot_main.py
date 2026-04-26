@@ -3,17 +3,23 @@ Luna 4.5 — compact rewrite of bot.py
 Discord bot + Web UI + Ollama chat + Shadow commands + TTS/STT + automation
 Run: python bot.py
 """
-import asyncio, base64, concurrent.futures, html, io, json, os, queue, random, re, shutil, socket, struct, subprocess, sys
-import tempfile, threading, time, urllib.parse, urllib.request, urllib.error
+import asyncio, base64, concurrent.futures, hashlib, html, io, json, logging, os, queue, random, re, shutil, socket, struct, subprocess, sys
+import tempfile, textwrap, threading, time, urllib.parse, urllib.request, urllib.error
 import uuid, webbrowser, xml.etree.ElementTree as ET
+import wave
 from collections import deque
 from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
 from email.utils import parsedate_to_datetime
 
 import discord
 from discord.ext import commands
 from dotenv import load_dotenv
-from flask import Flask, request, jsonify, send_from_directory, Response, stream_with_context
+from flask import Flask, request, jsonify, send_from_directory, Response, stream_with_context, redirect
+try:
+    import websocket as _wsclient  # websocket-client (optional, for OBS WebSocket status)
+except Exception:
+    _wsclient = None
 
 from luna_files import write_file as luna_write_file
 from shadow_agent import strip_shadow_prefix, run_shadow as shadow_run
@@ -40,6 +46,7 @@ except ImportError:
 # ── Config ──────────────────────────────────────────────────────────────────
 _BASE = os.path.dirname(os.path.abspath(__file__))
 _DATA = os.path.join(_BASE, "data")
+_NGROK_STATE_PATH = os.path.join(_DATA, "ngrok_state.json")
 
 def _env(key, default=""):
     return os.environ.get(key, default).strip()
@@ -74,6 +81,27 @@ OLLAMA_FALLBACK = _env("OLLAMA_FALLBACK_MODEL", "qwen2.5:1.5b").strip()
 # Vision model for camera/screen reads. Defaults to the main chat model when not explicitly set.
 OLLAMA_VISION_MODEL = _env("OLLAMA_VISION_MODEL", OLLAMA_CHAT).strip()
 OLLAMA_VISION_TIMEOUT = max(20, min(240, int(_env("OLLAMA_VISION_TIMEOUT", "90") or "90")))
+# Provider adapters (Step 3): keep Ollama default; optionally route through OpenAI-compatible endpoints.
+LUNA_CHAT_PROVIDER = (_env("LUNA_CHAT_PROVIDER", "ollama").strip().lower() or "ollama")
+LUNA_VISION_PROVIDER = (_env("LUNA_VISION_PROVIDER", LUNA_CHAT_PROVIDER).strip().lower() or LUNA_CHAT_PROVIDER)
+LUNA_OPENAI_BASE_URL = (_env("LUNA_OPENAI_BASE_URL", "https://api.openai.com/v1").strip().rstrip("/") or "https://api.openai.com/v1")
+LUNA_OPENAI_API_KEY = (_env("LUNA_OPENAI_API_KEY", "").strip() or _env("OPENAI_API_KEY", "").strip())
+LUNA_OPENAI_CHAT_MODEL = (_env("LUNA_OPENAI_CHAT_MODEL", "").strip() or OLLAMA_CHAT)
+LUNA_OPENAI_VISION_MODEL = (_env("LUNA_OPENAI_VISION_MODEL", "").strip() or LUNA_OPENAI_CHAT_MODEL)
+LUNA_GROQ_BASE_URL = (_env("LUNA_GROQ_BASE_URL", "https://api.groq.com/openai/v1").strip().rstrip("/") or "https://api.groq.com/openai/v1")
+LUNA_GROQ_CHAT_MODEL = (_env("LUNA_GROQ_CHAT_MODEL", "").strip() or OLLAMA_CHAT)
+# Shared model call guards (queue + timeout safety for chat/vision bursts)
+_MODEL_CHAT_MAX_CONCURRENCY = max(1, int(_env("LUNA_CHAT_MAX_CONCURRENCY", "1") or "1"))
+_MODEL_VISION_MAX_CONCURRENCY = max(1, int(_env("LUNA_VISION_MAX_CONCURRENCY", "1") or "1"))
+_MODEL_CHAT_QUEUE_WAIT_SEC = max(1, int(_env("LUNA_CHAT_QUEUE_WAIT_SEC", "20") or "20"))
+_MODEL_VISION_QUEUE_WAIT_SEC = max(1, int(_env("LUNA_VISION_QUEUE_WAIT_SEC", "12") or "12"))
+_MODEL_CHAT_GUARD_TIMEOUT_SEC = max(10, int(_env("LUNA_CHAT_GUARD_TIMEOUT_SEC", "140") or "140"))
+_MODEL_VISION_GUARD_TIMEOUT_SEC = max(10, int(_env("LUNA_VISION_GUARD_TIMEOUT_SEC", "75") or "75"))
+# Public website mode: lock Flask routes so ngrok can expose only safe website endpoints.
+LUNA_WEBSITE_PUBLIC_MODE = _env("LUNA_WEBSITE_PUBLIC_MODE", "0").strip().lower() in ("1", "true", "yes", "on")
+
+_chat_call_slots = threading.BoundedSemaphore(_MODEL_CHAT_MAX_CONCURRENCY)
+_vision_call_slots = threading.BoundedSemaphore(_MODEL_VISION_MAX_CONCURRENCY)
 # Playwright social flows: Granite observes viewport JPEGs for CAPTCHA/challenge UI (set LUNA_CAPTCHA_OBSERVER=0 to disable).
 # Main chat: short system injection + skip inner-monologue pre-call (faster TTFT). Set LUNA_CHAT_FAST=0 for full prompts.
 def _chat_fast_enabled() -> bool:
@@ -93,6 +121,54 @@ _dm_sync_ids = {int(x) for x in _env("DISCORD_DM_SYNC_USER_IDS").split(",") if x
 _tts_channels = {int(x) for x in _env("DISCORD_TTS_CHANNEL_IDS").split(",") if x.strip().isdigit()}
 # When a user @mentions Luna in a server and she replies in text, also join their VC (if in one) and speak the reply.
 _DISCORD_REPLY_VC_TTS = _env("DISCORD_REPLY_VC_TTS", "1").strip().lower() not in ("0", "false", "no", "off")
+# When Luna sends a text reply in Discord, also post the same (spoken) TTS as MP3 in DMs and/or in listed text channels.
+_DISCORD_TTS_FILE_DM = _env("DISCORD_TTS_FILE_IN_DM", "0").strip().lower() in ("1", "true", "yes", "on")
+_DISCORD_TTS_FILE_GUILD = _env("DISCORD_TTS_FILE_IN_CHANNELS", "0").strip().lower() in ("1", "true", "yes", "on")
+_tts_hub_c = _env("DISCORD_TTS_HUB_DEFAULT_CHANNEL_ID", "").strip()
+try:
+    _DISCORD_TTS_HUB_CHANNEL_ID: int | None = int(_tts_hub_c) if _tts_hub_c.isdigit() else None
+except Exception:
+    _DISCORD_TTS_HUB_CHANNEL_ID = None
+del _tts_hub_c
+
+# Good morning / good night DMs (linked + DISCORD_DM_SYNC_USER_IDS + admin + LUNA_DM_GREET_EXTRA_USER_IDS)
+_greet_extra = {int(x) for x in _env("LUNA_DM_GREET_EXTRA_USER_IDS", "").split(",") if x.strip().isdigit()}
+LUNA_DM_GREETINGS = _env("LUNA_DM_GREETINGS", "1").strip().lower() in ("1", "true", "yes", "on")
+LUNA_DM_GREET_TZ = _env("LUNA_DM_GREET_TZ", "UTC").strip() or "UTC"
+
+
+def _greet_clamp_h(h: int) -> int:
+    return max(0, min(23, h))
+
+
+try:
+    LUNA_DM_MORNING_H0 = _greet_clamp_h(int(_env("LUNA_DM_MORNING_START_HOUR", "7") or "7"))
+except Exception:
+    LUNA_DM_MORNING_H0 = 7
+try:
+    LUNA_DM_MORNING_H1 = _greet_clamp_h(int(_env("LUNA_DM_MORNING_END_HOUR", "10") or "10"))
+except Exception:
+    LUNA_DM_MORNING_H1 = 10
+try:
+    LUNA_DM_NIGHT_H0 = _greet_clamp_h(int(_env("LUNA_DM_NIGHT_START_HOUR", "21") or "21"))
+except Exception:
+    LUNA_DM_NIGHT_H0 = 21
+try:
+    LUNA_DM_NIGHT_H1 = _greet_clamp_h(int(_env("LUNA_DM_NIGHT_END_HOUR", "23") or "23"))
+except Exception:
+    LUNA_DM_NIGHT_H1 = 23
+# Heartfelt midday check-in (LLM + profile; optional static fallback)
+LUNA_DM_MIDDAY = _env("LUNA_DM_MIDDAY", "1").strip().lower() in ("1", "true", "yes", "on")
+try:
+    LUNA_DM_MIDDAY_H0 = _greet_clamp_h(int(_env("LUNA_DM_MIDDAY_START_HOUR", "12") or "12"))
+except Exception:
+    LUNA_DM_MIDDAY_H0 = 12
+try:
+    LUNA_DM_MIDDAY_H1 = _greet_clamp_h(int(_env("LUNA_DM_MIDDAY_END_HOUR", "15") or "15"))
+except Exception:
+    LUNA_DM_MIDDAY_H1 = 15
+_DM_GREET_STATE_PATH = os.path.join(_DATA, "dm_greetings_state.json")
+_dm_greet_state_lock = threading.Lock()
 
 # Social / media URLs
 SUNO_CREATE_URL  = _env("SUNO_CREATE_URL", "https://suno.com/create")
@@ -135,6 +211,41 @@ TWITCH_OAUTH_TOKEN = _env("TWITCH_OAUTH_TOKEN", "").strip()
 TWITCH_CHAT_ENABLED = _env("TWITCH_CHAT_ENABLED", "1").strip().lower() not in ("0", "false", "no", "off")
 TWITCH_SEND_CHAT = _env("TWITCH_SEND_CHAT", "1").strip().lower() not in ("0", "false", "no", "off")
 TWITCH_TTS = _env("TWITCH_TTS", "1").strip().lower() not in ("0", "false", "no", "off")
+TWITCH_CLIENT_ID = _env("TWITCH_CLIENT_ID", "").strip()
+TWITCH_CLIENT_SECRET = _env("TWITCH_CLIENT_SECRET", "").strip()
+TWITCH_OAUTH_REDIRECT_URI = _env(
+    "TWITCH_OAUTH_REDIRECT_URI",
+    "http://127.0.0.1:5050/api/twitch/oauth/callback",
+).strip()
+TWITCH_BROADCASTER_LOGIN = (_env("TWITCH_BROADCASTER_LOGIN", TWITCH_CHANNEL) or TWITCH_CHANNEL).strip().lstrip("#").lower()
+# Stream solo "takeover": when live (Twitch/LoL/OBS/stream mode), solo TTS only pauses for the *broadcaster* talking to Luna, not other chat
+LUNA_STREAM_TAKEOVER = _env("LUNA_STREAM_TAKEOVER", "1").strip().lower() in ("1", "true", "yes", "on")
+LUNA_STREAM_TAKEOVER_STREAMER_IDLE = _env("LUNA_STREAM_TAKEOVER_STREAMER_IDLE", "1").strip().lower() in (
+    "1", "true", "yes", "on",
+)
+TWITCH_OAUTH_SCOPES = [s for s in (_env("TWITCH_OAUTH_SCOPES", "channel:manage:broadcast channel:manage:polls channel:read:subscriptions moderator:read:followers") or "").split() if s.strip()]
+TWITCH_APP_TOKEN = _env("TWITCH_APP_TOKEN", "").strip()
+TWITCH_LIVE_CHECK_CHANNEL = (_env("TWITCH_LIVE_CHECK_CHANNEL", TWITCH_CHANNEL) or TWITCH_CHANNEL).strip().lstrip("#").lower()
+TWITCH_AUTO_ACK_FOLLOWS = _env("TWITCH_AUTO_ACK_FOLLOWS", "1").strip().lower() not in ("0", "false", "no", "off")
+TWITCH_AUTO_ACK_SUBS = _env("TWITCH_AUTO_ACK_SUBS", "1").strip().lower() not in ("0", "false", "no", "off")
+try:
+    TWITCH_AUTO_ACK_COOLDOWN_SEC = float(_env("TWITCH_AUTO_ACK_COOLDOWN_SEC", "8") or "8")
+except Exception:
+    TWITCH_AUTO_ACK_COOLDOWN_SEC = 8.0
+TWITCH_AUTO_ACK_COOLDOWN_SEC = max(1.0, min(120.0, TWITCH_AUTO_ACK_COOLDOWN_SEC))
+try:
+    TWITCH_AUTO_ACK_POLL_SEC = float(_env("TWITCH_AUTO_ACK_POLL_SEC", "30") or "30")
+except Exception:
+    TWITCH_AUTO_ACK_POLL_SEC = 30.0
+TWITCH_AUTO_ACK_POLL_SEC = max(10.0, min(300.0, TWITCH_AUTO_ACK_POLL_SEC))
+LUNA_STREAM_AWARENESS = _env("LUNA_STREAM_AWARENESS", "1").strip().lower() in ("1", "true", "yes", "on")
+try:
+    LUNA_STREAM_AWARENESS_POLL_SEC = float(_env("LUNA_STREAM_AWARENESS_POLL_SEC", "20") or "20")
+except Exception:
+    LUNA_STREAM_AWARENESS_POLL_SEC = 20.0
+LUNA_STREAM_AWARENESS_POLL_SEC = max(8.0, min(120.0, LUNA_STREAM_AWARENESS_POLL_SEC))
+OBS_WS_URL = _env("OBS_WS_URL", "ws://127.0.0.1:4455").strip()
+OBS_WS_PASSWORD = _env("OBS_WS_PASSWORD", "").strip()
 # Map Luna [SIGH]/[LAUGH]/… tags to short spoken bits for Edge TTS; strip other bracket tags from speech.
 LUNA_TTS_EXPRESSION_EXPAND = _env("LUNA_TTS_EXPRESSION_EXPAND", "1").strip().lower() not in ("0", "false", "no", "off")
 # When TTS is on and this flag is on, do not post full replies to Twitch IRC if that turn uses stream/live context
@@ -142,6 +253,87 @@ LUNA_TTS_EXPRESSION_EXPAND = _env("LUNA_TTS_EXPRESSION_EXPAND", "1").strip().low
 TWITCH_VOICE_ONLY_IN_STREAM_MODE = _env("TWITCH_VOICE_ONLY_IN_STREAM_MODE", "1").strip().lower() not in (
     "0", "false", "no", "off",
 )
+_TWITCH_CHAT_BATCHING = _env("TWITCH_CHAT_BATCHING", "1").strip().lower() in ("1", "true", "yes", "on")
+try:
+    TWITCH_CHAT_BATCH_WINDOW_SEC = float(_env("TWITCH_CHAT_BATCH_WINDOW_SEC", "1.4") or "1.4")
+except Exception:
+    TWITCH_CHAT_BATCH_WINDOW_SEC = 1.4
+TWITCH_CHAT_BATCH_WINDOW_SEC = max(0.0, min(8.0, TWITCH_CHAT_BATCH_WINDOW_SEC))
+try:
+    TWITCH_CHAT_BATCH_MAX_ITEMS = int(_env("TWITCH_CHAT_BATCH_MAX_ITEMS", "4") or "4")
+except Exception:
+    TWITCH_CHAT_BATCH_MAX_ITEMS = 4
+TWITCH_CHAT_BATCH_MAX_ITEMS = max(1, min(12, TWITCH_CHAT_BATCH_MAX_ITEMS))
+# Discord VC organizer: gate chunks with Silero VAD before Whisper (set 0 to disable).
+LUNA_CALL_USE_SILERO_VAD = _env("LUNA_CALL_USE_SILERO_VAD", "1").strip().lower() in ("1", "true", "yes", "on")
+# Voice emotion model for Discord voice clips (set "off" to disable model and use heuristics only).
+LUNA_VOICE_EMOTION_MODEL = _env("LUNA_VOICE_EMOTION_MODEL", "speechbrain").strip().lower()
+LUNA_VOICE_EMOTION_MODEL_ID = _env(
+    "LUNA_VOICE_EMOTION_MODEL_ID",
+    "speechbrain/emotion-recognition-wav2vec2-IEMOCAP",
+).strip() or "speechbrain/emotion-recognition-wav2vec2-IEMOCAP"
+try:
+    LUNA_VOICE_EMOTION_MODEL_MIN_CONF = float(_env("LUNA_VOICE_EMOTION_MODEL_MIN_CONF", "0.38") or "0.38")
+except Exception:
+    LUNA_VOICE_EMOTION_MODEL_MIN_CONF = 0.38
+LUNA_VOICE_EMOTION_MODEL_MIN_CONF = max(0.05, min(0.95, LUNA_VOICE_EMOTION_MODEL_MIN_CONF))
+# Verbose terminal tracing for Discord VC receive/transcription pipeline.
+LUNA_CALL_DEBUG = _env("LUNA_CALL_DEBUG", "1").strip().lower() in ("1", "true", "yes", "on")
+try:
+    LUNA_CALL_DEBUG_STATS_SEC = float(_env("LUNA_CALL_DEBUG_STATS_SEC", "6.0") or "6.0")
+except Exception:
+    LUNA_CALL_DEBUG_STATS_SEC = 6.0
+LUNA_CALL_DEBUG_STATS_SEC = max(2.0, min(30.0, LUNA_CALL_DEBUG_STATS_SEC))
+# Discord VC wake mode: only process/reply when wake phrase is detected.
+LUNA_CALL_WAKE_MODE = _env("LUNA_CALL_WAKE_MODE", "1").strip().lower() in ("1", "true", "yes", "on")
+try:
+    LUNA_CALL_WAKE_ARM_SEC = float(_env("LUNA_CALL_WAKE_ARM_SEC", "10.0") or "10.0")
+except Exception:
+    LUNA_CALL_WAKE_ARM_SEC = 10.0
+LUNA_CALL_WAKE_ARM_SEC = max(2.0, min(30.0, LUNA_CALL_WAKE_ARM_SEC))
+LUNA_CALL_WAKE_PHRASES = tuple(
+    p.strip().lower()
+    for p in (_env("LUNA_CALL_WAKE_PHRASES", "hey luna,hi luna,yo luna,ok luna,okay luna") or "").split(",")
+    if p.strip()
+)
+# One-shot VC recording command (!listen): capture one utterance from author.
+try:
+    LUNA_LISTEN_TIMEOUT_SEC = float(_env("LUNA_LISTEN_TIMEOUT_SEC", "18.0") or "18.0")
+except Exception:
+    LUNA_LISTEN_TIMEOUT_SEC = 18.0
+LUNA_LISTEN_TIMEOUT_SEC = max(6.0, min(60.0, LUNA_LISTEN_TIMEOUT_SEC))
+try:
+    LUNA_LISTEN_MAX_SEC = float(_env("LUNA_LISTEN_MAX_SEC", "10.0") or "10.0")
+except Exception:
+    LUNA_LISTEN_MAX_SEC = 10.0
+LUNA_LISTEN_MAX_SEC = max(2.0, min(30.0, LUNA_LISTEN_MAX_SEC))
+try:
+    LUNA_LISTEN_END_SILENCE_SEC = float(_env("LUNA_LISTEN_END_SILENCE_SEC", "1.0") or "1.0")
+except Exception:
+    LUNA_LISTEN_END_SILENCE_SEC = 1.0
+LUNA_LISTEN_END_SILENCE_SEC = max(0.2, min(4.0, LUNA_LISTEN_END_SILENCE_SEC))
+try:
+    LUNA_LISTEN_MIN_PACKETS = int(_env("LUNA_LISTEN_MIN_PACKETS", "3") or "3")
+except Exception:
+    LUNA_LISTEN_MIN_PACKETS = 3
+LUNA_LISTEN_MIN_PACKETS = max(1, min(20, LUNA_LISTEN_MIN_PACKETS))
+try:
+    LUNA_LISTEN_MIN_SPEECH_SEC = float(_env("LUNA_LISTEN_MIN_SPEECH_SEC", "0.55") or "0.55")
+except Exception:
+    LUNA_LISTEN_MIN_SPEECH_SEC = 0.55
+LUNA_LISTEN_MIN_SPEECH_SEC = max(0.10, min(3.0, LUNA_LISTEN_MIN_SPEECH_SEC))
+# Discord VC: wait this long after last detected speech packet before replying.
+try:
+    LUNA_CALL_REPLY_SILENCE_SEC = float(_env("LUNA_CALL_REPLY_SILENCE_SEC", "1.15") or "1.15")
+except Exception:
+    LUNA_CALL_REPLY_SILENCE_SEC = 1.15
+LUNA_CALL_REPLY_SILENCE_SEC = max(0.25, min(4.0, LUNA_CALL_REPLY_SILENCE_SEC))
+# Safety cap: if someone talks continuously without pause, force a segment flush.
+try:
+    LUNA_CALL_MAX_SEGMENT_SEC = float(_env("LUNA_CALL_MAX_SEGMENT_SEC", "9.0") or "9.0")
+except Exception:
+    LUNA_CALL_MAX_SEGMENT_SEC = 9.0
+LUNA_CALL_MAX_SEGMENT_SEC = max(2.0, min(30.0, LUNA_CALL_MAX_SEGMENT_SEC))
 # Playwright: !yt_comment, !yt_like, and web “YT Like” share this one profile (one Google account). X/IG/FB/WhatsApp/etc. use their own *_PROFILE_DIR.
 YT_PROFILE_DIR   = _env("YOUTUBE_PROFILE_DIR", os.path.join(_DATA, "youtube_profile"))
 # Used only for sign-in hints / messages — !yt_comment and !yt_like use YOUTUBE_PROFILE_DIR cookies.
@@ -193,6 +385,115 @@ def _whisper_transcribe_kwargs() -> dict:
         "compression_ratio_threshold": cr,
         "logprob_threshold": lp,
     }
+
+
+try:
+    WHISPER_CHUNK_SEC = float(_env("WHISPER_CHUNK_SEC", "10") or "10")
+except Exception:
+    WHISPER_CHUNK_SEC = 10.0
+WHISPER_CHUNK_SEC = max(4.0, min(30.0, WHISPER_CHUNK_SEC))
+try:
+    WHISPER_CHUNK_OVERLAP_SEC = float(_env("WHISPER_CHUNK_OVERLAP_SEC", "2") or "2")
+except Exception:
+    WHISPER_CHUNK_OVERLAP_SEC = 2.0
+WHISPER_CHUNK_OVERLAP_SEC = max(0.0, min(8.0, WHISPER_CHUNK_OVERLAP_SEC))
+_WHISPER_CHUNKING_ON = _env("WHISPER_CHUNKING", "1").strip().lower() in ("1", "true", "yes", "on")
+
+
+# Groq Cloud STT (OpenAI-compatible transcriptions; set GROQ_API_KEY in .env)
+GROQ_API_KEY = _env("GROQ_API_KEY", "")
+GROQ_STT_URL = (
+    _env("GROQ_STT_URL", "https://api.groq.com/openai/v1/audio/transcriptions").strip()
+    or "https://api.groq.com/openai/v1/audio/transcriptions"
+)
+GROQ_STT_MODEL = (_env("GROQ_STT_MODEL", "whisper-large-v3") or "whisper-large-v3").strip()
+# Optional ISO-639-1 (e.g. en); leave empty for auto
+GROQ_STT_LANGUAGE = _env("GROQ_STT_LANGUAGE", "").strip()
+# When Groq fails (no key, rate limit, or HTTP error), fall back to local openai-whisper
+GROQ_STT_LOCAL_FALLBACK = _env("GROQ_STT_LOCAL_FALLBACK", "1").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _groq_stt_try(path: str) -> tuple[bool, str | None]:
+    """
+    Transcribe via Groq API.
+    Returns (True, text) on success (text may be empty).
+    Returns (False, None) when local Whisper should be used (no key, quota/rate limit, or request error).
+    """
+    key = (GROQ_API_KEY or "").strip()
+    if not key:
+        return (False, None)
+    try:
+        with open(path, "rb") as f:
+            data = f.read()
+    except Exception:
+        return (False, None)
+    if not data or len(data) < 8:
+        return (False, None)
+    boundary = f"----Luna{uuid.uuid4().hex[:20]}"
+    fields: list[tuple[str, str]] = [
+        ("model", GROQ_STT_MODEL),
+        ("response_format", "json"),
+    ]
+    if GROQ_STT_LANGUAGE:
+        fields.append(("language", GROQ_STT_LANGUAGE))
+    b = b""
+    cr = b"\r\n"
+    for k, v in fields:
+        b += f"--{boundary}\r\nContent-Disposition: form-data; name=\"{k}\"\r\n\r\n{v}\r\n".encode("utf-8")
+    fname = (os.path.basename(path) or "audio").replace("\"", "'") or "audio"
+    b += (
+        f"--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{fname}\"\r\n"
+        f"Content-Type: application/octet-stream\r\n\r\n"
+    ).encode("utf-8")
+    b += data + cr + f"--{boundary}--\r\n".encode("utf-8")
+    req = urllib.request.Request(
+        GROQ_STT_URL,
+        data=b,
+        method="POST",
+        headers={
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+            "Authorization": f"Bearer {key}",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=120) as r:
+            raw = r.read()
+        j = json.loads(raw.decode("utf-8", errors="replace"))
+        if not isinstance(j, dict):
+            if LUNA_CALL_DEBUG:
+                print(
+                    f"[CallDebug {datetime.now().strftime('%H:%M:%S')}] groq_stt_bad_json_shape",
+                    flush=True,
+                )
+            return (False, None)
+        return (True, (j.get("text") or "").strip())
+    except urllib.error.HTTPError as e:
+        err_body = ""
+        try:
+            err_body = (e.read() or b"").decode("utf-8", errors="replace")
+        except Exception:
+            pass
+        low = (err_body or "").lower()
+        code = e.code
+        is_limit = code == 429 or code == 402 or (
+            code == 403 and any(
+                k in low for k in ("rate", "limit", "quota", "exceed", "credits", "usage")
+            )
+        ) or (code == 503 and any(k in low for k in ("unavailable", "overloaded", "capacity")))
+        if LUNA_CALL_DEBUG:
+            tag = "groq_stt_rate_limited" if is_limit or code == 429 else f"groq_stt_http_{code}"
+            print(
+                f"[CallDebug {datetime.now().strftime('%H:%M:%S')}] {tag} | code={code} | body={err_body[:200]}",
+                flush=True,
+            )
+        return (False, None)
+    except Exception as e:
+        if LUNA_CALL_DEBUG:
+            print(
+                f"[CallDebug {datetime.now().strftime('%H:%M:%S')}] groq_stt_error | err={str(e)[:220]}",
+                flush=True,
+            )
+        return (False, None)
 
 
 # VRChat OSC bridge (optional)
@@ -275,6 +576,9 @@ CRITICAL: RESPONSE LENGTH AND STYLE
 - Talk about only one or two subjects at a time
 - Always speak naturally and fluidly like in real casual conversation
 - Humans rarely speak in lengthy monologues during casual conversation
+- Always write from your own voice in first person ("I", "me", "my") when referring to yourself.
+- Never narrate yourself in third person (avoid "Luna ...", "she ...", "the assistant ...").
+- Never output hidden/internal reasoning, scratchpads, or "thinking" sections. Only output the final reply to the user.
 
 IMPORTANT FOR EMOTIONAL EXPRESSIONS:
 Each response MUST begin with an emotional tag in brackets to indicate your emotional state, DO NOT ADD ANY NEW. These are the only expression tags you can use:
@@ -586,6 +890,8 @@ _STUDIO_WATCH_PATH = os.path.join(_DATA, "studio_watch_target.json")
 _YT_WATCH_SCHEDULE_PATH = os.path.join(_DATA, "yt_watch_react_schedule.json")
 _STREAM_LORE_PATH = os.path.join(_DATA, "stream_lore.json")
 _STREAM_SOLO_STATE_PATH = os.path.join(_DATA, "stream_solo_state.json")
+_TWITCH_OAUTH_PATH = os.path.join(_DATA, "twitch_oauth.json")
+_TWITCH_EVENTS_STATE_PATH = os.path.join(_DATA, "twitch_events_state.json")
 _REFLECTION_PATH = os.path.join(_DATA, "last_reflection_date.json")
 _EVOLUTION_ENABLED_PATH = os.path.join(_DATA, "evolution_enabled.json")
 _SECURITY_ALERTS_PATH   = os.path.join(_DATA, "security_alerts.json")
@@ -632,6 +938,25 @@ _yt_watch_live_prev_lock = threading.Lock()
 _yt_watch_live_prev_by_session: dict[str, str] = {}
 _twitch_stop_event = threading.Event()
 _twitch_msg_queue: queue.Queue = queue.Queue(maxsize=500)
+_twitch_oauth_lock = threading.Lock()
+_twitch_oauth_state: dict[str, float] = {}
+_twitch_auto_ack_lock = threading.Lock()
+_twitch_auto_ack_last_ts: float = 0.0
+_stream_presence_lock = threading.Lock()
+_stream_presence_state: dict[str, object] = {
+    "twitch_live": False,
+    "obs_running": False,
+    "obs_ws_connected": False,
+    "obs_streaming": False,
+    "obs_recording": False,
+    "recording_likely": False,
+    "streaming_likely": False,
+    "source": "init",
+    "last_error": "",
+    "updated_ts": 0.0,
+}
+_stream_presence_auto_override = False
+_twitch_recent_chatters: deque[tuple[float, str]] = deque(maxlen=300)
 _pending_feedback_lock = threading.Lock()
 _working_lock    = threading.Lock()
 _knowledge_lock  = threading.Lock()
@@ -650,6 +975,10 @@ _kill_requested: bool = False  # set by KILL button; long-running tasks can chec
 
 # Last user activity (for proactive heartbeat: don't speak if user just talked)
 _last_user_activity: float = 0.0
+# Last time the *streamer* (linked hub / linked Discord / broadcaster in Twitch) messaged Luna — for stream solo idle
+_last_streamer_luna_at: float = time.time()
+# Cached Twitch live check (Helix) for takeover context
+_twitch_live_cache: dict = {"ts": 0.0, "live": False}
 # Seconds of user silence before LoL commentary TTS plays (set LUNA_LOL_COMMENTARY_QUIET_SEC to override)
 _LOL_COMMENTARY_USER_QUIET_SEC: float = max(30.0, float(_env("LUNA_LOL_COMMENTARY_QUIET_SEC", "90") or "90"))
 _yt_watch_stops: dict[str, threading.Event] = {}
@@ -798,6 +1127,9 @@ HELP_TEXT = (
     "• !yt_analytics [days] [limit] — top traction videos from your channel (API key optional; fallback uses scrape metadata)\n"
     "• !yt_react <url> / !x_react <url> — Luna reacts to a YouTube video or X post (no posting)\n"
     "• !yt_watch_react <url> / !yt_watch_stop — live co-watch reactions from caption timeline (streamer mode)\n"
+    "• !twitch_title <title> — update Twitch stream title (broadcaster OAuth)\n"
+    "• !twitch_poll <title> | <opt1> | <opt2> [| opt3..] — create Twitch poll\n"
+    "• !twitch_poll <topic> — Luna auto-creates a poll title/options from the topic\n"
     "• !status <text> / !status clear — change Luna's Discord status (linked/admin)\n"
     "• !ig_dm <user> [msg] — Instagram DM\n"
     "• !fb_msg <name> [msg] — Messenger message\n"
@@ -810,6 +1142,7 @@ HELP_TEXT = (
     "• !profile — view or set your profile\n"
     "• !join / !leave / !pause / !skip / !stop / !queue — music\n"
     "• !joinme [message] — join your VC and say it with TTS (or \"Hey, Luna here!\")\n"
+    "• !tts <what Luna should say> — you write **her** line; she posts it as **her** TTS (MP3) in this channel (DM, linked/admin, or **DISCORD_TTS_CHANNEL_IDS**). This is *not* for reading *your* messages aloud — that’s for directing her. Web: **Luna says (TTS) → …** in Media. Optional: **DISCORD_TTS_FILE_IN_DM=1** / **DISCORD_TTS_FILE_IN_CHANNELS=1** also add an MP3 of **her normal reply text** after she chats (set **DISCORD_TTS_CHANNEL_IDS** for guild text channels).\n"
     "• !briefing — morning briefing (weather, calendar, todos, news)\n"
     "• !analytics_screen — vision read of analytics on screen (web UI: **Read screen analytics** picks window/monitor)\n"
     "• remind me at 7pm to … — Discord DM + voice reminder\n"
@@ -867,6 +1200,11 @@ LUNA_CHAT_COMPACT_INJECTION = (
     "You are Luna — a direct, warm companion on the user's machine. "
     "Reply concisely; go deeper only when asked. Stay in character. Be honest when unsure. "
     "No hollow cheer, no 'Certainly!' openers. For full commands say **!help**."
+    " Write in first person for your own voice (I/me/my), never third-person self-narration."
+    " Never output hidden/internal reasoning or thinking traces — only the final user-facing reply."
+    "\n\nOutput rules: do **not** write novel/cinematic *stage actions* in asterisks and do **not** add bracketed"
+    " narrator descriptions of your body, gaze, or scene (e.g. *adjusts screen*, [Luna looks away] — that reads like"
+    " third-person RP). The lead emotion tag in **one** whitelisted [BRACKET] word is enough; the rest is plain speech."
 )
 
 # Public stream persona (VTuber-adjacent live host). Override anytime via data/STREAM_PERSONA.md
@@ -945,6 +1283,735 @@ def _stream_mode_suffix(user_message: str, *, force_stream_mode: bool = False) -
     return "\n\n## Stream mode (public live persona)\n" + body
 
 
+def _stream_presence_mark_chat_activity(display_name: str) -> None:
+    """Remember recent Twitch chatters so Luna can address both streamer and active chat."""
+    name = (display_name or "").strip()
+    if not name:
+        return
+    now = time.time()
+    with _stream_presence_lock:
+        _twitch_recent_chatters.append((now, name[:40]))
+
+
+def _stream_presence_recent_chatters(max_names: int = 8, window_sec: float = 300.0) -> list[str]:
+    now = time.time()
+    names: list[str] = []
+    seen: set[str] = set()
+    with _stream_presence_lock:
+        for ts, name in reversed(_twitch_recent_chatters):
+            if now - float(ts) > window_sec:
+                break
+            low = name.lower()
+            if low in seen:
+                continue
+            seen.add(low)
+            names.append(name)
+            if len(names) >= max_names:
+                break
+    names.reverse()
+    return names
+
+
+def _is_obs_running() -> bool:
+    """Best-effort OBS presence check (Windows tasklist)."""
+    try:
+        out = subprocess.check_output(
+            ["tasklist", "/FI", "IMAGENAME eq obs64.exe"],
+            stderr=subprocess.DEVNULL,
+            creationflags=(getattr(subprocess, "CREATE_NO_WINDOW", 0)),
+            text=True,
+            encoding="utf-8",
+            errors="ignore",
+        )
+        return "obs64.exe" in (out or "").lower()
+    except Exception:
+        return False
+
+
+def _obs_ws_get_status() -> tuple[dict[str, bool] | None, str]:
+    """OBS WebSocket v5 one-shot status: returns {'streaming': bool, 'recording': bool} or (None, error)."""
+    if _wsclient is None:
+        return None, "websocket_client_not_installed"
+    url = (OBS_WS_URL or "").strip()
+    if not url:
+        return None, "missing_obs_ws_url"
+    ws = None
+    try:
+        ws = _wsclient.create_connection(url, timeout=6)
+        raw = ws.recv()
+        hello = json.loads(raw or "{}")
+        if int(hello.get("op", -1)) != 0:
+            return None, "obs_ws_bad_hello"
+        hd = hello.get("d") if isinstance(hello.get("d"), dict) else {}
+        identify_d: dict[str, object] = {"rpcVersion": int(hd.get("rpcVersion") or 1)}
+        auth = hd.get("authentication") if isinstance(hd.get("authentication"), dict) else None
+        if auth:
+            challenge = str(auth.get("challenge") or "")
+            salt = str(auth.get("salt") or "")
+            pwd = OBS_WS_PASSWORD or ""
+            secret = base64.b64encode(hashlib.sha256((pwd + salt).encode("utf-8")).digest()).decode("utf-8")
+            digest = base64.b64encode(hashlib.sha256((secret + challenge).encode("utf-8")).digest()).decode("utf-8")
+            identify_d["authentication"] = digest
+        ws.send(json.dumps({"op": 1, "d": identify_d}, ensure_ascii=False))
+        ident_raw = ws.recv()
+        ident = json.loads(ident_raw or "{}")
+        if int(ident.get("op", -1)) != 2:
+            return None, "obs_ws_identify_failed"
+
+        def _req(req_type: str) -> dict | None:
+            rid = str(uuid.uuid4())
+            ws.send(
+                json.dumps(
+                    {"op": 6, "d": {"requestType": req_type, "requestId": rid}},
+                    ensure_ascii=False,
+                )
+            )
+            until = time.time() + 4.0
+            while time.time() < until:
+                msg = json.loads(ws.recv() or "{}")
+                if int(msg.get("op", -1)) != 7:
+                    continue
+                d = msg.get("d") if isinstance(msg.get("d"), dict) else {}
+                if str(d.get("requestId") or "") != rid:
+                    continue
+                rs = d.get("requestStatus") if isinstance(d.get("requestStatus"), dict) else {}
+                if not bool(rs.get("result")):
+                    code = rs.get("code")
+                    comment = rs.get("comment")
+                    raise RuntimeError(f"obs_ws_request_failed:{req_type}:{code}:{comment}")
+                rd = d.get("responseData")
+                return rd if isinstance(rd, dict) else {}
+            raise RuntimeError(f"obs_ws_request_timeout:{req_type}")
+
+        s1 = _req("GetStreamStatus") or {}
+        s2 = _req("GetRecordStatus") or {}
+        return {
+            "streaming": bool(s1.get("outputActive")),
+            "recording": bool(s2.get("outputActive")),
+        }, ""
+    except Exception as e:
+        return None, str(e)
+    finally:
+        try:
+            if ws is not None:
+                ws.close()
+        except Exception:
+            pass
+
+
+def _twitch_live_now() -> tuple[bool, str]:
+    """Return (is_live, error). Uses Twitch Helix if client id + app token are configured."""
+    cid = (TWITCH_CLIENT_ID or "").strip()
+    token = (TWITCH_APP_TOKEN or "").strip()
+    user = (TWITCH_LIVE_CHECK_CHANNEL or TWITCH_CHANNEL or "").strip().lstrip("#").lower()
+    if not (cid and token and user):
+        return False, "missing_twitch_helix_credentials"
+    if token.lower().startswith("oauth:"):
+        token = token.split(":", 1)[1].strip()
+    if not token.lower().startswith("bearer "):
+        token = "Bearer " + token
+    try:
+        q = urllib.parse.urlencode({"user_login": user})
+        req = urllib.request.Request(
+            "https://api.twitch.tv/helix/streams?" + q,
+            headers={
+                "Client-Id": cid,
+                "Authorization": token,
+            },
+            method="GET",
+        )
+        with urllib.request.urlopen(req, timeout=8) as r:
+            data = json.loads(r.read() or b"{}")
+        arr = data.get("data")
+        return bool(isinstance(arr, list) and len(arr) > 0), ""
+    except Exception as e:
+        return False, str(e)
+
+
+def _twitch_live_now_cached() -> bool:
+    """Throttled live check for takeover (avoid hammering Helix every poll)."""
+    now = time.time()
+    if now - float(_twitch_live_cache.get("ts") or 0) < 50.0:
+        return bool(_twitch_live_cache.get("live"))
+    ok, _e = _twitch_live_now()
+    _twitch_live_cache["ts"] = now
+    _twitch_live_cache["live"] = bool(ok)
+    return bool(ok)
+
+
+def _stream_takeover_context_active() -> bool:
+    """True if we're in a 'live' context: stream mode, live Twitch, in-game LoL, or OBS running (best-effort)."""
+    if not LUNA_STREAM_TAKEOVER:
+        return False
+    if _stream_mode_env_on():
+        return True
+    try:
+        if _is_obs_running():
+            return True
+    except Exception:
+        pass
+    if _twitch_live_now_cached():
+        return True
+    try:
+        if _lol_spectator and _lol_live_context_suffix(200):
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _stream_solo_stream_mode_allows() -> bool:
+    """Respect LUNA_STREAM_SOLO_REQUIRE_STREAM_MODE, but allow TAKEOVER when context is live and env says so."""
+    if not _stream_solo_require_stream_mode():
+        return True
+    if _stream_mode_env_on():
+        return True
+    if LUNA_STREAM_TAKEOVER and _stream_takeover_context_active():
+        return True
+    return False
+
+
+def _twitch_oauth_prune_states(max_age_sec: float = 900.0) -> None:
+    now = time.time()
+    with _twitch_oauth_lock:
+        dead = [k for k, ts in _twitch_oauth_state.items() if (now - float(ts)) > max_age_sec]
+        for k in dead:
+            _twitch_oauth_state.pop(k, None)
+
+
+def _twitch_oauth_new_state() -> str:
+    token = uuid.uuid4().hex + uuid.uuid4().hex
+    with _twitch_oauth_lock:
+        _twitch_oauth_state[token] = time.time()
+    _twitch_oauth_prune_states()
+    return token
+
+
+def _twitch_oauth_consume_state(state: str) -> bool:
+    s = (state or "").strip()
+    if not s:
+        return False
+    with _twitch_oauth_lock:
+        ts = _twitch_oauth_state.pop(s, None)
+    if ts is None:
+        return False
+    return (time.time() - float(ts)) <= 900.0
+
+
+def _twitch_oauth_authorize_url(state: str) -> str:
+    q = urllib.parse.urlencode(
+        {
+            "client_id": TWITCH_CLIENT_ID,
+            "redirect_uri": TWITCH_OAUTH_REDIRECT_URI,
+            "response_type": "code",
+            "scope": " ".join(TWITCH_OAUTH_SCOPES),
+            "state": state,
+            "force_verify": "true",
+        }
+    )
+    return "https://id.twitch.tv/oauth2/authorize?" + q
+
+
+def _twitch_oauth_exchange_code(code: str) -> tuple[bool, dict | str]:
+    body = urllib.parse.urlencode(
+        {
+            "client_id": TWITCH_CLIENT_ID,
+            "client_secret": TWITCH_CLIENT_SECRET,
+            "code": (code or "").strip(),
+            "grant_type": "authorization_code",
+            "redirect_uri": TWITCH_OAUTH_REDIRECT_URI,
+        }
+    ).encode("utf-8")
+    req = urllib.request.Request(
+        "https://id.twitch.tv/oauth2/token",
+        data=body,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            data = json.loads(r.read() or b"{}")
+    except Exception as e:
+        return False, f"Token exchange failed: {e}"
+    if not isinstance(data, dict) or not (data.get("access_token") and data.get("refresh_token")):
+        return False, f"Unexpected token response: {str(data)[:300]}"
+    return True, data
+
+
+def _twitch_oauth_fetch_user(access_token: str) -> tuple[bool, dict | str]:
+    token = (access_token or "").strip()
+    if not token:
+        return False, "Missing access token"
+    req = urllib.request.Request(
+        "https://api.twitch.tv/helix/users",
+        headers={
+            "Client-Id": TWITCH_CLIENT_ID,
+            "Authorization": ("Bearer " + token),
+        },
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            data = json.loads(r.read() or b"{}")
+    except Exception as e:
+        return False, f"Could not read /helix/users: {e}"
+    arr = data.get("data") if isinstance(data, dict) else None
+    if not isinstance(arr, list) or not arr:
+        return False, "No user returned from Twitch."
+    user = arr[0] if isinstance(arr[0], dict) else {}
+    return True, {
+        "id": str(user.get("id") or ""),
+        "login": str(user.get("login") or "").lower(),
+        "display_name": str(user.get("display_name") or ""),
+    }
+
+
+def _twitch_oauth_save(token_data: dict, user_data: dict) -> None:
+    now = int(time.time())
+    payload = {
+        "obtained_at": now,
+        "expires_in": int(token_data.get("expires_in") or 0),
+        "scope": list(token_data.get("scope") or []),
+        "token_type": str(token_data.get("token_type") or "bearer"),
+        "access_token": str(token_data.get("access_token") or ""),
+        "refresh_token": str(token_data.get("refresh_token") or ""),
+        "broadcaster": user_data,
+    }
+    _save_json(_TWITCH_OAUTH_PATH, payload)
+
+
+def _twitch_oauth_status() -> dict:
+    d = _load_json(_TWITCH_OAUTH_PATH, {})
+    if not isinstance(d, dict):
+        d = {}
+    tok = str(d.get("access_token") or "")
+    ref = str(d.get("refresh_token") or "")
+    user = d.get("broadcaster") if isinstance(d.get("broadcaster"), dict) else {}
+    return {
+        "configured": bool(TWITCH_CLIENT_ID and TWITCH_CLIENT_SECRET),
+        "authorized": bool(tok and ref),
+        "redirect_uri": TWITCH_OAUTH_REDIRECT_URI,
+        "scopes": TWITCH_OAUTH_SCOPES,
+        "broadcaster_login": str(user.get("login") or ""),
+        "obtained_at": int(d.get("obtained_at") or 0),
+        "expires_in": int(d.get("expires_in") or 0),
+    }
+
+
+def _twitch_oauth_load() -> dict:
+    d = _load_json(_TWITCH_OAUTH_PATH, {})
+    return d if isinstance(d, dict) else {}
+
+
+def _twitch_oauth_refresh(refresh_token: str) -> tuple[bool, dict | str]:
+    body = urllib.parse.urlencode(
+        {
+            "client_id": TWITCH_CLIENT_ID,
+            "client_secret": TWITCH_CLIENT_SECRET,
+            "refresh_token": refresh_token,
+            "grant_type": "refresh_token",
+        }
+    ).encode("utf-8")
+    req = urllib.request.Request(
+        "https://id.twitch.tv/oauth2/token",
+        data=body,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            data = json.loads(r.read() or b"{}")
+    except Exception as e:
+        return False, f"Refresh failed: {e}"
+    if not isinstance(data, dict) or not data.get("access_token"):
+        return False, f"Unexpected refresh response: {str(data)[:300]}"
+    return True, data
+
+
+def _twitch_broadcaster_access_token() -> tuple[bool, str]:
+    """Get usable broadcaster token; refresh automatically if close to expiry."""
+    d = _twitch_oauth_load()
+    access = str(d.get("access_token") or "")
+    refresh = str(d.get("refresh_token") or "")
+    obtained = int(d.get("obtained_at") or 0)
+    expires = int(d.get("expires_in") or 0)
+    now = int(time.time())
+    margin = 120
+    if access and expires > 0 and (obtained + expires - margin) > now:
+        return True, access
+    if not refresh:
+        return False, "No refresh token in Twitch OAuth store."
+    ok, refreshed = _twitch_oauth_refresh(refresh)
+    if not ok:
+        return False, str(refreshed)
+    data = refreshed if isinstance(refreshed, dict) else {}
+    # Keep known broadcaster identity; overwrite tokens/expiry/scopes.
+    new_d = dict(d)
+    new_d.update(
+        {
+            "obtained_at": int(time.time()),
+            "expires_in": int(data.get("expires_in") or d.get("expires_in") or 0),
+            "scope": list(data.get("scope") or d.get("scope") or []),
+            "token_type": str(data.get("token_type") or d.get("token_type") or "bearer"),
+            "access_token": str(data.get("access_token") or ""),
+            "refresh_token": str(data.get("refresh_token") or refresh),
+        }
+    )
+    _save_json(_TWITCH_OAUTH_PATH, new_d)
+    at = str(new_d.get("access_token") or "")
+    if not at:
+        return False, "Refresh returned empty access token."
+    return True, at
+
+
+def _twitch_broadcaster_info() -> dict:
+    d = _twitch_oauth_load()
+    b = d.get("broadcaster")
+    return b if isinstance(b, dict) else {}
+
+
+def _twitch_helix_request(
+    method: str,
+    endpoint: str,
+    *,
+    params: dict | None = None,
+    payload: dict | None = None,
+) -> tuple[bool, dict | str]:
+    ok, token = _twitch_broadcaster_access_token()
+    if not ok:
+        return False, token
+    qs = ""
+    if params:
+        qs = "?" + urllib.parse.urlencode({k: str(v) for k, v in params.items() if v is not None})
+    data = None
+    headers = {
+        "Client-Id": TWITCH_CLIENT_ID,
+        "Authorization": "Bearer " + token,
+    }
+    if payload is not None:
+        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(
+        "https://api.twitch.tv/helix/" + endpoint.lstrip("/") + qs,
+        data=data,
+        headers=headers,
+        method=method.upper(),
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=12) as r:
+            body = json.loads(r.read() or b"{}")
+        return True, body if isinstance(body, dict) else {}
+    except Exception as e:
+        return False, str(e)
+
+
+def _twitch_update_title(new_title: str) -> tuple[bool, str]:
+    b = _twitch_broadcaster_info()
+    bid = str(b.get("id") or "")
+    if not bid:
+        return False, "Broadcaster OAuth is not connected."
+    title = (new_title or "").strip()
+    if not title:
+        return False, "Missing title."
+    if len(title) > 140:
+        title = title[:140]
+    ok, res = _twitch_helix_request(
+        "PATCH",
+        "channels",
+        params={"broadcaster_id": bid},
+        payload={"title": title},
+    )
+    if not ok:
+        return False, f"Twitch title update failed: {res}"
+    return True, f"Twitch title updated: {title}"
+
+
+def _twitch_create_poll(question: str, options: list[str], duration: int = 120) -> tuple[bool, str]:
+    b = _twitch_broadcaster_info()
+    bid = str(b.get("id") or "")
+    if not bid:
+        return False, "Broadcaster OAuth is not connected."
+    q = (question or "").strip()
+    opts = [str(o).strip()[:25] for o in options if str(o).strip()]
+    # Poll options must be 2..5.
+    dedup: list[str] = []
+    seen: set[str] = set()
+    for o in opts:
+        lo = o.lower()
+        if lo in seen:
+            continue
+        seen.add(lo)
+        dedup.append(o)
+    opts = dedup[:5]
+    if len(q) < 3 or len(opts) < 2:
+        return False, "Poll needs a title and at least 2 options."
+    # Eligibility checks for clearer errors than raw 403.
+    ok_u, ures = _twitch_helix_request("GET", "users", params={"id": bid})
+    if ok_u and isinstance(ures, dict):
+        uarr = ures.get("data")
+        u0 = uarr[0] if isinstance(uarr, list) and uarr else {}
+        btype = str((u0 or {}).get("broadcaster_type") or "").strip().lower()
+        if btype not in ("affiliate", "partner"):
+            return False, "Twitch polls require Affiliate or Partner status on the broadcaster account."
+    ok_s, sres = _twitch_helix_request("GET", "streams", params={"user_id": bid})
+    if ok_s and isinstance(sres, dict):
+        sarr = sres.get("data")
+        if not (isinstance(sarr, list) and len(sarr) > 0):
+            return False, "Twitch polls can only be created while your channel is live. Start stream first."
+    payload = {
+        "broadcaster_id": bid,
+        "title": q[:60],
+        "choices": [{"title": o} for o in opts],
+        "duration": max(30, min(1800, int(duration))),
+    }
+    ok, res = _twitch_helix_request("POST", "polls", payload=payload)
+    if not ok:
+        return False, f"Twitch poll create failed: {res}"
+    pdata = ((res.get("data") or [{}])[0] if isinstance(res, dict) else {}) or {}
+    pid = str(pdata.get("id") or "")
+    return True, f"Poll created: {q[:60]}" + (f" (id {pid[:8]}…)" if pid else "")
+
+
+def _twitch_poll_idea_from_topic(topic: str) -> tuple[str, list[str]]:
+    """Generate a quick, usable poll from a short topic using Luna's chat model."""
+    t = (topic or "").strip()[:120]
+    if not t:
+        return "", []
+    prompt = (
+        "Create a Twitch poll for this topic. Return strict JSON with keys "
+        "`title` (string, <=60 chars) and `options` (array of 2-5 short strings, <=25 chars each). "
+        "No markdown, no extra text.\n\nTopic: " + t
+    )
+    raw = (ollama_chat(prompt, system=LUNA_CHAT_COMPACT_INJECTION, model=OLLAMA_CHAT, compact=True) or "").strip()
+    try:
+        j = json.loads(raw)
+        q = str(j.get("title") or "").strip()[:60]
+        opts = [str(x).strip()[:25] for x in (j.get("options") or []) if str(x).strip()]
+        if q and len(opts) >= 2:
+            return q, opts[:5]
+    except Exception:
+        pass
+    # Safe fallback when model output isn't parseable.
+    base = t[:45]
+    return (f"{base}?" if not base.endswith("?") else base), ["Yes", "No"]
+
+
+def _twitch_events_state_load() -> dict:
+    d = _load_json(_TWITCH_EVENTS_STATE_PATH, {})
+    return d if isinstance(d, dict) else {}
+
+
+def _twitch_events_state_save(d: dict) -> None:
+    _save_json(_TWITCH_EVENTS_STATE_PATH, d if isinstance(d, dict) else {})
+
+
+def _twitch_recent_followers(first: int = 25) -> tuple[bool, list[dict] | str]:
+    b = _twitch_broadcaster_info()
+    bid = str(b.get("id") or "")
+    if not bid:
+        return False, "Broadcaster OAuth is not connected."
+    ok, res = _twitch_helix_request(
+        "GET",
+        "channels/followers",
+        params={"broadcaster_id": bid, "moderator_id": bid, "first": max(1, min(100, int(first)))},
+    )
+    if not ok:
+        return False, str(res)
+    arr = res.get("data") if isinstance(res, dict) else None
+    return True, (arr if isinstance(arr, list) else [])
+
+
+def _twitch_recent_subs(first: int = 25) -> tuple[bool, list[dict] | str]:
+    b = _twitch_broadcaster_info()
+    bid = str(b.get("id") or "")
+    if not bid:
+        return False, "Broadcaster OAuth is not connected."
+    ok, res = _twitch_helix_request(
+        "GET",
+        "subscriptions",
+        params={"broadcaster_id": bid, "first": max(1, min(100, int(first)))},
+    )
+    if not ok:
+        return False, str(res)
+    arr = res.get("data") if isinstance(res, dict) else None
+    return True, (arr if isinstance(arr, list) else [])
+
+
+def _twitch_ack_send(msg: str) -> None:
+    global _twitch_auto_ack_last_ts
+    text = (msg or "").strip()
+    if not text:
+        return
+    with _twitch_auto_ack_lock:
+        now = time.time()
+        if now - _twitch_auto_ack_last_ts < TWITCH_AUTO_ACK_COOLDOWN_SEC:
+            return
+        _twitch_auto_ack_last_ts = now
+    # Prefer posting as Luna in Twitch chat; optionally mirror to TTS if enabled.
+    try:
+        if TWITCH_SEND_CHAT:
+            send_twitch_chat_message(text[:450])
+    except Exception:
+        pass
+    try:
+        if TWITCH_TTS:
+            _tts_for_chat_source(text, "twitch")
+    except Exception:
+        pass
+
+
+def _twitch_auto_ack_loop() -> None:
+    if not (TWITCH_AUTO_ACK_FOLLOWS or TWITCH_AUTO_ACK_SUBS):
+        return
+    print("[Twitch] Auto-ack loop started (follows/subs).", flush=True)
+    while True:
+        try:
+            st = _twitch_events_state_load()
+            if TWITCH_AUTO_ACK_FOLLOWS:
+                okf, ff = _twitch_recent_followers(25)
+                if okf and isinstance(ff, list):
+                    known = set(st.get("followers_seen_ids") or [])
+                    new_rows = []
+                    for row in ff:
+                        uid = str((row or {}).get("user_id") or "")
+                        if uid and uid not in known:
+                            new_rows.append(row)
+                    # Oldest first for natural order
+                    new_rows.reverse()
+                    for row in new_rows[-3:]:
+                        name = str((row or {}).get("user_name") or (row or {}).get("user_login") or "friend")
+                        _twitch_ack_send(f"Thanks for the follow, {name}! Welcome in 💙")
+                    for row in ff:
+                        uid = str((row or {}).get("user_id") or "")
+                        if uid:
+                            known.add(uid)
+                    st["followers_seen_ids"] = list(known)[-1000:]
+
+            if TWITCH_AUTO_ACK_SUBS:
+                oks, ss = _twitch_recent_subs(25)
+                if oks and isinstance(ss, list):
+                    known = set(st.get("subs_seen_ids") or [])
+                    new_rows = []
+                    for row in ss:
+                        uid = str((row or {}).get("user_id") or "")
+                        if uid and uid not in known:
+                            new_rows.append(row)
+                    new_rows.reverse()
+                    for row in new_rows[-3:]:
+                        name = str((row or {}).get("user_name") or (row or {}).get("user_login") or "friend")
+                        _twitch_ack_send(f"Big love for the sub, {name}! You're amazing 💜")
+                    for row in ss:
+                        uid = str((row or {}).get("user_id") or "")
+                        if uid:
+                            known.add(uid)
+                    st["subs_seen_ids"] = list(known)[-1000:]
+
+            _twitch_events_state_save(st)
+        except Exception:
+            pass
+        time.sleep(TWITCH_AUTO_ACK_POLL_SEC)
+
+
+def _stream_presence_get() -> dict:
+    with _stream_presence_lock:
+        d = dict(_stream_presence_state)
+    d["stream_mode"] = bool(_stream_mode_env_on())
+    d["recent_chatters"] = _stream_presence_recent_chatters(max_names=8, window_sec=300.0)
+    return d
+
+
+def _apply_stream_presence(presence: dict[str, object]) -> None:
+    """Update shared state and auto-toggle stream-mode when likely live."""
+    global _stream_presence_auto_override
+    now = time.time()
+    with _stream_presence_lock:
+        _stream_presence_state.update(presence)
+        _stream_presence_state["updated_ts"] = now
+
+    live_like = bool(presence.get("streaming_likely") or presence.get("twitch_live"))
+    with _stream_mode_override_lock:
+        ov = _stream_mode_override
+    if live_like:
+        if ov is None or _stream_presence_auto_override:
+            _set_stream_mode_override(True)
+            _stream_presence_auto_override = True
+    else:
+        if _stream_presence_auto_override:
+            _set_stream_mode_override(None)
+            _stream_presence_auto_override = False
+
+
+def _stream_presence_worker() -> None:
+    """Background stream/record awareness: Twitch live + OBS WebSocket (with tasklist fallback)."""
+    if not LUNA_STREAM_AWARENESS:
+        return
+    print("[Stream awareness] Presence worker started.", flush=True)
+    while True:
+        try:
+            obs_running = _is_obs_running()
+            obs_status, obs_err = _obs_ws_get_status()
+            twitch_live, live_err = _twitch_live_now()
+            obs_streaming = bool(obs_status.get("streaming")) if isinstance(obs_status, dict) else False
+            obs_recording = bool(obs_status.get("recording")) if isinstance(obs_status, dict) else False
+            obs_ws_ok = isinstance(obs_status, dict)
+            recording_likely = bool(obs_recording or (obs_running and not obs_streaming and not twitch_live))
+            streaming_likely = bool(obs_streaming or twitch_live)
+            err_bits = []
+            if live_err and live_err != "missing_twitch_helix_credentials":
+                err_bits.append("twitch=" + live_err)
+            if obs_err and obs_err not in ("websocket_client_not_installed", "missing_obs_ws_url"):
+                err_bits.append("obs=" + obs_err)
+            _apply_stream_presence(
+                {
+                    "twitch_live": twitch_live,
+                    "obs_running": obs_running,
+                    "obs_ws_connected": obs_ws_ok,
+                    "obs_streaming": obs_streaming,
+                    "obs_recording": obs_recording,
+                    "recording_likely": recording_likely,
+                    "streaming_likely": streaming_likely,
+                    "source": "twitch_helix+obs_ws" if obs_ws_ok else "twitch_helix+obs_tasklist",
+                    "last_error": " | ".join(err_bits)[:600],
+                }
+            )
+        except Exception as e:
+            _apply_stream_presence(
+                {
+                    "source": "worker_error",
+                    "last_error": str(e),
+                }
+            )
+        time.sleep(LUNA_STREAM_AWARENESS_POLL_SEC)
+
+
+def _stream_presence_suffix() -> str:
+    """Prompt hint so Luna addresses both streamer and viewers when live-like."""
+    d = _stream_presence_get()
+    if not bool(d.get("streaming_likely") or d.get("twitch_live") or d.get("recording_likely")):
+        return ""
+    bits: list[str] = []
+    if d.get("obs_ws_connected"):
+        bits.append("OBS WebSocket connected.")
+    if d.get("obs_streaming"):
+        bits.append("OBS says stream output is ACTIVE.")
+    if d.get("obs_recording"):
+        bits.append("OBS says recording output is ACTIVE.")
+    if d.get("twitch_live"):
+        bits.append("Twitch channel is LIVE.")
+    elif d.get("recording_likely"):
+        bits.append("OBS appears open; recording is likely active.")
+    if d.get("obs_running"):
+        bits.append("OBS process is running.")
+    names = d.get("recent_chatters") or []
+    if isinstance(names, list) and names:
+        bits.append("Recent Twitch chatters: " + ", ".join(str(x) for x in names[:8]) + ".")
+    bits.append(
+        "You are co-hosting with the streamer. Speak to both: the streamer directly and the whole room "
+        "(chatters + lurkers). Keep replies public-facing, not private DM style."
+    )
+    return "\n\n## Stream presence\n" + " ".join(bits)[:900]
+
+
 def _live_chat_public_note(user_message: str) -> str:
     plat = _live_chat_platform(user_message)
     if not plat:
@@ -982,6 +2049,23 @@ def _lol_live_context_suffix(max_chars: int = 1500) -> str:
 def _stream_mode_auto_lol_enabled() -> bool:
     """Auto-enable stream persona whenever live LoL context is available."""
     return _env("LUNA_STREAM_MODE_WHILE_LOL", "1").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _build_lol_observer_commentary_system() -> str:
+    """Tight system prompt for *standalone* LoL observer lines (not full chat with stream/LoL context stacked).
+
+    Normal chat may auto-attach the stream persona while a match is live (`LUNA_STREAM_MODE_WHILE_LOL`); that can
+    make one-off commentary sound like a performance script. This path keeps a single clear voice: Luna → you.
+    """
+    return (
+        LUNA_CHAT_COMPACT_INJECTION.strip()
+        + "\n\n## Live League commentary (short voice line)\n"
+        "You are speaking **to the human player** on mic — second person **you**.\n"
+        "This is a **single reaction line** (1–2 short sentences), not an essay or recap.\n"
+        "Do **not** describe them in third person (avoid “the user / the player / they are …” as an opener). "
+        "Do **not** preface with meta like “Based on the snapshot / From the data / According to the JSON”.\n"
+        "The JSON in the user message is **private context** — you may *use* it, but **never** quote or enumerate raw fields."
+    )
 
 
 def _chat_fast_from_request(data: dict | None) -> bool | None:
@@ -1030,6 +2114,7 @@ def _prepare_main_chat_system(
     """
     use_fast = _chat_fast_enabled() if fast is None else fast
     live_note = _live_chat_public_note(user_message)
+    stream_presence = _stream_presence_suffix()
     lol_ctx = _lol_live_context_suffix(1400 if use_fast else 1800)
     auto_stream_from_lol = bool(lol_ctx) and _stream_mode_auto_lol_enabled()
     stream = _stream_mode_suffix(
@@ -1037,7 +2122,7 @@ def _prepare_main_chat_system(
         force_stream_mode=(force_stream_mode or auto_stream_from_lol),
     )
     if use_fast:
-        return LUNA_CHAT_COMPACT_INJECTION.strip() + stream + live_note + lol_ctx
+        return LUNA_CHAT_COMPACT_INJECTION.strip() + stream + live_note + stream_presence + lol_ctx
     # Instruction / full mode — single extra cost is optional intuition/existential (see _build_luna_chat_system).
     style_key = _choose_luna_style_for_reply(scope, user_message)
     system = _build_luna_chat_system(scope, style_key=style_key)
@@ -1047,7 +2132,7 @@ def _prepare_main_chat_system(
         if rag_results:
             rag_text = "\n".join(f"- {r['title']}: {r.get('snippet', '')[:150]}" for r in rag_results)
             system = system + "\n\n## Relevant knowledge\n" + rag_text[:1200]
-    return system + stream + _about_me_context_suffix(user_message) + live_note + lol_ctx
+    return system + stream + _about_me_context_suffix(user_message) + live_note + stream_presence + lol_ctx
 
 def _build_luna_chat_system(scope: str | None, *, style_key: str | None = None) -> str:
     """Build full system prompt for Luna chat (capabilities + nudges + biology)."""
@@ -1226,6 +2311,282 @@ def _save_json(path: str, data) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
+
+
+def _dm_greeting_recipient_ids() -> list[int]:
+    """Users who have DM-related config: sync list, linked, admin, extras."""
+    ids: set[int] = set()
+    ids |= _dm_sync_ids
+    if _linked_int:
+        ids.add(_linked_int)
+    if _admin_int:
+        ids.add(_admin_int)
+    ids |= _greet_extra
+    return sorted(ids)
+
+
+def _dm_greet_local_now() -> datetime:
+    try:
+        return datetime.now(ZoneInfo(LUNA_DM_GREET_TZ))
+    except Exception:
+        return datetime.now(timezone.utc)
+
+
+def _in_morning_hour(h: int) -> bool:
+    a, b = LUNA_DM_MORNING_H0, LUNA_DM_MORNING_H1
+    if a <= b:
+        return a <= h <= b
+    return h >= a or h <= b
+
+
+def _in_night_hour(h: int) -> bool:
+    a, b = LUNA_DM_NIGHT_H0, LUNA_DM_NIGHT_H1
+    if a <= b:
+        return a <= h <= b
+    return h >= a or h <= b
+
+
+def _in_midday_hour(h: int) -> bool:
+    if not LUNA_DM_MIDDAY:
+        return False
+    a, b = LUNA_DM_MIDDAY_H0, LUNA_DM_MIDDAY_H1
+    if a <= b:
+        return a <= h <= b
+    return h >= a or h <= b
+
+
+def _dm_greet_day_key_morning(now: datetime) -> str:
+    return now.strftime("%Y-%m-%d")
+
+
+def _dm_greet_day_key_night(now: datetime) -> str:
+    if now.hour < 5:
+        return (now.date() - timedelta(days=1)).isoformat()
+    return now.strftime("%Y-%m-%d")
+
+
+def _dm_greet_state_mark_field(uid: int, field: str, day: str) -> None:
+    with _dm_greet_state_lock:
+        d = _load_json(_DM_GREET_STATE_PATH, {})
+        if not isinstance(d, dict):
+            d = {}
+        u = d.get("users")
+        if not isinstance(u, dict):
+            u = {}
+        s = u.get(str(uid))
+        if not isinstance(s, dict):
+            s = {}
+        s[field] = day
+        u[str(uid)] = s
+        d["users"] = u
+        _save_json(_DM_GREET_STATE_PATH, d)
+
+
+def _dm_greet_already_sent(uid: int, field: str, day: str) -> bool:
+    d = _load_json(_DM_GREET_STATE_PATH, {})
+    if not isinstance(d, dict):
+        return False
+    u = d.get("users")
+    if not isinstance(u, dict):
+        return False
+    s = u.get(str(uid))
+    if not isinstance(s, dict):
+        return False
+    return s.get(field) == day
+
+
+def _dm_greeting_display_name(user: discord.abc.User) -> str:
+    g = getattr(user, "global_name", None) or getattr(user, "name", None)
+    t = (g or "there").strip()
+    return t if t else "there"
+
+
+def _ollama_greeting_text_ok(s: str | None) -> bool:
+    o = (s or "").strip()
+    if len(o) < 4:
+        return False
+    low = o.lower()
+    if low.startswith("error:") or "ollama offline" in low or o.startswith("Ollama:"):
+        return False
+    return True
+
+
+def _dm_scheduled_greeting_ollama(kind: str, display_name: str, prof: dict) -> str:
+    """
+    Generate the full text for morning, night, or mid-day DMs. No canned lines — all from Ollama, with one minimal retry.
+    kind: "morning" | "night" | "midday"
+    """
+    if not isinstance(prof, dict):
+        prof = {}
+    blurb_parts: list[str] = []
+    for k in ("about", "goals", "hobbies", "preferences", "name", "gender", "pronouns"):
+        v = (prof.get(k) or "").strip()
+        if v:
+            blurb_parts.append(f"- {k}: {v[:320]}")
+    blurb = "\n".join(blurb_parts) if blurb_parts else ""
+    gnote = (prof.get("gender") or "").strip()
+    pnote = (prof.get("pronouns") or "").strip()
+    if gnote or pnote:
+        identity = f"From profile: gender/identity: {gnote or '—'}; pronouns: {pnote or '—'}"
+    else:
+        identity = (
+            "No explicit gender. Infer from display name and notes; voice can be warm brotherly, sisterly, or neutral-inclusive. "
+            "If unsure, stay inclusive. No stereotypes about roles or appearance."
+        )
+
+    if kind == "morning":
+        system = (
+            "You are Luna, a warm, genuine friend. Write exactly ONE private good-morning DM. "
+            "1–3 short sentences; not a template, not listicle energy. Use their name or display name once. "
+            "Output ONLY the message text, no label or title."
+        )
+    elif kind == "night":
+        system = (
+            "You are Luna, a warm, genuine friend. Write exactly ONE private good-night DM before they rest. "
+            "1–3 short sentences; kind and calm, not sappy. Use their name or display name once. "
+            "Output ONLY the message text, no label or title."
+        )
+    else:
+        system = (
+            "You are Luna, a warm, real friend. Write exactly ONE private DM (2–4 short sentences) for the middle of their day. "
+            "Heartfelt, specific, not generic filler. Match emotional warmth: sisterly for women, grounded encouraging for men, "
+            "inclusive for nonbinary/unknown. Never cringe, never preach. Use their name once. "
+            "Output ONLY the message text, no title or outer quotes."
+        )
+    user_msg = (
+        f"Display name: {display_name}\n\n"
+        f"What we know:\n{blurb or '(new friend; still be kind).'}\n\n{identity}\n"
+    )
+    tmo = 60 if kind == "midday" else 50
+    out = ollama_chat(
+        user_msg, system=system, model=OLLAMA_CHAT, compact=True, timeout=tmo,
+    )
+    if _ollama_greeting_text_ok(out):
+        return (out or "").strip()[:1500]
+    if kind == "morning":
+        rtask = f"a natural good-morning to {display_name} (1-2 short lines, warm, use their name once)"
+    elif kind == "night":
+        rtask = f"a natural good-night to {display_name} (1-2 short lines, restful, use their name once)"
+    else:
+        rtask = f"one short heartfelt midday check-in to {display_name} (2-3 sentences, encouraging, not generic, use their name once)"
+    out2 = ollama_chat(
+        rtask,
+        system="You are Luna, writing a private DM. Output only the message body, no preamble.",
+        model=OLLAMA_CHAT, compact=True, timeout=40,
+    )
+    if _ollama_greeting_text_ok(out2):
+        return (out2 or "").strip()[:1500]
+    if LUNA_CALL_DEBUG:
+        print(
+            f"[CallDebug {datetime.now().strftime('%H:%M:%S')}] dm_greet_ollama_fail | kind={kind} name={display_name[:40]!r}",
+            flush=True,
+        )
+    return ""
+
+
+async def _dm_send_greeting_to_uid(uid: int, kind: str) -> bool:
+    if kind not in ("morning", "night"):
+        return False
+    try:
+        user = bot.get_user(uid) or await bot.fetch_user(uid)
+    except Exception as e:
+        if LUNA_CALL_DEBUG:
+            print(
+                f"[CallDebug {datetime.now().strftime('%H:%M:%S')}] dm_greet_fetch_user | uid={uid} err={str(e)[:180]}",
+                flush=True,
+            )
+        return False
+    if not user:
+        return False
+    name = _dm_greeting_display_name(user)
+    prof = await asyncio.to_thread(get_profile, f"discord:user:{uid}")
+    if not isinstance(prof, dict):
+        prof = {}
+    msg = await asyncio.to_thread(_dm_scheduled_greeting_ollama, kind, name, prof)
+    if not msg or not _ollama_greeting_text_ok(msg):
+        return False
+    try:
+        ch = user.dm_channel or await user.create_dm()
+        await ch.send(msg)
+        return True
+    except Exception as e:
+        if LUNA_CALL_DEBUG:
+            print(
+                f"[CallDebug {datetime.now().strftime('%H:%M:%S')}] dm_greet_send | uid={uid} err={str(e)[:200]}",
+                flush=True,
+            )
+        return False
+
+
+async def _dm_send_midday_to_uid(uid: int) -> bool:
+    try:
+        user = bot.get_user(uid) or await bot.fetch_user(uid)
+    except Exception as e:
+        if LUNA_CALL_DEBUG:
+            print(
+                f"[CallDebug {datetime.now().strftime('%H:%M:%S')}] dm_midday_fetch | uid={uid} err={str(e)[:180]}",
+                flush=True,
+            )
+        return False
+    if not user:
+        return False
+    name = _dm_greeting_display_name(user)
+    prof = await asyncio.to_thread(get_profile, f"discord:user:{uid}")
+    if not isinstance(prof, dict):
+        prof = {}
+    text = await asyncio.to_thread(_dm_scheduled_greeting_ollama, "midday", name, prof)
+    if not _ollama_greeting_text_ok(text):
+        return False
+    try:
+        ch = user.dm_channel or await user.create_dm()
+        await ch.send(text)
+        return True
+    except Exception as e:
+        if LUNA_CALL_DEBUG:
+            print(
+                f"[CallDebug {datetime.now().strftime('%H:%M:%S')}] dm_midday_send | uid={uid} err={str(e)[:200]}",
+                flush=True,
+            )
+        return False
+
+
+async def _dm_greeting_loop():
+    await bot.wait_until_ready()
+    await asyncio.sleep(45)
+    while True:
+        try:
+            if not LUNA_DM_GREETINGS:
+                await asyncio.sleep(300)
+                continue
+            uids = _dm_greeting_recipient_ids()
+            if not uids:
+                await asyncio.sleep(300)
+                continue
+            now = _dm_greet_local_now()
+            h = now.hour
+            in_m = _in_morning_hour(h)
+            in_n = _in_night_hour(h)
+            in_d = _in_midday_hour(h)
+            if not in_m and not in_n and not in_d:
+                await asyncio.sleep(180)
+                continue
+            mday = _dm_greet_day_key_morning(now)
+            nday = _dm_greet_day_key_night(now)
+            dday = mday
+            for uid in uids:
+                if in_m and not _dm_greet_already_sent(uid, "m", mday):
+                    if await _dm_send_greeting_to_uid(uid, "morning"):
+                        _dm_greet_state_mark_field(uid, "m", mday)
+                if in_n and not _dm_greet_already_sent(uid, "n", nday):
+                    if await _dm_send_greeting_to_uid(uid, "night"):
+                        _dm_greet_state_mark_field(uid, "n", nday)
+                if in_d and not _dm_greet_already_sent(uid, "d", dday):
+                    if await _dm_send_midday_to_uid(uid):
+                        _dm_greet_state_mark_field(uid, "d", dday)
+        except Exception:
+            pass
+        await asyncio.sleep(180)
+
 
 # ── Identity / SOUL ───────────────────────────────────────────────────────────
 
@@ -1886,13 +3247,33 @@ def _strip_luna_narration_brackets(text: str) -> str:
     if not text:
         return text
 
+    # Novel/cinematic text often uses fullwidth or CJK-style brackets; normalize so ASCII pass catches them.
+    t = text.replace("\uFF3B", "[").replace("\uFF3D", "]")
+    t = t.replace("【", "[").replace("】", "]")
+    t = t.replace("〔", "[").replace("〕", "]")
+
     def _repl(m: re.Match) -> str:
         inner = m.group(1).strip()
         if re.match(r"^[A-Za-z][A-Za-z0-9_]*$", inner) and inner.upper() in _LUNA_ALLOWED_INLINE_TAGS:
             return m.group(0)
         return ""
 
-    out = re.sub(r"\[([^\]]+)\]", _repl, text)
+    out = re.sub(r"\[([^\]]+)\]", _repl, t)
+    # Roleplay / " wattpad *actions* " — strip multi-sentence or long asterisk blocks (keep very short *sigh* beats).
+    def _ast_repl(m: re.Match) -> str:
+        inner = (m.group(1) or "").strip()
+        if len(inner) < 2:
+            return m.group(0)
+        if " " in inner or len(inner) > 20:
+            return ""
+        if re.search(
+            r"(?i)(flinch|gaze|expression|narrat|tilts?\s+her|holds?\s+the|doesn't|they\s+just|stage\s*direction)|(\b(they|she|he|it)\b)",
+            inner,
+        ):
+            return ""
+        return m.group(0)
+
+    out = re.sub(r"\*+([^*]+?)\*+", _ast_repl, out)
     out = re.sub(r"[ \t]+", " ", out)
     out = re.sub(r"\n{3,}", "\n\n", out)
     return out.strip()
@@ -1902,8 +3283,8 @@ def _sanitize_luna_reply(text: str) -> str:
     """Strip hallucinated preambles (wrong persona, inappropriate openings). Only for main chat."""
     if not text:
         return ""
-    if len(text) < 40:
-        return _strip_luna_narration_brackets(text.strip())
+    if len((text or "").strip()) < 2:
+        return _strip_luna_narration_brackets((text or "").strip())
     # Remove hidden/internal sections some models occasionally emit:
     # [Self-note], [Self-notice], [Internal], [Reasoning], etc.
     lines = text.replace("\r\n", "\n").split("\n")
@@ -1932,12 +3313,19 @@ def _sanitize_luna_reply(text: str) -> str:
         line = raw_line.strip()
         m = re.match(r"^\[([^\]]+)\]\s*(.*)$", line)
         if m:
+            raw_inner = (m.group(1) or "").strip()
             label = re.sub(r"[^a-z0-9]+", "", m.group(1).lower())
             tail = (m.group(2) or "").strip()
             if label in blocked_labels:
                 hide_block = True
                 continue
             if label in response_labels:
+                hide_block = False
+                if tail:
+                    cleaned.append(tail)
+                continue
+            # A single whitelisted word like [HAPPY] — not "[Luna looks away] narrative inside brackets"
+            if " " in raw_inner or len(raw_inner) > 20:
                 hide_block = False
                 if tail:
                     cleaned.append(tail)
@@ -1962,7 +3350,58 @@ def _sanitize_luna_reply(text: str) -> str:
                 rest = text[idx + len(sep):].strip()
                 if len(rest) > 15:
                     return _strip_luna_narration_brackets(rest)
-    return _strip_luna_narration_brackets(text)
+    # Hide leaked third-person framing from context injection.
+    # Example: "The user is playing ARAM..." -> remove opening and keep direct answer.
+    lead = text.lstrip()
+    lead_l = lead[:220].lower()
+    third_person_open = (
+        re.match(r"^(the\s+user|user|the\s+player|player|the\s+streamer|streamer)\b", lead_l) is not None
+        or re.match(r"^(he|she|they)\s+(is|are)\s+(currently\s+)?(playing|in|asking|saying|trying)\b", lead_l) is not None
+        or re.match(r"^(luna|the\s+assistant)\s+(is|looks|seems|says|does)\b", lead_l) is not None
+        or lead_l.startswith("based on the context")
+        or lead_l.startswith("from the context")
+        or lead_l.startswith("based on the snapshot")
+        or lead_l.startswith("from the snapshot")
+        or lead_l.startswith("based on the data")
+        or lead_l.startswith("from the data")
+        or lead_l.startswith("looking at the json")
+        or lead_l.startswith("according to the json")
+    )
+    if third_person_open:
+        for sep in (". ", "! ", "? ", "\n"):
+            idx = text.find(sep)
+            if 10 <= idx <= 240:
+                rest = text[idx + len(sep):].strip()
+                if len(rest) >= 12:
+                    text = rest
+                    break
+    out = _strip_luna_narration_brackets(text)
+    s = (out or "").strip()
+    if not s:
+        return "[NEUTRAL] I'm here — what's on your mind?"
+    # Drop only a bare emotion tag: "[HAPPY]" with no speech after
+    after_tag = re.sub(r"^\s*\[[A-Z][A-Z0-9_]{1,20}\]\s*", "", s, count=1).strip()
+    if not after_tag:
+        return "[NEUTRAL] I'm here — what's on your mind?"
+    # If opening is still self-narration after stripping blocks, keep only the first direct sentence after it.
+    after_tag_l = after_tag.lower()
+    self_narr_open = (
+        re.match(r"^(luna|the\s+assistant)\s+(is|looks|seems|says|does)\b", after_tag_l) is not None
+        or after_tag_l.startswith("as luna")
+        or after_tag_l.startswith("internally")
+    )
+    if self_narr_open:
+        for sep in (". ", "! ", "? ", "\n"):
+            idx = after_tag.find(sep)
+            if 10 <= idx <= 240:
+                rest = after_tag[idx + len(sep):].strip()
+                if len(rest) >= 8:
+                    # Preserve leading tag when present.
+                    mtag = re.match(r"^\s*(\[[A-Z][A-Z0-9_]{1,20}\])\s*", s)
+                    if mtag:
+                        return f"{mtag.group(1)} {rest}".strip()
+                    return rest
+    return out
 
 def _ollama_assistant_message_text(message: dict | None) -> str:
     """Extract visible assistant text from Ollama /api/chat `message` object.
@@ -1976,7 +3415,134 @@ def _ollama_assistant_message_text(message: dict | None) -> str:
     c = (message.get("content") or "").strip()
     if c:
         return c
-    return (message.get("thinking") or "").strip()
+    # Do not leak model "thinking" trace to users.
+    return ""
+
+
+def _run_with_model_guard(
+    *,
+    kind: str,
+    fn,
+    queue_wait_sec: int,
+    hard_timeout_sec: int | None,
+):
+    """Queue and guard long model calls so spikes do not pile up/hang."""
+    slots = _chat_call_slots if kind == "chat" else _vision_call_slots
+    if not slots.acquire(timeout=max(1, int(queue_wait_sec))):
+        raise TimeoutError(f"{kind}_queue_busy")
+    pool = None
+    fut = None
+    try:
+        if hard_timeout_sec is None:
+            return fn()
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"luna-{kind}")
+        fut = pool.submit(fn)
+        return fut.result(timeout=max(1, int(hard_timeout_sec)))
+    except concurrent.futures.TimeoutError as _e:
+        raise TimeoutError(f"{kind}_timeout") from _e
+    finally:
+        if fut is not None and not fut.done():
+            fut.cancel()
+        if pool is not None:
+            try:
+                pool.shutdown(wait=False, cancel_futures=True)
+            except Exception:
+                pass
+        try:
+            slots.release()
+        except Exception:
+            pass
+
+
+def _openai_compat_extract_text(content) -> str:
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        out: list[str] = []
+        for it in content:
+            if isinstance(it, dict):
+                if (it.get("type") or "") == "text":
+                    t = (it.get("text") or "").strip()
+                    if t:
+                        out.append(t)
+                elif "text" in it and isinstance(it.get("text"), str):
+                    t = it.get("text").strip()
+                    if t:
+                        out.append(t)
+        return " ".join(out).strip()
+    return ""
+
+
+def _openai_compat_chat_once(
+    *,
+    base_url: str,
+    api_key: str,
+    model: str,
+    messages: list[dict],
+    timeout: int,
+    compact: bool,
+) -> str:
+    if not api_key:
+        raise RuntimeError("Missing API key for selected provider.")
+    payload: dict = {"model": model, "messages": messages}
+    if compact:
+        payload["temperature"] = 0.75
+        payload["max_tokens"] = 768
+    body = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        f"{base_url}/chat/completions",
+        data=body,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        data = json.loads(r.read())
+    ch = (data.get("choices") or [])
+    msg0 = ((ch[0] or {}).get("message") or {}) if ch else {}
+    out = _openai_compat_extract_text(msg0.get("content"))
+    return out or "No reply."
+
+
+def _chat_provider_once(
+    msg: str,
+    system: str | None,
+    scope: str | None,
+    history: list | None,
+    model: str,
+    timeout: int | None = None,
+    *,
+    compact: bool = False,
+) -> str:
+    provider = (LUNA_CHAT_PROVIDER or "ollama").strip().lower()
+    to = timeout if timeout is not None else (180 if compact else 120)
+    if provider in ("ollama", "gguf"):
+        return _ollama_chat_once(msg, system, scope, history, model, timeout=to, compact=compact)
+    messages = _build_chat_messages(msg, system, scope, history, compact=compact)
+    if provider in ("openai", "openai_compat"):
+        use_model = (model or LUNA_OPENAI_CHAT_MODEL or OLLAMA_CHAT).strip()
+        return _openai_compat_chat_once(
+            base_url=LUNA_OPENAI_BASE_URL,
+            api_key=LUNA_OPENAI_API_KEY,
+            model=use_model,
+            messages=messages,
+            timeout=to,
+            compact=compact,
+        )
+    if provider == "groq":
+        use_model = (model or LUNA_GROQ_CHAT_MODEL or OLLAMA_CHAT).strip()
+        return _openai_compat_chat_once(
+            base_url=LUNA_GROQ_BASE_URL,
+            api_key=GROQ_API_KEY,
+            model=use_model,
+            messages=messages,
+            timeout=to,
+            compact=compact,
+        )
+    raise RuntimeError(f"Unsupported LUNA_CHAT_PROVIDER: {provider}")
+
 
 def _ollama_chat_once(
     msg: str,
@@ -2019,26 +3585,45 @@ def ollama_chat(
     timeout: int | None = None,
 ) -> str:
     use_model = (model or OLLAMA_MODEL).strip()
+    call_to = timeout if timeout is not None else (180 if compact else 120)
+    provider = (LUNA_CHAT_PROVIDER or "ollama").strip().lower()
     try:
-        raw = _ollama_chat_once(
-            msg, system, scope, history, use_model, timeout=timeout, compact=compact
+        raw = _run_with_model_guard(
+            kind="chat",
+            queue_wait_sec=_MODEL_CHAT_QUEUE_WAIT_SEC,
+            hard_timeout_sec=max(call_to + 8, _MODEL_CHAT_GUARD_TIMEOUT_SEC),
+            fn=lambda: _chat_provider_once(
+                msg, system, scope, history, use_model, timeout=call_to, compact=compact
+            ),
         )
         return _sanitize_luna_reply(raw)
     except Exception as primary_err:
-        if OLLAMA_FALLBACK and OLLAMA_FALLBACK != use_model:
+        if provider in ("ollama", "gguf") and OLLAMA_FALLBACK and OLLAMA_FALLBACK != use_model:
             try:
-                raw = _ollama_chat_once(
-                    msg,
-                    system,
-                    scope,
-                    history,
-                    OLLAMA_FALLBACK,
-                    timeout=timeout if timeout is not None else 90,
-                    compact=compact,
+                fb_to = timeout if timeout is not None else 90
+                raw = _run_with_model_guard(
+                    kind="chat",
+                    queue_wait_sec=_MODEL_CHAT_QUEUE_WAIT_SEC,
+                    hard_timeout_sec=max(fb_to + 8, _MODEL_CHAT_GUARD_TIMEOUT_SEC),
+                    fn=lambda: _chat_provider_once(
+                        msg,
+                        system,
+                        scope,
+                        history,
+                        OLLAMA_FALLBACK,
+                        timeout=fb_to,
+                        compact=compact,
+                    ),
                 )
                 return _sanitize_luna_reply(raw)
             except Exception:
                 pass
+        if isinstance(primary_err, TimeoutError):
+            em = str(primary_err or "")
+            if "queue_busy" in em:
+                return "Luna is busy with other requests right now. Try again in a few seconds."
+            if "timeout" in em:
+                return "Luna took too long to answer and was timed out. Try again."
         if isinstance(primary_err, urllib.error.URLError):
             return f"Ollama offline: {primary_err.reason}"
         return f"Error: {primary_err}"
@@ -2053,6 +3638,17 @@ def ollama_stream(
     compact: bool = False,
 ):
     """Yields content deltas as they stream from Ollama."""
+    provider = (LUNA_CHAT_PROVIDER or "ollama").strip().lower()
+    if provider not in ("ollama", "gguf"):
+        yield ollama_chat(
+            msg,
+            system=system,
+            scope=scope,
+            history=history,
+            model=model,
+            compact=compact,
+        )
+        return
     use_model = (model or OLLAMA_CHAT).strip()
     messages = _build_chat_messages(msg, system, scope, history, compact=compact)
     if _should_use_gguf_chat(use_model):
@@ -3009,7 +4605,9 @@ def _lol_observer_flags() -> dict:
 
 
 def _stream_solo_pick_mode(between_games: bool) -> str:
-    """Rotate solo stream segments: lore, LoL lobby, idle, VTuber-style bits, lurker shoutouts."""
+    """Rotate solo stream segments: lore, LoL lobby, idle, VTuber-style bits, lurker shoutouts, host takeover."""
+    if LUNA_STREAM_TAKEOVER and _stream_takeover_context_active() and random.random() < 0.30:
+        return "host_takeover"
     r = random.random()
     if between_games:
         if r < 0.20:
@@ -3105,6 +4703,14 @@ def _stream_solo_generate_line(mode: str, lore: dict) -> str:
             "Shout out the **lurkers** and the people just vibing without typing — welcoming, playful, not guilt-tripping. "
             "Include people who are chatting too so it stays one room."
         )
+    elif mode == "host_takeover":
+        prompt = (
+            f"{spoken_rules}\n\n"
+            "The **streamer is in the run** — on mic, in a match, in flow — and is **not actively chatting with you right now**. "
+            "You (Luna) are **filling the quiet** for the **live** room: short co-host energy, keep things warm, welcome lurkers, "
+            "hype the moment lightly, or react like you're watching with chat. **Do not** act like a replacement for the host — you're "
+            "**covering a beat** until they engage again. 2–4 short sentences, PG, natural spoken English."
+        )
     else:
         prompt = (
             f"{spoken_rules}\n\n"
@@ -3141,6 +4747,11 @@ def _stream_solo_generate_line(mode: str, lore: dict) -> str:
                 f"{spoken_rules}\n\n"
                 "Write ONE fresh line welcoming lurkers and typers together, warm and playful, PG."
             )
+        elif mode == "host_takeover":
+            retry_prompt = (
+                f"{spoken_rules}\n\n"
+                "Streamer is focused; you are co-hosting live. ONE fresh line to fill dead air — warm, PG, not generic."
+            )
         else:
             retry_prompt = (
                 f"{spoken_rules}\n\n"
@@ -3159,10 +4770,9 @@ def _stream_solo_generate_line(mode: str, lore: dict) -> str:
 
 def _stream_solo_banter_step() -> None:
     """Spoken solo lines (TTS to stream) + optional Twitch chat mirror; lore/idle/LoL lobby modes."""
-    global _last_user_activity
     if not _stream_solo_banter_env_on():
         return
-    if _stream_solo_require_stream_mode() and not _stream_mode_env_on():
+    if not _stream_solo_stream_mode_allows():
         return
     if not TWITCH_TTS and not _stream_solo_mirror_twitch_chat():
         return
@@ -3170,7 +4780,10 @@ def _stream_solo_banter_step() -> None:
     if _yt_watch_cowatch_active():
         return
     now = time.time()
-    if now - _last_user_activity < _stream_solo_idle_sec():
+    idle_ref = _last_user_activity
+    if LUNA_STREAM_TAKEOVER and LUNA_STREAM_TAKEOVER_STREAMER_IDLE:
+        idle_ref = _last_streamer_luna_at
+    if now - idle_ref < _stream_solo_idle_sec():
         return
     st = _load_json(_STREAM_SOLO_STATE_PATH, {})
     last_ts = float(st.get("last_line_ts") or 0)
@@ -3725,25 +5338,17 @@ def _describe_dashboard_screenshot(
         path = _capture_screenshot()
     if not path:
         return False, "Could not capture screen (mss unavailable or failed)."
-    if not OLLAMA_VISION_MODEL:
-        return False, "Set **OLLAMA_VISION_MODEL** (e.g. granite3.2-vision) in `.env` to read the screen."
+    if not _vision_provider_ready():
+        return False, "Vision provider is not configured. Set OLLAMA_VISION_MODEL (or provider API key/model vars) in `.env`."
     try:
         with open(path, "rb") as f:
-            img_b64 = base64.b64encode(f.read()).decode()
-        body = json.dumps({
-            "model": OLLAMA_VISION_MODEL,
-            "prompt": _DASHBOARD_VISION_PROMPT,
-            "images": [img_b64],
-            "stream": False,
-        }).encode()
-        req = urllib.request.Request(
-            f"{OLLAMA_BASE}/api/generate",
-            data=body,
-            headers={"Content-Type": "application/json"},
-            method="POST",
+            image_bytes = f.read()
+        vision_text = _vision_describe_image(
+            image_bytes,
+            prompt=_DASHBOARD_VISION_PROMPT,
+            timeout=120,
+            wait_for_lock=True,
         )
-        with urllib.request.urlopen(req, timeout=120) as r:
-            vision_text = (json.loads(r.read()).get("response") or "").strip()
         if not vision_text:
             return False, "Vision model returned nothing. Try maximizing the analytics window or zooming in."
         vision_text = vision_text[:4000]
@@ -3767,7 +5372,7 @@ def _describe_dashboard_screenshot(
             return True, f"📊 **Analytics from your screen**\n\n{snapshot}{footer}"
         return True, f"📊 **From your screen (vision only)**\n\n{vision_text[:2500]}{'…' if len(vision_text) > 2500 else ''}"
     except urllib.error.URLError as e:
-        return False, f"Cannot reach Ollama ({e.reason}). Is Ollama running?"
+        return False, f"Cannot reach vision endpoint ({e.reason}). Check provider connectivity."
     except Exception as e:
         return False, str(e)[:400]
 
@@ -4073,18 +5678,31 @@ async def _handle_wake_word_activation():
         wf.writeframes(b"".join(frames))
         wf.close()
         text = await asyncio.to_thread(_whisper_transcribe, path)
+        emo_meta = await asyncio.to_thread(_analyze_voice_clip_emotion, path, (text or ""))
         os.remove(path)
         if text and len(text.strip()) > 2:
             scope = LINKED_SCOPE or "web"
             tstrip = text.strip()
+            wake_input = tstrip
+            if isinstance(emo_meta, dict):
+                emo = str(emo_meta.get("emotion") or "neutral")
+                vol = str(emo_meta.get("volume") or "normal")
+                conf = emo_meta.get("model_confidence")
+                conf_txt = f", confidence {float(conf):.2f}" if conf is not None else ""
+                wake_input = (
+                    f"[Wake voice emotion]\n"
+                    f"Emotion: {emo}\n"
+                    f"Volume: {vol}{conf_txt}\n\n"
+                    f"{tstrip}"
+                )
             _cf = _chat_fast_enabled()
             system = _prepare_main_chat_system(
-                scope, tstrip, fast=_cf, force_stream_mode=_stream_mode_env_on()
+                scope, wake_input, fast=_cf, force_stream_mode=_stream_mode_env_on()
             )
             history = _compact_history(get_recent_conversation(scope, 20), fast=_cf)
             reply = await asyncio.to_thread(
                 lambda: ollama_chat(
-                    tstrip,
+                    wake_input,
                     system=system,
                     scope=scope,
                     history=history,
@@ -8772,6 +10390,98 @@ def _schedule_discord_vc_tts_reply(message: discord.Message, reply: str | None) 
         if bot.loop and bot.loop.is_running():
             bot.loop.create_task(_discord_vc_speak_reply_to_author(message, reply))
 
+_MAX_TTS_FILE_PARTS = 8
+
+
+async def _discord_post_tts_voice_files(
+    channel: discord.abc.Messageable, text: str, *, max_parts: int = _MAX_TTS_FILE_PARTS
+) -> bool:
+    """Post one or more MP3 attachments of *Luna speaking* `text` (her line), same TTS stack as VC/reminders."""
+    raw = (text or "").strip()
+    if not raw:
+        return False
+    tts_text = _expand_luna_expression_tags_for_tts(_clean_for_tts(raw))
+    if not tts_text:
+        return False
+    if len(tts_text) > 4000:
+        tts_text = tts_text[:4000] + " — truncated."
+    parts = _split_tts_paragraphs(tts_text, max_chars=450)
+    if not parts:
+        return False
+    sent = 0
+    for i, part in enumerate(parts):
+        if sent >= max_parts:
+            break
+        p = (part or "").strip()[:500]
+        if not p:
+            continue
+        mp3 = await asyncio.to_thread(_tts_bytes, p)
+        if not mp3:
+            continue
+        try:
+            await channel.send(
+                file=discord.File(io.BytesIO(mp3), filename=f"luna-voice-{sent + 1}.mp3")
+            )
+            sent += 1
+        except Exception as e:
+            print(f"[Luna] TTS file send failed: {e}", flush=True)
+    return sent > 0
+
+
+def _should_post_discord_tts_file_for_message(message: discord.Message) -> bool:
+    if isinstance(message.channel, discord.DMChannel) and _DISCORD_TTS_FILE_DM:
+        return True
+    if message.guild and _DISCORD_TTS_FILE_GUILD:
+        # If DISCORD_TTS_CHANNEL_IDS is empty, treat it as "all text channels in guilds".
+        if not _tts_channels:
+            return True
+        ch = message.channel
+        if ch and getattr(ch, "id", None) in _tts_channels:
+            return True
+        # Threads can inherit allow from their parent text channel.
+        parent_id = getattr(getattr(ch, "parent", None), "id", None)
+        if parent_id and parent_id in _tts_channels:
+            return True
+    return False
+
+
+async def _discord_file_tts_after_reply(message: discord.Message, reply: str) -> None:
+    if not (reply or "").strip() or reply == COMMAND_ONLY:
+        return
+    if not _should_post_discord_tts_file_for_message(message):
+        return
+    try:
+        await _discord_post_tts_voice_files(message.channel, reply)
+    except Exception:
+        pass
+
+
+def _schedule_discord_file_tts(message: discord.Message, reply: str | None) -> None:
+    if not reply or not isinstance(reply, str):
+        return
+    if not _should_post_discord_tts_file_for_message(message):
+        return
+    try:
+        asyncio.create_task(_discord_file_tts_after_reply(message, reply))
+    except RuntimeError:
+        if bot.loop and bot.loop.is_running():
+            bot.loop.create_task(_discord_file_tts_after_reply(message, reply))
+
+
+def _can_use_tts_exclaim_command(message: discord.Message) -> bool:
+    """!tts in DM, or in a server if linked / admin / DISCORD_TTS_CHANNEL_IDS channel."""
+    if isinstance(message.channel, discord.DMChannel):
+        return True
+    uid = message.author.id
+    if _linked_int and uid == _linked_int:
+        return True
+    if _admin_int and uid == _admin_int:
+        return True
+    if message.channel and message.channel.id in _tts_channels:
+        return True
+    return False
+
+
 def _play_tts_in_vc_sync(vc, text: str) -> None:
     """Generate TTS and play in Discord VC (run on bot loop from sync)."""
     tts_text = _clean_for_tts(text)
@@ -8804,6 +10514,858 @@ def _play_tts_in_vc_sync(vc, text: str) -> None:
             except Exception: pass
         try: os.unlink(path)
         except Exception: pass
+
+
+def _discord_attachment_looks_audio(att) -> bool:
+    """Heuristic: Discord voice clip / audio file attachment."""
+    try:
+        ctype = str(getattr(att, "content_type", "") or "").lower()
+        if ctype.startswith("audio/"):
+            return True
+        name = str(getattr(att, "filename", "") or "").lower()
+        if any(name.endswith(ext) for ext in (".ogg", ".opus", ".mp3", ".m4a", ".wav", ".webm", ".aac", ".flac", ".mp4")):
+            return True
+        if getattr(att, "duration", None) is not None:
+            return True
+    except Exception:
+        return False
+    return False
+
+
+_speechbrain_emotion_lock = threading.Lock()
+_speechbrain_emotion_model = None
+_speechbrain_emotion_failed = False
+
+
+def _load_speechbrain_emotion_model():
+    """Lazy-load SpeechBrain emotion classifier."""
+    global _speechbrain_emotion_model, _speechbrain_emotion_failed
+    if LUNA_VOICE_EMOTION_MODEL in ("", "off", "none", "0", "false", "no"):
+        return None
+    if LUNA_VOICE_EMOTION_MODEL != "speechbrain":
+        return None
+    with _speechbrain_emotion_lock:
+        if _speechbrain_emotion_model is not None:
+            return _speechbrain_emotion_model
+        if _speechbrain_emotion_failed:
+            return None
+        try:
+            from speechbrain.inference.interfaces import foreign_class  # type: ignore
+
+            savedir = os.path.join(_DATA, "models", "speechbrain_emotion")
+            os.makedirs(savedir, exist_ok=True)
+            _speechbrain_emotion_model = foreign_class(
+                source=LUNA_VOICE_EMOTION_MODEL_ID,
+                pymodule_file="custom_interface.py",
+                classname="CustomEncoderWav2vec2Classifier",
+                savedir=savedir,
+            )
+            return _speechbrain_emotion_model
+        except Exception as e:
+            _speechbrain_emotion_failed = True
+            if LUNA_CALL_DEBUG:
+                print(
+                    f"[CallDebug {datetime.now().strftime('%H:%M:%S')}] speechbrain_load_failed | err={str(e)[:220]}",
+                    flush=True,
+                )
+            return None
+
+
+def _speechbrain_emotion_predict(wav16_mono_path: str) -> dict | None:
+    """Return emotion from SpeechBrain model on normalized wav path."""
+    model = _load_speechbrain_emotion_model()
+    if model is None:
+        return None
+    try:
+        out = model.classify_file(wav16_mono_path)
+        raw_label = None
+        conf = None
+        if isinstance(out, tuple):
+            # Typical: (out_prob, score, index, text_lab)
+            if len(out) >= 2:
+                try:
+                    s = out[1]
+                    if hasattr(s, "item"):
+                        conf = float(s.item())
+                    elif isinstance(s, (list, tuple)) and s:
+                        conf = float(s[0])
+                    else:
+                        conf = float(s)
+                except Exception:
+                    conf = None
+            if len(out) >= 4:
+                raw_label = out[3]
+            elif len(out) >= 3:
+                raw_label = out[2]
+        else:
+            raw_label = out
+        # text label may be nested/tensor/list
+        if isinstance(raw_label, (list, tuple)) and raw_label:
+            raw_label = raw_label[0]
+        if hasattr(raw_label, "item"):
+            try:
+                raw_label = raw_label.item()
+            except Exception:
+                pass
+        if isinstance(raw_label, bytes):
+            raw_label = raw_label.decode("utf-8", "ignore")
+        label = str(raw_label or "").strip().lower()
+        label = re.sub(r"[^a-z_]", "", label)
+        # Common IEMOCAP labels -> app-friendly labels
+        map_label = {
+            "hap": "happy",
+            "happy": "happy",
+            "neu": "neutral",
+            "neutral": "neutral",
+            "ang": "angry",
+            "anger": "angry",
+            "angry": "angry",
+            "sad": "sad",
+            "fru": "frustrated",
+            "frustrated": "frustrated",
+            "exc": "excited",
+            "excited": "excited",
+            "sur": "surprised",
+            "fear": "fearful",
+            "fearful": "fearful",
+            "disgust": "disgusted",
+            "disgusted": "disgusted",
+        }
+        normalized = map_label.get(label, label or "neutral")
+        if conf is None:
+            conf = 0.0
+        return {
+            "model": LUNA_VOICE_EMOTION_MODEL_ID,
+            "model_raw_label": str(raw_label or ""),
+            "model_emotion": normalized,
+            "model_confidence": round(float(conf), 4),
+        }
+    except Exception as e:
+        if LUNA_CALL_DEBUG:
+            print(
+                f"[CallDebug {datetime.now().strftime('%H:%M:%S')}] speechbrain_predict_failed | err={str(e)[:220]}",
+                flush=True,
+            )
+        return None
+
+
+def _analyze_voice_clip_emotion(audio_path: str, transcript: str = "") -> dict | None:
+    """
+    Estimate speaker emotion from acoustic cues in a voice clip.
+    Uses volume, energy variation, voiced ratio, and tone roughness proxy (ZCR).
+    """
+    fd = wav_fd = None
+    wav_path = None
+    try:
+        wav_fd, wav_path = tempfile.mkstemp(suffix=".wav")
+        os.close(wav_fd)
+        wav_fd = None
+        if not _ffmpeg_to_wav16_mono_voice(audio_path, wav_path):
+            return None
+        with wave.open(wav_path, "rb") as w:
+            sr = int(w.getframerate() or 16000)
+            ch = int(w.getnchannels() or 1)
+            sw = int(w.getsampwidth() or 2)
+            if sw != 2:
+                return None
+            raw = w.readframes(w.getnframes())
+        if not raw or len(raw) < 400:
+            return None
+        if ch > 1:
+            # Keep first channel from interleaved PCM.
+            mono = bytearray(len(raw) // ch)
+            oi = 0
+            for i in range(0, len(raw) - (2 * ch) + 1, 2 * ch):
+                mono[oi:oi + 2] = raw[i:i + 2]
+                oi += 2
+            raw = bytes(mono[:oi])
+        frame_samples = max(1, int(sr * 0.025))  # 25ms
+        frame_bytes = frame_samples * 2
+        rms_vals: list[float] = []
+        zcr_vals: list[float] = []
+        for off in range(0, len(raw) - frame_bytes + 1, frame_bytes):
+            chunk = raw[off:off + frame_bytes]
+            rms = _call_pcm_rms(chunk)
+            rms_vals.append(rms)
+            # Zero crossing rate (tone/noisiness proxy).
+            prev = 0
+            crossings = 0
+            n = 0
+            for i in range(0, len(chunk) - 1, 2):
+                s = struct.unpack_from("<h", chunk, i)[0]
+                sign = 1 if s >= 0 else -1
+                if prev and sign != prev:
+                    crossings += 1
+                prev = sign
+                n += 1
+            zcr_vals.append(crossings / max(1, n))
+        if not rms_vals:
+            return None
+        avg_rms = sum(rms_vals) / len(rms_vals)
+        rms_var = (sum((x - avg_rms) ** 2 for x in rms_vals) / len(rms_vals)) ** 0.5
+        avg_zcr = sum(zcr_vals) / max(1, len(zcr_vals))
+        peak = 0
+        for i in range(0, len(raw) - 1, 2):
+            v = abs(struct.unpack_from("<h", raw, i)[0])
+            if v > peak:
+                peak = v
+        # Dynamic threshold based on floor/speech split.
+        srms = sorted(rms_vals)
+        p20 = srms[int(max(0, min(len(srms) - 1, round(0.20 * (len(srms) - 1)))))]
+        p80 = srms[int(max(0, min(len(srms) - 1, round(0.80 * (len(srms) - 1)))))]
+        voiced_thr = max(70.0, min(900.0, p20 + (p80 - p20) * 0.30))
+        voiced_ratio = sum(1 for x in rms_vals if x >= voiced_thr) / max(1, len(rms_vals))
+
+        if avg_rms < 120:
+            volume = "very quiet"
+        elif avg_rms < 320:
+            volume = "quiet"
+        elif avg_rms < 900:
+            volume = "normal"
+        elif avg_rms < 1900:
+            volume = "loud"
+        else:
+            volume = "very loud"
+
+        voice_emotion = "neutral"
+        if avg_rms > 1300 and (rms_var > 700 or avg_zcr > 0.11):
+            voice_emotion = "excited"
+        elif avg_rms > 900 and avg_zcr > 0.13:
+            voice_emotion = "tense"
+        elif avg_rms < 180 and voiced_ratio < 0.45:
+            voice_emotion = "sad"
+        elif avg_rms < 280 and rms_var < 170 and avg_zcr < 0.08:
+            voice_emotion = "calm"
+
+        # Blend with lexical emotion inference for better robustness.
+        text_emotion = _call_detect_emotion(transcript or "", avg_rms)
+        final_emotion = voice_emotion
+        if text_emotion in ("angry", "sad", "anxious", "happy", "excited"):
+            if voice_emotion in ("neutral", "calm") or text_emotion in ("angry", "excited"):
+                final_emotion = text_emotion
+        model_meta = _speechbrain_emotion_predict(wav_path)
+        if isinstance(model_meta, dict):
+            m_emo = str(model_meta.get("model_emotion") or "").strip().lower()
+            m_conf = float(model_meta.get("model_confidence") or 0.0)
+            # Prefer model when confidence is solid; keep heuristics as fallback.
+            if m_emo and m_conf >= LUNA_VOICE_EMOTION_MODEL_MIN_CONF:
+                final_emotion = m_emo
+        return {
+            "emotion": final_emotion,
+            "voice_emotion": voice_emotion,
+            "text_emotion": text_emotion,
+            "volume": volume,
+            "rms": round(avg_rms, 1),
+            "variation": round(rms_var, 1),
+            "zcr": round(avg_zcr, 4),
+            "voiced_ratio": round(voiced_ratio, 3),
+            "peak": int(peak),
+            **(model_meta or {}),
+        }
+    except Exception:
+        return None
+    finally:
+        try:
+            if wav_fd is not None:
+                os.close(wav_fd)
+        except Exception:
+            pass
+        try:
+            if wav_path and os.path.isfile(wav_path):
+                os.unlink(wav_path)
+        except Exception:
+            pass
+
+
+async def _discord_transcribe_voice_clip(message: discord.Message) -> tuple[str | None, bool, str | None, dict | None]:
+    """Transcribe first audio-like attachment from a Discord message."""
+    atts = list(getattr(message, "attachments", []) or [])
+    audio_atts = [a for a in atts if _discord_attachment_looks_audio(a)]
+    if not audio_atts:
+        return None, False, None, None
+    att = audio_atts[0]
+    in_fd = None
+    in_path = None
+    try:
+        ext = os.path.splitext(str(getattr(att, "filename", "") or ""))[1].strip() or ".ogg"
+        if len(ext) > 8 or not ext.startswith("."):
+            ext = ".ogg"
+        in_fd, in_path = tempfile.mkstemp(suffix=ext)
+        os.close(in_fd)
+        in_fd = None
+        await att.save(in_path)
+        if not os.path.isfile(in_path) or os.path.getsize(in_path) < 80:
+            return None, True, "Audio clip is empty or too short.", None
+        text = await asyncio.to_thread(_whisper_transcribe, in_path)
+        text = (text or "").strip()
+        if not text:
+            return None, True, "I could not transcribe that voice clip.", None
+        emo = await asyncio.to_thread(_analyze_voice_clip_emotion, in_path, text)
+        return text, True, None, emo
+    except Exception:
+        return None, True, "Voice clip transcription failed.", None
+    finally:
+        try:
+            if in_fd is not None:
+                os.close(in_fd)
+        except Exception:
+            pass
+        try:
+            if in_path and os.path.isfile(in_path):
+                os.unlink(in_path)
+        except Exception:
+            pass
+
+
+_silero_vad_lock = threading.Lock()
+_silero_vad_cached: tuple[object, object, object] | None = None  # (model, get_speech_timestamps, read_audio)
+_silero_vad_failed = False
+
+
+def _load_silero_vad_runtime() -> tuple[object, object, object] | None:
+    """Lazy-load Silero VAD runtime. Returns (model, get_speech_timestamps, read_audio)."""
+    global _silero_vad_cached, _silero_vad_failed
+    if not LUNA_CALL_USE_SILERO_VAD:
+        return None
+    with _silero_vad_lock:
+        if _silero_vad_cached is not None:
+            return _silero_vad_cached
+        if _silero_vad_failed:
+            return None
+        try:
+            from silero_vad import load_silero_vad, get_speech_timestamps, read_audio  # type: ignore
+
+            model = load_silero_vad()
+            _silero_vad_cached = (model, get_speech_timestamps, read_audio)
+            return _silero_vad_cached
+        except Exception:
+            _silero_vad_failed = True
+            return None
+
+
+def _call_silero_has_speech(wav_path: str) -> bool:
+    """Silero gate: True only if this chunk contains speech-like regions."""
+    rt = _load_silero_vad_runtime()
+    if rt is None:
+        # Fail-open if Silero unavailable so call mode still works.
+        return True
+    try:
+        model, get_speech_timestamps, read_audio = rt
+        wav = read_audio(wav_path, sampling_rate=16000)
+        ts = get_speech_timestamps(
+            wav,
+            model,
+            sampling_rate=16000,
+            return_seconds=True,
+            # Be slightly more permissive for Discord Voice Isolation/Krisp style denoising.
+            threshold=0.46,
+            min_speech_duration_ms=90,
+            min_silence_duration_ms=80,
+        )
+        if not ts:
+            return False
+        # Require a minimum total speech duration to reject tiny artifacts.
+        total = 0.0
+        for seg in ts:
+            try:
+                total += max(0.0, float(seg.get("end", 0.0)) - float(seg.get("start", 0.0)))
+            except Exception:
+                continue
+        return total >= 0.10
+    except Exception:
+        # Fail-open on runtime errors to avoid muting the call completely.
+        return True
+
+
+def _call_pcm_rms(pcm: bytes) -> float:
+    """Approx RMS from 16-bit PCM (sampled for speed)."""
+    if not pcm or len(pcm) < 2:
+        return 0.0
+    sample_count = len(pcm) // 2
+    step = max(1, sample_count // 5000)  # downsample for speed
+    acc = 0.0
+    n = 0
+    for i in range(0, sample_count, step):
+        try:
+            s = struct.unpack_from("<h", pcm, i * 2)[0]
+        except Exception:
+            continue
+        acc += float(s) * float(s)
+        n += 1
+    if n <= 0:
+        return 0.0
+    return (acc / n) ** 0.5
+
+
+def _call_volume_label(rms: float) -> str:
+    if rms < 220:
+        return "very quiet"
+    if rms < 650:
+        return "quiet"
+    if rms < 1600:
+        return "normal"
+    if rms < 3200:
+        return "loud"
+    return "very loud"
+
+
+def _call_detect_emotion(text: str, rms: float) -> str:
+    """Lightweight emotion heuristic for organizer context."""
+    t = (text or "").strip().lower()
+    if not t:
+        return "neutral"
+    joy = ("haha", "lol", "lmao", "great", "awesome", "love", "nice", "amazing", "excited")
+    anger = ("wtf", "stupid", "hate", "mad", "angry", "annoying", "idiot", "bullshit")
+    sad = ("sad", "tired", "depressed", "hurt", "upset", "lonely", "cry", "bad day")
+    anxious = ("worried", "anxious", "nervous", "stress", "scared", "panic")
+    if any(k in t for k in anger):
+        return "angry"
+    if any(k in t for k in sad):
+        return "sad"
+    if any(k in t for k in anxious):
+        return "anxious"
+    if any(k in t for k in joy):
+        return "happy"
+    if rms > 2500 and "!" in t:
+        return "excited"
+    if "?" in t and rms < 700:
+        return "uncertain"
+    return "neutral"
+
+
+def _call_is_natural_language(text: str, rms: float) -> bool:
+    """Gate VC transcriptions: ignore filler/noise and react only to natural language."""
+    t = " ".join((text or "").strip().split())
+    if len(t) < 6:
+        return False
+    words = re.findall(r"[A-Za-z0-9']+", t)
+    if not words:
+        return False
+    # Very short/filler-only utterances are usually noise for conversational turn-taking.
+    fillers = {
+        "uh", "um", "hmm", "hm", "mm", "mmm", "ah", "eh", "oh", "yo", "huh",
+        "uhh", "umm", "hmmm", "mmmh", "mmh",
+    }
+    if len(words) == 1 and words[0].lower() in fillers:
+        return False
+    # Need at least 2 words, or one meaningful long word.
+    if len(words) < 2 and not any(len(w) >= 5 for w in words):
+        return False
+    # Ensure this looks like language, not symbol/noise artifacts.
+    letters = sum(ch.isalpha() for ch in t)
+    alnum = sum(ch.isalnum() for ch in t)
+    if alnum <= 0:
+        return False
+    if letters / max(1, alnum) < 0.45:
+        return False
+    # Ultra-low energy + tiny token count = likely background/noise.
+    # Isolation/denoise can reduce energy sharply; avoid over-rejecting quiet speech.
+    if rms < 90 and len(words) < 3:
+        return False
+    # Repeated single-char transcriptions like "aaaaa", "mmmmmm"
+    if re.fullmatch(r"(?i)\s*([a-z])\1{3,}\s*", t):
+        return False
+    return True
+
+
+def _call_organizer_snapshot(speaker_state: dict[int, dict], focus_uid: int | None = None) -> str:
+    """Compact organizer context: who is in call + voice/emotion state."""
+    rows: list[str] = []
+    now = time.time()
+    ranked = sorted(speaker_state.items(), key=lambda kv: float(kv[1].get("last_ts") or 0.0), reverse=True)
+    for uid, st in ranked[:12]:
+        name = str(st.get("name") or f"user-{uid}")
+        emotion = str(st.get("emotion") or "neutral")
+        volume = str(st.get("volume_label") or "normal")
+        rms = float(st.get("rms") or 0.0)
+        words_per_sec = float(st.get("words_per_sec") or 0.0)
+        heard_sec = max(0.0, now - float(st.get("last_ts") or 0.0))
+        marker = " (current speaker)" if focus_uid is not None and uid == focus_uid else ""
+        rows.append(
+            f"- {name}{marker}: emotion={emotion}, volume={volume} (rms={rms:.0f}), "
+            f"pace={words_per_sec:.2f} w/s, last_heard={heard_sec:.1f}s ago"
+        )
+    if not rows:
+        return "No active speaker context yet."
+    return "Call organizer:\n" + "\n".join(rows)
+
+
+def _call_has_wake_phrase(text: str) -> bool:
+    t = " ".join((text or "").strip().lower().split())
+    if not t:
+        return False
+    t = re.sub(r"[^a-z0-9\s']", " ", t)
+    t = " ".join(t.split())
+    for phrase in LUNA_CALL_WAKE_PHRASES:
+        if not phrase:
+            continue
+        if phrase in t:
+            return True
+    # Fuzzy fallback for Whisper variants: "hey, luna", "heyluna", "hi luna?" etc.
+    compact = t.replace(" ", "")
+    if "luna" in compact:
+        if re.search(r"\b(hey|hi|yo|ok|okay)\s*luna\b", t):
+            return True
+        if any(k in compact for k in ("heyluna", "hiluna", "yoluna", "okluna", "okayluna")):
+            return True
+        # Allow direct address "luna" when utterance is short (typically wake-style).
+        words = re.findall(r"[a-z0-9']+", t)
+        if 1 <= len(words) <= 4:
+            return True
+    return False
+
+
+def _call_save_clip_wav(pcm: bytes, sample_rate: int, channels: int, sample_width: int, speaker_name: str) -> str | None:
+    """Persist a VC PCM segment as a WAV clip for wake-word interactions."""
+    if not pcm:
+        return None
+    safe_name = re.sub(r"[^a-zA-Z0-9._-]+", "_", (speaker_name or "speaker")).strip("_") or "speaker"
+    clips_dir = os.path.join(_DATA, "call_clips")
+    try:
+        os.makedirs(clips_dir, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        out_path = os.path.join(clips_dir, f"{stamp}_{safe_name}.wav")
+        with wave.open(out_path, "wb") as w:
+            w.setnchannels(channels)
+            w.setsampwidth(sample_width)
+            w.setframerate(sample_rate)
+            w.writeframes(pcm)
+        return out_path
+    except Exception:
+        return None
+
+
+def _pcm16_autogain_trim(pcm: bytes, channels: int, sample_rate: int) -> bytes:
+    """
+    Discord VC cleanup for STT:
+    - light auto-gain for low-level captures
+    - trim mostly-silent windows so Whisper focuses on voiced regions
+    """
+    if not pcm or channels <= 0 or sample_rate <= 0:
+        return pcm
+    try:
+        frame_ms = 20
+        samples_per_chan = int(sample_rate * frame_ms / 1000)
+        frame_samples = samples_per_chan * channels
+        frame_bytes = frame_samples * 2
+        if frame_bytes <= 0 or len(pcm) < frame_bytes:
+            return pcm
+
+        # Measure frame RMS to estimate silence floor and speech level.
+        frame_rms: list[float] = []
+        for off in range(0, len(pcm) - frame_bytes + 1, frame_bytes):
+            chunk = pcm[off: off + frame_bytes]
+            frame_rms.append(_call_pcm_rms(chunk))
+        if not frame_rms:
+            return pcm
+        s = sorted(frame_rms)
+        p20 = s[int(max(0, min(len(s) - 1, round(0.20 * (len(s) - 1)))))]
+        p80 = s[int(max(0, min(len(s) - 1, round(0.80 * (len(s) - 1)))))]
+        # Dynamic threshold anchored above floor but below speech.
+        thr = max(70.0, min(900.0, p20 + (p80 - p20) * 0.28))
+
+        voiced = bytearray()
+        max_abs = 1
+        for off in range(0, len(pcm) - frame_bytes + 1, frame_bytes):
+            chunk = pcm[off: off + frame_bytes]
+            if _call_pcm_rms(chunk) >= thr:
+                voiced.extend(chunk)
+                for i in range(0, len(chunk), 2):
+                    v = abs(struct.unpack_from("<h", chunk, i)[0])
+                    if v > max_abs:
+                        max_abs = v
+
+        # If thresholding removed everything, fall back to original.
+        base = bytes(voiced) if len(voiced) >= frame_bytes else pcm
+
+        # Auto gain (cap to avoid distortion).
+        target_peak = 14000.0
+        gain = max(1.0, min(8.0, target_peak / max(1.0, float(max_abs))))
+        if gain <= 1.05:
+            return base
+        out = bytearray(len(base))
+        for i in range(0, len(base) - 1, 2):
+            v = int(struct.unpack_from("<h", base, i)[0] * gain)
+            if v > 32767:
+                v = 32767
+            elif v < -32768:
+                v = -32768
+            struct.pack_into("<h", out, i, v)
+        return bytes(out)
+    except Exception:
+        return pcm
+
+
+def _call_dbg(event: str, **fields) -> None:
+    """Readable, structured terminal logs for Discord VC pipeline debugging."""
+    if not LUNA_CALL_DEBUG:
+        return
+    try:
+        ts = datetime.now().strftime("%H:%M:%S")
+        if fields:
+            parts = [f"{k}={fields[k]}" for k in sorted(fields)]
+            print(f"[CallDebug {ts}] {event} | " + ", ".join(parts), flush=True)
+        else:
+            print(f"[CallDebug {ts}] {event}", flush=True)
+    except Exception:
+        pass
+
+
+def _voice_recv_prepare_client():
+    """Import voice-recv and harden decoder/logging for corrupted Opus packets."""
+    try:
+        from discord.ext import voice_recv
+        VoiceRecvClient = voice_recv.VoiceRecvClient
+    except ImportError:
+        return None
+    # RTCP sender reports are control packets and noisy at INFO.
+    try:
+        logging.getLogger("discord.ext.voice_recv.reader").setLevel(logging.WARNING)
+    except Exception:
+        pass
+    # Guard router thread from Opus decode crashes.
+    try:
+        if not getattr(discord.opus.Decoder, "_luna_safe_decode_patch", False):
+            _orig_decode = discord.opus.Decoder.decode
+
+            def _safe_decode(self, data, fec=False):
+                try:
+                    return _orig_decode(self, data, fec=fec)
+                except discord.opus.OpusError:
+                    return b""
+
+            discord.opus.Decoder.decode = _safe_decode  # type: ignore[assignment]
+            setattr(discord.opus.Decoder, "_luna_safe_decode_patch", True)
+    except Exception:
+        pass
+    return VoiceRecvClient
+
+
+async def _discord_listen_once_transcribe(ctx) -> tuple[bool, str]:
+    """
+    One-shot VC listening flow for desktop users without Discord voice-message button.
+    Captures a single utterance from command author, transcribes it, and returns text.
+    """
+    if not getattr(ctx, "guild", None):
+        return False, "Use this in a server channel while you are in a voice channel."
+    member = getattr(ctx, "author", None)
+    if not member or not getattr(member, "voice", None) or not member.voice.channel:
+        return False, "Join a voice channel first, then run **!listen**."
+    target_channel = member.voice.channel
+    speaker_id = int(getattr(member, "id", 0) or 0)
+    if speaker_id <= 0:
+        return False, "Could not resolve your Discord user in VC."
+    VoiceRecvClient = _voice_recv_prepare_client()
+    if VoiceRecvClient is None:
+        return False, "Install `discord-ext-voice-recv` to use **!listen**."
+    from discord.ext import voice_recv
+
+    guild = ctx.guild
+    vc = guild.voice_client
+    try:
+        if vc and vc.is_connected() and getattr(vc, "channel", None) != target_channel:
+            await vc.move_to(target_channel)
+        elif not vc or not vc.is_connected():
+            vc = await target_channel.connect(cls=VoiceRecvClient, self_deaf=False, self_mute=False)
+        elif not isinstance(vc, VoiceRecvClient):
+            try:
+                await vc.disconnect(force=True)
+            except Exception:
+                pass
+            vc = await target_channel.connect(cls=VoiceRecvClient, self_deaf=False, self_mute=False)
+    except Exception as e:
+        return False, f"Voice connect failed: {e}"
+    if not vc or not vc.is_connected():
+        return False, "Could not connect to your voice channel."
+
+    try:
+        if hasattr(vc, "stop_listening"):
+            vc.stop_listening()
+    except Exception:
+        pass
+
+    buffer_lock = threading.Lock()
+    captured_chunks: list[bytes] = []
+    packet_sizes: list[int] = []
+    first_audio_ts = 0.0
+    last_audio_ts = 0.0
+    packets = 0
+    SAMPLE_RATE = 48000
+    CHANNELS = 2
+    SAMPLE_WIDTH = 2
+    min_chunk_bytes = int(SAMPLE_RATE * SAMPLE_WIDTH * 0.22)
+
+    class ListenSink(voice_recv.AudioSink):
+        def wants_opus(self):
+            return False
+
+        def write(self, user, data):
+            nonlocal first_audio_ts, last_audio_ts, packets
+            if not user or int(getattr(user, "id", 0) or 0) != speaker_id:
+                return
+            pcm = getattr(data, "pcm", None)
+            if not pcm:
+                return
+            now = time.time()
+            if first_audio_ts <= 0.0:
+                first_audio_ts = now
+            last_audio_ts = now
+            packets += 1
+            with buffer_lock:
+                captured_chunks.append(bytes(pcm))
+                if len(packet_sizes) < 120:
+                    packet_sizes.append(len(pcm))
+
+        def cleanup(self):
+            return
+
+    sink = ListenSink()
+    vc.listen(sink, after=lambda e: None)
+    _call_dbg("listen_once_armed", speaker=speaker_id, timeout=f"{LUNA_LISTEN_TIMEOUT_SEC:.1f}")
+    await ctx.reply("🎙 Listening now... say your message after this command.")
+
+    start_ts = time.time()
+    while time.time() - start_ts < LUNA_LISTEN_TIMEOUT_SEC:
+        await asyncio.sleep(0.2)
+        if first_audio_ts > 0.0:
+            silence = time.time() - last_audio_ts
+            spoke_for = time.time() - first_audio_ts
+            speech_span = max(0.0, last_audio_ts - first_audio_ts)
+            with buffer_lock:
+                total_bytes = len(b"".join(captured_chunks))
+            if (
+                total_bytes >= min_chunk_bytes
+                and packets >= LUNA_LISTEN_MIN_PACKETS
+                and speech_span >= LUNA_LISTEN_MIN_SPEECH_SEC
+                and silence >= LUNA_LISTEN_END_SILENCE_SEC
+            ):
+                _call_dbg(
+                    "listen_once_end",
+                    reason="silence",
+                    silence=f"{silence:.2f}",
+                    speech_span=f"{speech_span:.2f}",
+                    bytes=total_bytes,
+                    packets=packets,
+                )
+                break
+            if spoke_for >= LUNA_LISTEN_MAX_SEC:
+                _call_dbg("listen_once_end", reason="max_sec", spoke_for=f"{spoke_for:.2f}", bytes=total_bytes, packets=packets)
+                break
+
+    try:
+        if hasattr(vc, "stop_listening"):
+            vc.stop_listening()
+    except Exception:
+        pass
+
+    with buffer_lock:
+        pcm = b"".join(captured_chunks)
+        sizes_copy = list(packet_sizes)
+    if len(pcm) < min_chunk_bytes or packets < LUNA_LISTEN_MIN_PACKETS:
+        _call_dbg("listen_once_no_audio", bytes=len(pcm), packets=packets, min_packets=LUNA_LISTEN_MIN_PACKETS)
+        return False, "I didn't catch enough voice. Try **!listen** again and speak for 2-4 seconds."
+
+    fd = tmp_wav = None
+    tmp_mono = None
+    tmp_wav_alt = None
+    tmp_mono_alt = None
+    try:
+        pcm_clean = _pcm16_autogain_trim(pcm, CHANNELS, SAMPLE_RATE)
+        if pcm_clean and len(pcm_clean) > 0:
+            _call_dbg("listen_once_pcm_clean", in_bytes=len(pcm), out_bytes=len(pcm_clean))
+            pcm = pcm_clean
+        # voice_recv can output mono OR stereo depending on decoder transport.
+        # Infer channels from packet size to avoid corrupt WAV framing.
+        inferred_channels = 2
+        if sizes_copy:
+            avg_pkt = sum(sizes_copy) / max(1, len(sizes_copy))
+            if avg_pkt < 3000:
+                inferred_channels = 1
+        _call_dbg("listen_once_format", channels=inferred_channels, avg_packet_bytes=f"{(sum(sizes_copy)/max(1,len(sizes_copy)) if sizes_copy else 0):.1f}")
+        fd, tmp_wav = tempfile.mkstemp(suffix=".wav")
+        os.close(fd)
+        fd = None
+        with wave.open(tmp_wav, "wb") as w:
+            w.setnchannels(inferred_channels)
+            w.setsampwidth(SAMPLE_WIDTH)
+            w.setframerate(SAMPLE_RATE)
+            w.writeframes(pcm)
+        # Normalize to 16k mono for VAD/STT robustness on noisy PC captures.
+        fd2, tmp_mono = tempfile.mkstemp(suffix=".wav")
+        os.close(fd2)
+        if not await asyncio.to_thread(_ffmpeg_to_wav16_mono_voice, tmp_wav, tmp_mono):
+            try:
+                if os.path.isfile(tmp_mono):
+                    os.unlink(tmp_mono)
+            except Exception:
+                pass
+            tmp_mono = None
+        source_wav = tmp_mono or tmp_wav
+        # Hub-style recognition path: Whisper-first (no Silero hard gate).
+        _call_dbg("listen_once_hub_stt", bytes=len(pcm))
+        text = await asyncio.to_thread(_whisper_transcribe, source_wav)
+        transcript = (text or "").strip()
+        if not transcript:
+            # Retry 1: relaxed Whisper thresholds on same normalized audio.
+            _call_dbg("listen_once_retry_relaxed")
+            text_relaxed = await asyncio.to_thread(_whisper_transcribe_relaxed, source_wav)
+            transcript = (text_relaxed or "").strip()
+        if not transcript:
+            # Retry 2: alternate channel decode (mono<->stereo) then transcribe again.
+            alt_channels = 1 if inferred_channels == 2 else 2
+            _call_dbg("listen_once_retry_alt_channels", from_ch=inferred_channels, to_ch=alt_channels)
+            fd3, tmp_wav_alt = tempfile.mkstemp(suffix=".wav")
+            os.close(fd3)
+            with wave.open(tmp_wav_alt, "wb") as w:
+                w.setnchannels(alt_channels)
+                w.setsampwidth(SAMPLE_WIDTH)
+                w.setframerate(SAMPLE_RATE)
+                w.writeframes(pcm)
+            fd4, tmp_mono_alt = tempfile.mkstemp(suffix=".wav")
+            os.close(fd4)
+            if not await asyncio.to_thread(_ffmpeg_to_wav16_mono_voice, tmp_wav_alt, tmp_mono_alt):
+                try:
+                    if os.path.isfile(tmp_mono_alt):
+                        os.unlink(tmp_mono_alt)
+                except Exception:
+                    pass
+                tmp_mono_alt = None
+            alt_source = tmp_mono_alt or tmp_wav_alt
+            text_alt = await asyncio.to_thread(_whisper_transcribe_relaxed, alt_source)
+            transcript = (text_alt or "").strip()
+        if not transcript:
+            _call_dbg("listen_once_empty_transcript")
+            return False, "I heard audio but couldn't transcribe words. Try again clearly."
+        _call_dbg("listen_once_transcribed", chars=len(transcript), text=transcript[:120].replace("\n", " "))
+        return True, transcript
+    except Exception:
+        return False, "Listen capture failed."
+    finally:
+        try:
+            if fd is not None:
+                os.close(fd)
+        except Exception:
+            pass
+        try:
+            if tmp_wav and os.path.isfile(tmp_wav):
+                os.unlink(tmp_wav)
+        except Exception:
+            pass
+        try:
+            if tmp_mono and os.path.isfile(tmp_mono):
+                os.unlink(tmp_mono)
+        except Exception:
+            pass
+        try:
+            if tmp_wav_alt and os.path.isfile(tmp_wav_alt):
+                os.unlink(tmp_wav_alt)
+        except Exception:
+            pass
+        try:
+            if tmp_mono_alt and os.path.isfile(tmp_mono_alt):
+                os.unlink(tmp_mono_alt)
+        except Exception:
+            pass
 
 
 async def _run_discord_call_bot(ctx, contact: str) -> tuple[bool, str]:
@@ -8847,27 +11409,47 @@ async def _run_discord_call_bot(ctx, contact: str) -> tuple[bool, str]:
         name = getattr(target_user, "display_name", None) or getattr(target_user, "name", "user")
         return False, f"**{name}** is not in a voice channel on any shared server. Ask them to join one, then try **!call** again."
     # Use VoiceRecvClient if available for transcribe + TTS
-    try:
-        from discord.ext import voice_recv
-        VoiceRecvClient = voice_recv.VoiceRecvClient
-    except ImportError:
-        VoiceRecvClient = None
+    VoiceRecvClient = _voice_recv_prepare_client()
     if VoiceRecvClient is None:
         try:
-            await target_channel.connect()
+            await target_channel.connect(self_deaf=False, self_mute=False)
             name = getattr(target_user, "display_name", None) or getattr(target_user, "name", "user")
             await ctx.reply(f"Joined **{target_channel.name}** with **{name}**. Install `discord-ext-voice-recv` for transcribe + TTS.")
         except Exception as e:
             return False, str(e)
         return True, ""
+    from discord.ext import voice_recv
     # Connect with voice receive
     try:
-        vc = await target_channel.connect(cls=VoiceRecvClient)
+        vc = await target_channel.connect(cls=VoiceRecvClient, self_deaf=False, self_mute=False)
     except Exception as e:
         return False, f"Failed to join voice: {e}"
-    # Sink that buffers target user's PCM and triggers transcribe → Ollama → TTS
-    import wave
-    buffer: list[bytes] = []
+    _call_dbg(
+        "vc_joined",
+        channel=getattr(target_channel, "name", "unknown"),
+        guild=getattr(getattr(target_channel, "guild", None), "name", "unknown"),
+        silero=int(LUNA_CALL_USE_SILERO_VAD),
+        wake_mode=int(LUNA_CALL_WAKE_MODE),
+        wake_arm_sec=f"{LUNA_CALL_WAKE_ARM_SEC:.1f}",
+        reply_silence_sec=f"{LUNA_CALL_REPLY_SILENCE_SEC:.2f}",
+        max_segment_sec=f"{LUNA_CALL_MAX_SEGMENT_SEC:.2f}",
+    )
+    # Sink that buffers all non-bot speakers in the call and runs organizer analysis per speaker.
+    speaker_buffers: dict[int, list[bytes]] = {}
+    speaker_state: dict[int, dict] = {}
+    speaker_last_reply_ts: dict[int, float] = {}
+    speaker_last_notice_ts: dict[int, float] = {}
+    speaker_wake_until_ts: dict[int, float] = {}
+    last_voice_packet_ts = time.time()
+    last_noaudio_warn_ts = 0.0
+    last_stats_log_ts = 0.0
+    first_audio_notice_sent = False
+    packets_in = 0
+    pcm_bytes_in = 0
+    segments_flushed = 0
+    segments_vad_reject = 0
+    segments_nl_reject = 0
+    replies_sent = 0
     buffer_lock = threading.Lock()
     stop_event = threading.Event()
     SAMPLE_RATE = 48000
@@ -8878,11 +11460,38 @@ async def _run_discord_call_bot(ctx, contact: str) -> tuple[bool, str]:
         def wants_opus(self):
             return False
         def write(self, user, data):
-            if user and getattr(user, "id", None) == target_user.id and data:
-                pcm = getattr(data, "pcm", None)
-                if pcm is not None:
-                    with buffer_lock:
-                        buffer.append(bytes(pcm))
+            if not user or getattr(user, "bot", False) or not data:
+                return
+            pcm = getattr(data, "pcm", None)
+            if pcm is None:
+                return
+            if len(pcm) <= 0:
+                return
+            uid = int(getattr(user, "id", 0) or 0)
+            if uid <= 0:
+                return
+            nonlocal last_voice_packet_ts
+            nonlocal first_audio_notice_sent
+            nonlocal packets_in, pcm_bytes_in
+            last_voice_packet_ts = time.time()
+            packets_in += 1
+            pcm_bytes_in += len(pcm)
+            with buffer_lock:
+                speaker_buffers.setdefault(uid, []).append(bytes(pcm))
+                st = speaker_state.setdefault(uid, {})
+                st["name"] = getattr(user, "display_name", None) or getattr(user, "name", f"user-{uid}")
+                if not st.get("segment_start_ts"):
+                    st["segment_start_ts"] = time.time()
+                st["last_ts"] = time.time()
+            if not first_audio_notice_sent:
+                first_audio_notice_sent = True
+                try:
+                    bot.loop.create_task(
+                        ctx.reply("✅ Receiving decoded voice audio (PCM) from VC.")
+                    )
+                except Exception:
+                    pass
+                _call_dbg("first_pcm_received", speaker=uid, pcm_bytes=len(pcm))
         def cleanup(self):
             stop_event.set()
 
@@ -8890,43 +11499,246 @@ async def _run_discord_call_bot(ctx, contact: str) -> tuple[bool, str]:
     vc.listen(sink, after=lambda e: stop_event.set())
 
     async def processor_loop():
-        nonlocal buffer
+        nonlocal last_noaudio_warn_ts
+        nonlocal last_stats_log_ts
+        nonlocal segments_flushed, segments_vad_reject, segments_nl_reject, replies_sent
+        # Use a lower threshold so short speech bursts still get processed.
+        # Voice-recv may produce mono or stereo PCM depending on transport/decoder behavior.
+        # Isolation often trims phoneme edges; accept shorter chunks to preserve intent.
+        min_chunk_bytes = int(SAMPLE_RATE * SAMPLE_WIDTH * 0.24)  # ~240ms in mono baseline
+        _call_dbg(
+            "processor_loop_started",
+            min_chunk_bytes=min_chunk_bytes,
+            wake_mode=int(LUNA_CALL_WAKE_MODE),
+            wake_phrases="|".join(LUNA_CALL_WAKE_PHRASES[:5]),
+        )
         while not stop_event.is_set() and vc.is_connected():
             await asyncio.sleep(1.0)
             if stop_event.is_set():
                 break
+            now_loop = time.time()
+            if now_loop - last_stats_log_ts >= LUNA_CALL_DEBUG_STATS_SEC:
+                last_stats_log_ts = now_loop
+                with buffer_lock:
+                    active_speakers = len(speaker_buffers)
+                    queued_bytes = sum(len(b"".join(chunks)) for chunks in speaker_buffers.values() if chunks)
+                _call_dbg(
+                    "stats",
+                    active_speakers=active_speakers,
+                    queued_bytes=queued_bytes,
+                    packets_in=packets_in,
+                    pcm_kb=f"{pcm_bytes_in/1024.0:.1f}",
+                    flushed=segments_flushed,
+                    vad_reject=segments_vad_reject,
+                    nl_reject=segments_nl_reject,
+                    replies_sent=replies_sent,
+                )
+            if now_loop - last_voice_packet_ts > 8.0 and now_loop - last_noaudio_warn_ts > 15.0:
+                last_noaudio_warn_ts = now_loop
+                _call_dbg("no_audio_packets_timeout", seconds_since_last=f"{now_loop - last_voice_packet_ts:.1f}")
+                try:
+                    await ctx.reply(
+                        "⚠ I joined VC but I am not receiving voice audio packets yet. "
+                        "Please check mic mute/voice activity and speak for 2-3 seconds."
+                    )
+                except Exception:
+                    pass
             with buffer_lock:
-                if not buffer:
+                if not speaker_buffers:
                     continue
-                chunks = b"".join(buffer)
-                buffer.clear()
-            if len(chunks) < SAMPLE_RATE * SAMPLE_WIDTH * CHANNELS:  # < 1 sec
-                continue
-            tmp = None
-            try:
-                fd, wav_path = tempfile.mkstemp(suffix=".wav")
-                os.close(fd)
-                tmp = wav_path
-                with wave.open(wav_path, "wb") as w:
-                    w.setnchannels(CHANNELS)
-                    w.setsampwidth(SAMPLE_WIDTH)
-                    w.setframerate(SAMPLE_RATE)
-                    w.writeframes(chunks)
-                text_in = await asyncio.to_thread(_whisper_transcribe, wav_path)
-                if text_in and text_in.strip():
-                    reply = await asyncio.to_thread(ollama_chat, text_in.strip())
+                pending: list[tuple[int, bytes]] = []
+                for uid, chunks in list(speaker_buffers.items()):
+                    if not chunks:
+                        continue
+                    joined = b"".join(chunks)
+                    st = speaker_state.setdefault(uid, {})
+                    last_ts = float(st.get("last_ts", 0.0) or 0.0)
+                    seg_start_ts = float(st.get("segment_start_ts", last_ts) or last_ts or now_loop)
+                    silence_elapsed = max(0.0, now_loop - last_ts)
+                    segment_elapsed = max(0.0, now_loop - seg_start_ts)
+                    # Keep accumulating sub-second speech instead of dropping it each loop.
+                    if len(joined) < min_chunk_bytes:
+                        continue
+                    # Reply only after speaker has paused for a brief timeout.
+                    # If speech is continuous for too long, force a flush as a safety cap.
+                    if (
+                        silence_elapsed < LUNA_CALL_REPLY_SILENCE_SEC
+                        and segment_elapsed < LUNA_CALL_MAX_SEGMENT_SEC
+                    ):
+                        continue
+                    flush_reason = "silence_timeout" if silence_elapsed >= LUNA_CALL_REPLY_SILENCE_SEC else "max_segment"
+                    pending.append((uid, joined))
+                    speaker_buffers[uid] = []
+                    st["segment_start_ts"] = 0.0
+                    segments_flushed += 1
+                    _call_dbg(
+                        "segment_flushed",
+                        speaker=uid,
+                        bytes=len(joined),
+                        reason=flush_reason,
+                        silence_sec=f"{silence_elapsed:.2f}",
+                        segment_sec=f"{segment_elapsed:.2f}",
+                    )
+            for uid, chunks in pending:
+                if len(chunks) < min_chunk_bytes:
+                    continue
+                tmp = None
+                try:
+                    fd, wav_path = tempfile.mkstemp(suffix=".wav")
+                    os.close(fd)
+                    tmp = wav_path
+                    with wave.open(wav_path, "wb") as w:
+                        w.setnchannels(CHANNELS)
+                        w.setsampwidth(SAMPLE_WIDTH)
+                        w.setframerate(SAMPLE_RATE)
+                        w.writeframes(chunks)
+                    has_speech = await asyncio.to_thread(_call_silero_has_speech, wav_path)
+                    _call_dbg("silero_gate", speaker=uid, pass_gate=int(has_speech), bytes=len(chunks))
+                    if not has_speech:
+                        segments_vad_reject += 1
+                        continue
+                    text_in = await asyncio.to_thread(_whisper_transcribe, wav_path)
+                    if not text_in or not text_in.strip():
+                        _call_dbg("whisper_empty", speaker=uid)
+                        continue
+
+                    transcript = text_in.strip()
+                    with buffer_lock:
+                        st = speaker_state.setdefault(uid, {})
+                        speaker_name = str(st.get("name") or f"user-{uid}")
+                    _call_dbg("transcribed", speaker=speaker_name, chars=len(transcript), text=transcript[:110].replace("\n", " "))
+                    # Always show raw transcription so VC tests can verify STT end-to-end.
+                    try:
+                        await ctx.reply(f"📝 Transcribed **{speaker_name}**: {transcript[:180]}")
+                    except Exception:
+                        pass
+                    now_ts = time.time()
+                    wake_hit = _call_has_wake_phrase(transcript)
+                    wake_armed = now_ts <= float(speaker_wake_until_ts.get(uid, 0.0))
+                    if LUNA_CALL_WAKE_MODE:
+                        if wake_hit:
+                            speaker_wake_until_ts[uid] = now_ts + LUNA_CALL_WAKE_ARM_SEC
+                            wake_armed = True
+                            _call_dbg("wake_detected", speaker=speaker_name, arm_sec=f"{LUNA_CALL_WAKE_ARM_SEC:.1f}")
+                            try:
+                                await ctx.reply(f"🎙 Wake phrase detected from **{speaker_name}**. Recording a clip.")
+                            except Exception:
+                                pass
+                        if not wake_armed:
+                            _call_dbg("wake_gate_skip", speaker=speaker_name)
+                            continue
+                        clip_path = _call_save_clip_wav(chunks, SAMPLE_RATE, CHANNELS, SAMPLE_WIDTH, speaker_name)
+                        if clip_path:
+                            _call_dbg("clip_saved", speaker=speaker_name, path=clip_path)
+                            try:
+                                await ctx.reply(f"📼 Saved wake clip: `{os.path.basename(clip_path)}`")
+                            except Exception:
+                                pass
+                    rms = _call_pcm_rms(chunks)
+                    natural = _call_is_natural_language(transcript, rms)
+                    _call_dbg("language_gate", speaker=speaker_name, pass_gate=int(natural), rms=f"{rms:.0f}")
+                    if not natural:
+                        segments_nl_reject += 1
+                        try:
+                            await ctx.reply("🔇 Ignored for reply (not natural-language speech).")
+                        except Exception:
+                            pass
+                        continue
+                    volume_label = _call_volume_label(rms)
+                    dur_sec = max(0.01, len(chunks) / float(SAMPLE_RATE * SAMPLE_WIDTH * CHANNELS))
+                    words = len(re.findall(r"[A-Za-z0-9']+", transcript))
+                    words_per_sec = words / dur_sec
+                    emotion = _call_detect_emotion(transcript, rms)
+                    emo_meta = await asyncio.to_thread(_analyze_voice_clip_emotion, wav_path, transcript)
+                    model_conf = None
+                    model_name = None
+                    if isinstance(emo_meta, dict):
+                        emotion = str(emo_meta.get("emotion") or emotion)
+                        volume_label = str(emo_meta.get("volume") or volume_label)
+                        model_conf = emo_meta.get("model_confidence")
+                        model_name = emo_meta.get("model")
+
+                    with buffer_lock:
+                        st = speaker_state.setdefault(uid, {})
+                        st["rms"] = rms
+                        st["volume_label"] = volume_label
+                        st["emotion"] = emotion
+                        st["words_per_sec"] = words_per_sec
+                        st["last_ts"] = time.time()
+                        organizer_ctx = _call_organizer_snapshot(speaker_state, focus_uid=uid)
+                    # Hearing notice in text channel (throttled), so testing in VC shows live detection.
+                    now_notice = time.time()
+                    if now_notice - float(speaker_last_notice_ts.get(uid, 0.0)) >= 3.0:
+                        speaker_last_notice_ts[uid] = now_notice
+                        try:
+                            await ctx.reply(
+                                f"👂 Heard **{speaker_name}** ({volume_label}, {emotion}): "
+                                f"{transcript[:120]}"
+                            )
+                        except Exception:
+                            pass
+
+                    # Prevent spamming replies from one speaker nonstop.
+                    if now_ts - float(speaker_last_reply_ts.get(uid, 0.0)) < 2.4:
+                        _call_dbg("reply_throttled", speaker=speaker_name, cooldown_left=f"{2.4 - (now_ts - float(speaker_last_reply_ts.get(uid, 0.0))):.2f}")
+                        continue
+                    speaker_last_reply_ts[uid] = now_ts
+
+                    emotion_meta_lines = ""
+                    if model_conf is not None:
+                        emotion_meta_lines += f"Emotion model confidence: {float(model_conf):.2f}\n"
+                    if model_name:
+                        emotion_meta_lines += f"Emotion model: {model_name}\n"
+                    prompt = (
+                        f"[Discord call speaker]\n"
+                        f"Speaker: {speaker_name}\n"
+                        f"Transcript: {transcript}\n"
+                        f"Detected volume: {volume_label} (rms {rms:.0f})\n"
+                        f"Detected emotion: {emotion}\n"
+                        f"{emotion_meta_lines}"
+                        f"Speech pace: {words_per_sec:.2f} words/sec\n\n"
+                        f"{organizer_ctx}\n\n"
+                        "Respond naturally to the current speaker in 1-2 short spoken sentences. "
+                        "Use the organizer context to avoid confusion about who is speaking and their emotional tone."
+                    )
+                    reply = await asyncio.to_thread(
+                        ollama_chat,
+                        prompt,
+                        "You are Luna in a live multi-person Discord call. Keep replies concise, socially aware, and context-sensitive.",
+                    )
                     if reply and reply.strip():
+                        _call_dbg("reply_tts_start", speaker=speaker_name, chars=len(reply.strip()))
                         await asyncio.to_thread(_play_tts_in_vc_sync, vc, reply.strip())
-            except Exception:
-                pass
-            finally:
-                if tmp and os.path.isfile(tmp):
-                    try: os.unlink(tmp)
-                    except Exception: pass
+                        replies_sent += 1
+                        if LUNA_CALL_WAKE_MODE:
+                            speaker_wake_until_ts[uid] = 0.0
+                        _call_dbg("reply_tts_done", speaker=speaker_name)
+                except Exception:
+                    _call_dbg("processor_exception", speaker=uid)
+                    pass
+                finally:
+                    if tmp and os.path.isfile(tmp):
+                        try: os.unlink(tmp)
+                        except Exception: pass
 
     asyncio.create_task(processor_loop())
-    name = getattr(target_user, "display_name", None) or getattr(target_user, "name", "user")
-    await ctx.reply(f"In call with **{name}** — listening; I'll transcribe and answer with voice. Say **!leave** when done.")
+    try:
+        with _call_session_lock:
+            global _call_session
+            _call_session = {
+                "guild_id": int(getattr(target_channel.guild, "id", 0) or 0),
+                "channel_id": int(getattr(target_channel, "id", 0) or 0),
+                "started_at": time.time(),
+                "mode": "multi_speaker_organizer",
+            }
+    except Exception:
+        pass
+    await ctx.reply(
+        f"In call on **{target_channel.name}** — listening to everyone in channel.\n"
+        f"Organizer enabled: per-speaker transcript + volume + emotion context.\n"
+        f"Speech gate: **{'Silero VAD' if LUNA_CALL_USE_SILERO_VAD else 'heuristic only'}**.\n"
+        f"Wake mode: **{'on' if LUNA_CALL_WAKE_MODE else 'off'}** (phrase: `hey luna`)."
+    )
     return True, ""
 
 
@@ -9366,23 +12178,10 @@ _camera_lock = threading.Lock()
 _vision_infer_lock = threading.Lock()
 _vision_last_error = ""
 
-def _vision_describe_image(
-    image_bytes: bytes,
-    prompt: str = "Describe briefly what you see in this image. One or two sentences. Be concise. Only describe what is actually visible. Do not invent or hallucinate.",
-    *,
-    timeout: int | None = None,
-    wait_for_lock: bool = True,
-) -> str:
-    """Call Ollama vision model (e.g. Granite 3.2 Vision) with the image. Returns description or empty if unavailable."""
-    global _vision_last_error
-    if not OLLAMA_VISION_MODEL or not image_bytes:
-        return ""
-    lock_acquired = False
-    try:
-        lock_acquired = _vision_infer_lock.acquire(blocking=wait_for_lock)
-        if not lock_acquired:
-            _vision_last_error = "vision_busy"
-            return ""
+
+def _vision_provider_describe_image_once(image_bytes: bytes, prompt: str, timeout: int) -> dict:
+    provider = (LUNA_VISION_PROVIDER or "ollama").strip().lower()
+    if provider in ("ollama", "gguf"):
         b64 = base64.b64encode(image_bytes).decode("ascii")
         body = json.dumps({
             "model": OLLAMA_VISION_MODEL,
@@ -9396,11 +12195,107 @@ def _vision_describe_image(
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        with urllib.request.urlopen(req, timeout=(timeout or OLLAMA_VISION_TIMEOUT)) as r:
-            data = json.loads(r.read())
-        out = (data.get("response") or "").strip()
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read())
+
+    if provider in ("openai", "openai_compat", "groq"):
+        if provider == "groq":
+            base_url = LUNA_GROQ_BASE_URL
+            api_key = GROQ_API_KEY
+            model = (LUNA_GROQ_CHAT_MODEL or OLLAMA_CHAT).strip()
+        else:
+            base_url = LUNA_OPENAI_BASE_URL
+            api_key = LUNA_OPENAI_API_KEY
+            model = (LUNA_OPENAI_VISION_MODEL or LUNA_OPENAI_CHAT_MODEL or OLLAMA_CHAT).strip()
+        if not api_key:
+            raise RuntimeError("Missing API key for selected vision provider.")
+        b64 = base64.b64encode(image_bytes).decode("ascii")
+        payload = {
+            "model": model,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+                    ],
+                }
+            ],
+        }
+        req = urllib.request.Request(
+            f"{base_url}/chat/completions",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {api_key}",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read())
+    raise RuntimeError(f"Unsupported LUNA_VISION_PROVIDER: {provider}")
+
+
+def _vision_provider_extract_text(data: dict) -> str:
+    provider = (LUNA_VISION_PROVIDER or "ollama").strip().lower()
+    if provider in ("ollama", "gguf"):
+        return (data.get("response") or "").strip()
+    if provider in ("openai", "openai_compat", "groq"):
+        ch = (data.get("choices") or [])
+        msg0 = ((ch[0] or {}).get("message") or {}) if ch else {}
+        return _openai_compat_extract_text(msg0.get("content"))
+    return ""
+
+
+def _vision_provider_ready() -> bool:
+    provider = (LUNA_VISION_PROVIDER or "ollama").strip().lower()
+    if provider in ("ollama", "gguf"):
+        return bool((OLLAMA_VISION_MODEL or "").strip())
+    if provider in ("openai", "openai_compat"):
+        return bool((LUNA_OPENAI_API_KEY or "").strip())
+    if provider == "groq":
+        return bool((GROQ_API_KEY or "").strip())
+    return False
+
+
+def _vision_describe_image(
+    image_bytes: bytes,
+    prompt: str = "Describe briefly what you see in this image. One or two sentences. Be concise. Only describe what is actually visible. Do not invent or hallucinate.",
+    *,
+    timeout: int | None = None,
+    wait_for_lock: bool = True,
+) -> str:
+    """Call the configured vision provider with image input. Returns description or empty."""
+    global _vision_last_error
+    if not image_bytes:
+        return ""
+    provider = (LUNA_VISION_PROVIDER or "ollama").strip().lower()
+    if provider in ("ollama", "gguf") and not OLLAMA_VISION_MODEL:
+        return ""
+    lock_acquired = False
+    try:
+        wait_for = _MODEL_VISION_QUEUE_WAIT_SEC if wait_for_lock else 0
+        lock_acquired = _vision_infer_lock.acquire(timeout=wait_for)
+        if not lock_acquired:
+            _vision_last_error = "vision_busy"
+            return ""
+        req_to = int(timeout or OLLAMA_VISION_TIMEOUT)
+
+        def _do_vision_call():
+            return _vision_provider_describe_image_once(image_bytes, prompt, req_to)
+
+        data = _run_with_model_guard(
+            kind="vision",
+            queue_wait_sec=_MODEL_VISION_QUEUE_WAIT_SEC,
+            hard_timeout_sec=max(req_to + 8, _MODEL_VISION_GUARD_TIMEOUT_SEC),
+            fn=_do_vision_call,
+        )
+        out = (_vision_provider_extract_text(data) or "").strip()
         _vision_last_error = ""
         return out[:600] if out else ""
+    except TimeoutError as e:
+        _vision_last_error = str(e)[:200]
+        return ""
     except Exception as e:
         _vision_last_error = str(e)[:200]
         return ""
@@ -9426,7 +12321,7 @@ Optional second line: up to 8 words describing what you saw."""
 
 def _vision_screen_has_captcha(image_bytes: bytes) -> tuple[bool, str]:
     """Granite (OLLAMA_VISION_MODEL) classifies viewport screenshot. Returns (present, short note)."""
-    if not OLLAMA_VISION_MODEL or not image_bytes:
+    if not _vision_provider_ready() or not image_bytes:
         return False, ""
     raw = _vision_describe_image(image_bytes, prompt=_CAPTCHA_VISION_PROMPT, timeout=55)
     first = (raw.split("\n")[0] or "").strip().upper()
@@ -9458,7 +12353,7 @@ def _captcha_observer_enabled() -> bool:
 
 def _playwright_granite_captcha_observer(page) -> tuple[bool, str]:
     """Take a viewport screenshot and ask Granite if a CAPTCHA/challenge is visible."""
-    if not _captcha_observer_enabled() or not OLLAMA_VISION_MODEL:
+    if not _captcha_observer_enabled() or not _vision_provider_ready():
         return False, ""
     try:
         shot = page.screenshot(type="jpeg", quality=78, full_page=False, timeout=20000)
@@ -9470,8 +12365,8 @@ def _playwright_granite_captcha_observer(page) -> tuple[bool, str]:
 
 def _camera_chat_turn(message: str, image_bytes: bytes | None) -> tuple[bool, str]:
     """One turn in the camera view chat (separate thread with Granite vision model). Returns (ok, reply)."""
-    if not OLLAMA_VISION_MODEL:
-        return False, "No vision model configured. Set OLLAMA_VISION_MODEL (e.g. granite3.2-vision) in .env."
+    if not _vision_provider_ready():
+        return False, "No vision provider configured. Set OLLAMA_VISION_MODEL or provider API key/model in .env."
     with _camera_chat_lock:
         img = image_bytes or _camera_last_image_bytes
     if not img:
@@ -9498,7 +12393,7 @@ def _camera_chat_turn(message: str, image_bytes: bytes | None) -> tuple[bool, st
             elif "vision_busy" in em:
                 reply = "Vision is busy processing another frame. Try again in a moment."
             else:
-                reply = f"{OLLAMA_VISION_MODEL} returned no image reply. Try again."
+                reply = "Vision provider returned no image reply. Try again."
         with _camera_chat_lock:
             _camera_chat_history.append({"role": "assistant", "content": reply})
         return True, reply
@@ -9514,8 +12409,8 @@ def _process_camera_frame(image_bytes: bytes) -> dict:
     if not image_bytes:
         result["summary"] = "No image data."
         return result
-    if not OLLAMA_VISION_MODEL:
-        result["summary"] = "No vision model configured."
+    if not _vision_provider_ready():
+        result["summary"] = "No vision provider configured."
         return result
     try:
         schema_prompt = (
@@ -11204,6 +14099,53 @@ _restore_all_discord_users()
 
 web = Flask(__name__, static_folder=os.path.join(_BASE, "static"))
 
+_PUBLIC_ROUTE_PREFIXES = (
+    "/luna-website",
+    "/website",
+    "/api/luna-website/",
+    "/vrm/",
+    "/vrm/api/",
+    "/api/vrm-presence",
+    # Embedded / full-screen VRM uses hub chat + STT (website iframe, ngrok, etc.)
+    "/api/chat",
+    "/api/transcribe",
+    "/api/twitch/pending",
+    "/api/stream-solo/pending",
+    "/api/yt-watch-react/pending",
+    "/api/lol-chat/pending",
+)
+_PUBLIC_ROUTE_EXACT = {
+    "/luna-website",
+    "/luna-website/",
+    "/website",
+    "/website/",
+    "/favicon.ico",
+    "/vrm",
+    "/vrm/",
+}
+
+
+@web.before_request
+def _website_public_route_guard():
+    if not LUNA_WEBSITE_PUBLIC_MODE:
+        return None
+    # Keep full local hub access; only restrict public/ngrok traffic.
+    # Note: the ngrok agent connects to Flask as loopback, so we must
+    # inspect the Host header to distinguish *real* public visitors.
+    if not _is_direct_localhost_request():
+        p = (request.path or "/").strip() or "/"
+        if p == "/" and request.method in ("GET", "HEAD"):
+            return redirect("/website/", code=302)
+    if _is_direct_localhost_request():
+        return None
+    path = (request.path or "").strip()
+    if path in _PUBLIC_ROUTE_EXACT:
+        return None
+    for prefix in _PUBLIC_ROUTE_PREFIXES:
+        if path.startswith(prefix):
+            return None
+    return jsonify({"error": "Not found"}), 404
+
 # TranscribeMe-style module (clone of transcribeme.app)
 try:
     from luna_transcribeme import transcribeme_bp
@@ -11252,9 +14194,101 @@ def _rate_ok(ip: str, limit: int = 20, window: int = 60) -> bool:
     _rate_hits[ip] = hits
     return True
 
+
+def _parse_forwarded_header_host() -> str:
+    raw = (request.headers.get("Forwarded") or "").strip()
+    if not raw:
+        return ""
+    # First Forwarded element: e.g. "host=abc.ngrok-free.app;proto=https"
+    first = raw.split(",", 1)[0]
+    for part in first.split(";"):
+        part = part.strip()
+        if part.lower().startswith("host="):
+            return part.split("=", 1)[1].strip().strip('"')
+    return ""
+
+
+def _request_host_stem() -> str:
+    """Best-effort public hostname for the active request.
+
+    ngrok may rewrite the Host header to the upstream (127.0.0.1:5050). In that case
+    prefer X-Forwarded-Host / Forwarded host=, which still reflect the public hostname.
+    """
+
+    def _stem(val: str) -> str:
+        v = (val or "").strip()
+        if not v:
+            return ""
+        return v.split(":", 1)[0].strip().lower()
+
+    primary = _stem(request.host)
+    local_hosts = {"127.0.0.1", "localhost", "[::1]", "::1"}
+
+    forwarded_candidates = [
+        (request.headers.get("X-Forwarded-Host") or "").strip(),
+        (request.headers.get("X-Original-Host") or "").strip(),
+        _parse_forwarded_header_host(),
+    ]
+    for raw in forwarded_candidates:
+        s = _stem(raw)
+        if s and s not in local_hosts:
+            return s
+    if primary:
+        return primary
+    for raw in forwarded_candidates:
+        s = _stem(raw)
+        if s:
+            return s
+    return ""
+
+
+def _is_direct_localhost_request() -> bool:
+    """True for normal Hub usage on this machine (127.0.0.1 / localhost), not public tunnels."""
+    ip = (request.remote_addr or "").strip()
+    if ip not in ("127.0.0.1", "::1", "::ffff:127.0.0.1", ""):
+        return False
+    stem = _request_host_stem()
+    if not stem:
+        return True
+    return stem in ("127.0.0.1", "localhost", "[::1]", "::1")
+
+
+def _is_local_web_request() -> bool:
+    # Used for sensitive local-only admin endpoints; must not trust loopback
+    # alone because reverse tunnels (ngrok) also arrive as loopback to Flask.
+    if not _is_direct_localhost_request():
+        return False
+    return True
+
+
+def _resolve_ngrok_cmd() -> str | None:
+    """Locate ngrok executable on Windows even when PATH is missing."""
+    env_path = _env("NGROK_EXE", "").strip()
+    if env_path and os.path.isfile(env_path):
+        return env_path
+    in_path = shutil.which("ngrok")
+    if in_path:
+        return in_path
+    local = os.environ.get("LOCALAPPDATA", "").strip()
+    profile = os.environ.get("USERPROFILE", "").strip()
+    candidates = [
+        os.path.join(local, "ngrok", "ngrok.exe") if local else "",
+        os.path.join(profile, "ngrok.exe") if profile else "",
+        r"C:\Program Files\ngrok\ngrok.exe",
+        r"C:\ProgramData\chocolatey\bin\ngrok.exe",
+    ]
+    for c in candidates:
+        if c and os.path.isfile(c):
+            return c
+    return None
+
 @web.route("/")
 def serve_index():
     return send_from_directory(_BASE, "index.html")
+
+@web.route("/favicon.ico")
+def serve_favicon():
+    return send_from_directory(_BASE, "icon-192.png", mimetype="image/png")
 
 @web.route("/mind")
 @web.route("/mind/")
@@ -11273,6 +14307,8 @@ def serve_podcast_studio():
 
 @web.route("/luna-website")
 @web.route("/luna-website/")
+@web.route("/website")
+@web.route("/website/")
 def serve_luna_website():
     return send_from_directory(_BASE, "luna_website.html")
 
@@ -11984,6 +15020,76 @@ def api_facebook_check_replies():
         return jsonify({"ok": False, "has_new": False, "error": preview, "from": ""})
     return jsonify({"ok": True, "has_new": has_new, "from": from_user, "preview": (preview or "")[:300]})
 
+@web.route("/api/discord/tts-clip", methods=["POST"])
+def api_discord_tts_clip():
+    """From the web UI: post MP3 of Luna *speaking* the given line (her script), not a reading of the user’s chat text."""
+    if not _linked_int:
+        return jsonify({"ok": False, "message": "Set LINKED_DISCORD_USER_ID in .env to use this."}), 400
+    data = request.get_json(force=True, silent=True) or {}
+    luna_line = (data.get("text") or data.get("message") or data.get("luna_says") or "").strip()
+    if not luna_line:
+        return jsonify({"ok": False, "message": "Missing line for Luna to speak (her script)."}), 400
+    if len(luna_line) > 5000:
+        return jsonify({"ok": False, "message": "Text too long (max 5000)."}), 400
+    target = (data.get("target") or "dm").strip().lower()
+    if target in ("dms", "pm", "link"):
+        target = "dm"
+    if target in ("server", "guild", "text"):
+        target = "channel"
+    raw_cid = data.get("channel_id")
+    if raw_cid is not None and str(raw_cid).strip().lstrip("-").isdigit():
+        ch_id: int | None = int(str(raw_cid).strip())
+    else:
+        ch_id = _DISCORD_TTS_HUB_CHANNEL_ID
+        if ch_id is None and _tts_channels:
+            ch_id = sorted(_tts_channels)[0]
+    if target in ("channel", "both") and ch_id is None:
+        return jsonify(
+            {
+                "ok": False,
+                "message": "Set DISCORD_TTS_HUB_DEFAULT_CHANNEL_ID, add an id to DISCORD_TTS_CHANNEL_IDS, or pass channel_id in the JSON body.",
+            }
+        ), 400
+    if target not in ("dm", "channel", "both"):
+        return jsonify({"ok": False, "message": "target must be dm, channel, or both."}), 400
+
+    loop = getattr(bot, "loop", None)
+    if not loop or not loop.is_running():
+        return jsonify({"ok": False, "message": "Discord bot not ready."}), 503
+
+    ch_id_captured = ch_id
+    luna_line_captured = luna_line
+    tnorm = target
+
+    async def _go() -> tuple[bool, str]:
+        if tnorm in ("dm", "both"):
+            user = await bot.fetch_user(int(_linked_int))
+            dmc = user.dm_channel or await user.create_dm()
+            await _discord_post_tts_voice_files(dmc, luna_line_captured)
+        if tnorm in ("channel", "both"):
+            cid = ch_id_captured
+            if cid is None:
+                return False, "Missing text channel (configure DISCORD_TTS_HUB_DEFAULT_CHANNEL_ID or channel_id)."
+            if _tts_channels and cid not in _tts_channels:
+                return (
+                    False,
+                    "That channel is not in DISCORD_TTS_CHANNEL_IDS. Add the id in .env or use a default listed there.",
+                )
+            ch2 = bot.get_channel(int(cid))
+            if ch2 is None:
+                return False, "Target channel not found (check the id, or that the bot is in that server)."
+            if not isinstance(ch2, (discord.TextChannel, discord.Thread)):
+                return False, "Use a text or thread channel id (not a voice channel)."
+            await _discord_post_tts_voice_files(ch2, luna_line_captured)
+        return True, "Sent."
+
+    try:
+        fut = asyncio.run_coroutine_threadsafe(_go(), loop)
+        ok, msg = fut.result(timeout=120)
+        return jsonify({"ok": ok, "message": msg})
+    except Exception as e:
+        return jsonify({"ok": False, "message": str(e)}), 500
+
 # ── Health dashboard API ──────────────────────────────────────────────────────
 
 @web.route("/health")
@@ -12200,9 +15306,19 @@ def _tts_for_chat_source(reply: str, chat_source: str, *, para_mode: bool = True
 
 def _execute_chat_turn(scope: str, msg: str, data: dict | None = None, *, chat_source: str = "web") -> dict:
     """Shared chat logic for web UI and Twitch reader. Returns a dict with at least `reply` on success."""
-    global _last_user_activity
+    global _last_user_activity, _last_streamer_luna_at
     _last_user_activity = time.time()
     data = data or {}
+    sc = (scope or "").strip()
+    if chat_source == "web" and (
+        (LINKED_SCOPE and sc == (LINKED_SCOPE or "").strip())
+        or (_linked_int and sc == f"discord:user:{_linked_int}")
+    ):
+        _last_streamer_luna_at = time.time()
+    elif chat_source == "twitch":
+        tl = (data.get("twitch_login") or data.get("twitch_chatter_login") or "").strip().lower()
+        if tl and tl == (TWITCH_BROADCASTER_LOGIN or "").strip().lower():
+            _last_streamer_luna_at = time.time()
     biology_satisfy("connection", 0.15)
 
     def _tts(reply: str) -> None:
@@ -12329,13 +15445,116 @@ def _execute_chat_turn(scope: str, msg: str, data: dict | None = None, *, chat_s
 def _twitch_enqueue_privmsg(login: str, display: str, text: str) -> None:
     if not text or not text.strip():
         return
+    _stream_presence_mark_chat_activity((display or login or "").strip())
     try:
         _twitch_msg_queue.put_nowait({"login": login, "display": display, "text": text.strip()})
     except queue.Full:
         pass
 
-def _twitch_worker_loop() -> None:
+
+def _twitch_is_priority_text(text: str) -> bool:
+    t = (text or "").strip()
+    if not t:
+        return False
+    low = t.lower()
+    if low.startswith("!") or low.startswith("shadow"):
+        return True
+    if "luna" in low and ("?" in low or "help" in low or "status" in low):
+        return True
+    return _likely_command(t)
+
+
+def _twitch_build_batch_turn(batch: list[dict]) -> tuple[str, str, str]:
+    """Return (msg_for_model, ui_user_label, ui_text_label)."""
+    if not batch:
+        return "", "", ""
+    if len(batch) == 1:
+        one = batch[0]
+        login = (one.get("login") or "").strip().lower()
+        display = (one.get("display") or "").strip()
+        text = (one.get("text") or "").strip()
+        label = display or login or "viewer"
+        return f"[Twitch chat] {label}: {text}", label, text
+    lines: list[str] = []
+    names: list[str] = []
+    for it in batch:
+        login = (it.get("login") or "").strip().lower()
+        display = (it.get("display") or "").strip()
+        text = (it.get("text") or "").strip()
+        label = display or login or "viewer"
+        names.append(label)
+        lines.append(f"- {label}: {text}")
+    unique_names = list(dict.fromkeys(names))
+    who = f"{len(unique_names)} chatters"
+    label_preview = ", ".join(unique_names[:3]) + ("…" if len(unique_names) > 3 else "")
+    ui_text = f"{len(batch)} msgs ({label_preview})"
+    msg = (
+        "[Twitch chat batch]\n"
+        "Respond to the recent viewer messages together with one concise, natural reply.\n"
+        "If one line is a direct command, prioritize it first.\n\n"
+        + "\n".join(lines)
+    )
+    return msg, who, ui_text
+
+
+def _twitch_process_turn(scope: str, batch: list[dict]) -> None:
     global _twitch_event_id
+    if not batch:
+        return
+    msg, label, text = _twitch_build_batch_turn(batch)
+    if not msg:
+        return
+    login0 = ((batch[0].get("login") or "").strip().lower() if batch else "")
+    try:
+        out = _execute_chat_turn(
+            scope, msg, {"twitch_login": login0}, chat_source="twitch",
+        )
+        reply = out.get("reply") or ""
+        if out.get("need_feedback") and not reply:
+            reply = out.get("message") or "Check the web UI to continue."
+        public = _strip_luna_tags_for_twitch(reply) if reply else ""
+        skip_chat = bool(
+            TWITCH_VOICE_ONLY_IN_STREAM_MODE
+            and TWITCH_TTS
+            and _stream_mode_should_apply(msg)
+        )
+        if TWITCH_SEND_CHAT and public and not skip_chat:
+            send_twitch_chat_message(public)
+        reply_show = public if public else reply
+        pause_cowatch = bool(
+            _yt_watch_cowatch_active()
+            and reply_show
+            and not str(reply_show).lstrip().startswith("⚠")
+            and _cowatch_should_pause_for_twitch_reply(str(reply_show), text)
+        )
+        with _twitch_lock:
+            _twitch_event_id += 1
+            eid = _twitch_event_id
+            _twitch_ui_events.append({
+                "id": eid,
+                "user": label,
+                "text": text,
+                "reply": reply_show,
+                "ts": time.time(),
+                "pause_cowatch_video": pause_cowatch,
+            })
+            while len(_twitch_ui_events) > 100:
+                _twitch_ui_events.pop(0)
+    except Exception as e:
+        with _twitch_lock:
+            _twitch_event_id += 1
+            eid = _twitch_event_id
+            _twitch_ui_events.append({
+                "id": eid,
+                "user": label or "viewer",
+                "text": text or "",
+                "reply": f"⚠ {e}",
+                "ts": time.time(),
+                "pause_cowatch_video": False,
+            })
+
+
+def _twitch_worker_loop() -> None:
     scope = LINKED_SCOPE or "web"
     while not _twitch_stop_event.is_set():
         try:
@@ -12343,59 +15562,41 @@ def _twitch_worker_loop() -> None:
         except queue.Empty:
             continue
         login = (item.get("login") or "").strip().lower()
-        display = (item.get("display") or "").strip()
         text = (item.get("text") or "").strip()
         if not text:
             continue
         if TWITCH_BOT_USERNAME and login == TWITCH_BOT_USERNAME.lower():
             continue
-        label = display or login or "viewer"
-        msg = f"[Twitch chat] {label}: {text}"
-        try:
-            out = _execute_chat_turn(scope, msg, {}, chat_source="twitch")
-            reply = out.get("reply") or ""
-            if out.get("need_feedback") and not reply:
-                reply = out.get("message") or "Check the web UI to continue."
-            public = _strip_luna_tags_for_twitch(reply) if reply else ""
-            skip_chat = bool(
-                TWITCH_VOICE_ONLY_IN_STREAM_MODE
-                and TWITCH_TTS
-                and _stream_mode_should_apply(msg)
-            )
-            if TWITCH_SEND_CHAT and public and not skip_chat:
-                send_twitch_chat_message(public)
-            reply_show = public if public else reply
-            pause_cowatch = bool(
-                _yt_watch_cowatch_active()
-                and reply_show
-                and not str(reply_show).lstrip().startswith("⚠")
-                and _cowatch_should_pause_for_twitch_reply(str(reply_show), text)
-            )
-            with _twitch_lock:
-                _twitch_event_id += 1
-                eid = _twitch_event_id
-                _twitch_ui_events.append({
-                    "id": eid,
-                    "user": label,
-                    "text": text,
-                    "reply": reply_show,
-                    "ts": time.time(),
-                    "pause_cowatch_video": pause_cowatch,
-                })
-                while len(_twitch_ui_events) > 100:
-                    _twitch_ui_events.pop(0)
-        except Exception as e:
-            with _twitch_lock:
-                _twitch_event_id += 1
-                eid = _twitch_event_id
-                _twitch_ui_events.append({
-                    "id": eid,
-                    "user": label,
-                    "text": text,
-                    "reply": f"⚠ {e}",
-                    "ts": time.time(),
-                    "pause_cowatch_video": False,
-                })
+        # Priority lane: commands/direct asks go immediately.
+        if (not _TWITCH_CHAT_BATCHING) or _twitch_is_priority_text(text):
+            _twitch_process_turn(scope, [item])
+            continue
+        # Batch lane: briefly collect chatter burst into one reply.
+        batch = [item]
+        if TWITCH_CHAT_BATCH_WINDOW_SEC > 0 and TWITCH_CHAT_BATCH_MAX_ITEMS > 1:
+            deadline = time.time() + TWITCH_CHAT_BATCH_WINDOW_SEC
+            while len(batch) < TWITCH_CHAT_BATCH_MAX_ITEMS and time.time() < deadline:
+                wait_left = max(0.0, deadline - time.time())
+                try:
+                    nxt = _twitch_msg_queue.get(timeout=wait_left)
+                except queue.Empty:
+                    break
+                n_login = (nxt.get("login") or "").strip().lower()
+                n_text = (nxt.get("text") or "").strip()
+                if not n_text:
+                    continue
+                if TWITCH_BOT_USERNAME and n_login == TWITCH_BOT_USERNAME.lower():
+                    continue
+                # If a priority message appears during batch window, flush current batch first,
+                # then handle that priority message immediately.
+                if _twitch_is_priority_text(n_text):
+                    _twitch_process_turn(scope, batch)
+                    batch = []
+                    _twitch_process_turn(scope, [nxt])
+                    break
+                batch.append(nxt)
+        if batch:
+            _twitch_process_turn(scope, batch)
 
 def _start_twitch_ingest() -> None:
     if not TWITCH_CHAT_ENABLED or not TWITCH_OAUTH_TOKEN or not TWITCH_CHANNEL:
@@ -12404,6 +15605,7 @@ def _start_twitch_ingest() -> None:
         print("[Twitch] luna_twitch not available.", flush=True)
         return
     threading.Thread(target=_twitch_worker_loop, daemon=True).start()
+    threading.Thread(target=_twitch_auto_ack_loop, daemon=True).start()
 
     def _irc() -> None:
         run_twitch_irc_reader(
@@ -12439,6 +15641,127 @@ def api_twitch_pending():
     with _twitch_lock:
         events = [e for e in _twitch_ui_events if e.get("id", 0) > since]
     return jsonify({"events": events})
+
+
+@web.route("/api/twitch/oauth/status", methods=["GET"])
+def api_twitch_oauth_status():
+    return jsonify(_twitch_oauth_status())
+
+
+@web.route("/api/twitch/oauth/start", methods=["GET"])
+def api_twitch_oauth_start():
+    if not TWITCH_CLIENT_ID or not TWITCH_CLIENT_SECRET:
+        return jsonify(
+            {
+                "ok": False,
+                "error": "Set TWITCH_CLIENT_ID and TWITCH_CLIENT_SECRET in .env first.",
+            }
+        ), 400
+    state = _twitch_oauth_new_state()
+    url = _twitch_oauth_authorize_url(state)
+    if request.args.get("redirect", "").strip().lower() in ("1", "true", "yes", "on"):
+        return redirect(url, code=302)
+    return jsonify({"ok": True, "url": url, "state": state, "redirect_uri": TWITCH_OAUTH_REDIRECT_URI})
+
+
+@web.route("/api/twitch/oauth/callback", methods=["GET"])
+def api_twitch_oauth_callback():
+    if request.args.get("error"):
+        err = (request.args.get("error_description") or request.args.get("error") or "").strip()
+        return Response(
+            f"<h3>Twitch OAuth failed</h3><p>{html.escape(err)}</p><p>You can close this tab.</p>",
+            status=400,
+            mimetype="text/html",
+        )
+    code = (request.args.get("code") or "").strip()
+    state = (request.args.get("state") or "").strip()
+    if not code:
+        return Response("<h3>Missing OAuth code.</h3><p>You can close this tab.</p>", status=400, mimetype="text/html")
+    if not _twitch_oauth_consume_state(state):
+        return Response("<h3>Invalid/expired OAuth state.</h3><p>Start again from /api/twitch/oauth/start.</p>", status=400, mimetype="text/html")
+
+    ok, token_data = _twitch_oauth_exchange_code(code)
+    if not ok:
+        return Response(
+            "<h3>Twitch OAuth token exchange failed.</h3><pre>"
+            + html.escape(str(token_data))
+            + "</pre><p>You can close this tab.</p>",
+            status=500,
+            mimetype="text/html",
+        )
+    ok_user, user_data = _twitch_oauth_fetch_user(str((token_data or {}).get("access_token") or ""))
+    if not ok_user:
+        return Response(
+            "<h3>Twitch OAuth succeeded but user lookup failed.</h3><pre>"
+            + html.escape(str(user_data))
+            + "</pre><p>You can close this tab.</p>",
+            status=500,
+            mimetype="text/html",
+        )
+    _twitch_oauth_save(token_data if isinstance(token_data, dict) else {}, user_data if isinstance(user_data, dict) else {})
+    login = str((user_data or {}).get("login") or "")
+    return Response(
+        "<h3>Twitch OAuth connected.</h3>"
+        f"<p>Authorized broadcaster: <strong>{html.escape(login or '(unknown)')}</strong></p>"
+        "<p>Luna can now use broadcaster API features (title/polls/sub events when enabled).</p>"
+        "<p>You can close this tab.</p>",
+        mimetype="text/html",
+    )
+
+
+@web.route("/api/twitch/oauth/complete", methods=["GET", "POST"])
+def api_twitch_oauth_complete():
+    """Manual completion endpoint for flows that redirect to localhost:3000.
+
+    Use this when Twitch redirect URI is not Luna's callback route. Paste code/state from browser URL here.
+    """
+    if request.method == "GET" and not (request.args.get("code") or "").strip():
+        return Response(
+            "<h3>Complete Twitch OAuth</h3>"
+            "<p>Paste the <code>code</code> and <code>state</code> values from your browser URL after Twitch approval.</p>"
+            "<form method='POST'>"
+            "<label>code</label><br/><input name='code' style='width:780px;max-width:95vw'/><br/><br/>"
+            "<label>state</label><br/><input name='state' style='width:780px;max-width:95vw'/><br/><br/>"
+            "<button type='submit'>Complete authorization</button>"
+            "</form>",
+            mimetype="text/html",
+        )
+    code = (request.values.get("code") or "").strip()
+    state = (request.values.get("state") or "").strip()
+    if not code:
+        return Response("<h3>Missing code.</h3>", status=400, mimetype="text/html")
+    if not _twitch_oauth_consume_state(state):
+        return Response(
+            "<h3>Invalid/expired OAuth state.</h3><p>Start again from /api/twitch/oauth/start.</p>",
+            status=400,
+            mimetype="text/html",
+        )
+    ok, token_data = _twitch_oauth_exchange_code(code)
+    if not ok:
+        return Response(
+            "<h3>Twitch OAuth token exchange failed.</h3><pre>"
+            + html.escape(str(token_data))
+            + "</pre>",
+            status=500,
+            mimetype="text/html",
+        )
+    ok_user, user_data = _twitch_oauth_fetch_user(str((token_data or {}).get("access_token") or ""))
+    if not ok_user:
+        return Response(
+            "<h3>Twitch OAuth succeeded but user lookup failed.</h3><pre>"
+            + html.escape(str(user_data))
+            + "</pre>",
+            status=500,
+            mimetype="text/html",
+        )
+    _twitch_oauth_save(token_data if isinstance(token_data, dict) else {}, user_data if isinstance(user_data, dict) else {})
+    login = str((user_data or {}).get("login") or "")
+    return Response(
+        "<h3>Twitch OAuth connected.</h3>"
+        f"<p>Authorized broadcaster: <strong>{html.escape(login or '(unknown)')}</strong></p>"
+        "<p>You can close this tab and refresh /api/twitch/oauth/status.</p>",
+        mimetype="text/html",
+    )
 
 
 @web.route("/api/lol-chat/pending")
@@ -12651,8 +15974,16 @@ def api_stream_mode_set():
     if not isinstance(raw, bool):
         return jsonify({"error": "Provide stream_mode as true/false (or normal/streamer)."}), 400
     _set_stream_mode_override(raw)
+    global _stream_presence_auto_override
+    _stream_presence_auto_override = False
     _schedule_discord_presence_for_stream_mode(raw)
     return jsonify({"ok": True, "stream_mode": _stream_mode_env_on(), "source": "runtime"})
+
+
+@web.route("/api/stream-presence", methods=["GET"])
+def api_stream_presence():
+    """Current stream/record awareness state used for auto stream persona behavior."""
+    return jsonify(_stream_presence_get())
 
 
 @web.route("/api/studio/watch-target", methods=["GET", "POST"])
@@ -12696,10 +16027,16 @@ def api_chat():
 @web.route("/api/stream", methods=["POST"])
 def api_stream():
     """True streaming endpoint — yields chunks as Ollama generates them."""
+    global _last_user_activity, _last_streamer_luna_at
     data = request.get_json(force=True, silent=True) or {}
     msg = (data.get("message") or "").strip()
     if not msg: return jsonify({"error": "No message"}), 400
     scope = LINKED_SCOPE or "web"
+    _last_user_activity = time.time()
+    if (LINKED_SCOPE and (scope or "").strip() == (LINKED_SCOPE or "").strip()) or (
+        _linked_int and (scope or "").strip() == f"discord:user:{_linked_int}"
+    ):
+        _last_streamer_luna_at = time.time()
     fast_override = _chat_fast_from_request(data)
     use_fast = _chat_fast_enabled() if fast_override is None else fast_override
     history = _compact_history(get_recent_conversation(scope, 30), fast=use_fast)
@@ -12768,6 +16105,65 @@ def api_audio_podcast_start():
         except Exception:
             pass
     return jsonify({"ok": True, "status": status, "project_dir": project_dir, "url": url})
+
+
+@web.route("/api/ngrok/authtoken", methods=["GET"])
+def api_ngrok_authtoken_status():
+    if not _is_local_web_request():
+        return jsonify({"error": "Local access only"}), 403
+    d = _load_json(_NGROK_STATE_PATH, {})
+    if not isinstance(d, dict):
+        d = {}
+    ngrok_cmd = _resolve_ngrok_cmd()
+    return jsonify(
+        {
+            "ok": True,
+            "configured": bool(d.get("configured")),
+            "last4": (d.get("last4") or ""),
+            "updated_at": float(d.get("updated_at") or 0.0),
+            "ngrok_available": bool(ngrok_cmd),
+            "ngrok_cmd": (ngrok_cmd or ""),
+        }
+    )
+
+
+@web.route("/api/ngrok/authtoken", methods=["POST"])
+def api_ngrok_authtoken_set():
+    if not _is_local_web_request():
+        return jsonify({"error": "Local access only"}), 403
+    data = request.get_json(force=True, silent=True) or {}
+    token = str(data.get("token") or "").strip()
+    if len(token) < 12:
+        return jsonify({"error": "Token looks too short"}), 400
+    ngrok_cmd = _resolve_ngrok_cmd()
+    if not ngrok_cmd:
+        return jsonify({"error": "ngrok not found. Set NGROK_EXE in .env or install ngrok in a standard path."}), 500
+    try:
+        proc = subprocess.run(
+            [ngrok_cmd, "config", "add-authtoken", token],
+            capture_output=True,
+            text=True,
+            timeout=25,
+        )
+    except FileNotFoundError:
+        return jsonify({"error": "ngrok executable was not found at runtime"}), 500
+    except subprocess.TimeoutExpired:
+        return jsonify({"error": "Timed out while applying ngrok token"}), 504
+    except Exception as e:
+        return jsonify({"error": f"Could not run ngrok: {str(e)[:120]}"}), 500
+    if proc.returncode != 0:
+        err = (proc.stderr or proc.stdout or "ngrok rejected the token").strip()
+        return jsonify({"error": err[:300]}), 400
+
+    _save_json(
+        _NGROK_STATE_PATH,
+        {
+            "configured": True,
+            "last4": token[-4:],
+            "updated_at": time.time(),
+        },
+    )
+    return jsonify({"ok": True, "configured": True, "last4": token[-4:]})
 
 @web.route("/api/tts", methods=["POST"])
 def api_tts():
@@ -13000,13 +16396,31 @@ def api_transcribe():
                 "speaker_score": round(score or 0.0, 4),
             })
         try:
-            import whisper
-            model = getattr(api_transcribe, "_model", None)
-            if model is None:
-                model = whisper.load_model("base")
-                api_transcribe._model = model
-            result = model.transcribe(path, **_whisper_transcribe_kwargs())
-            out = {"text": (result.get("text") or "").strip(), "speaker_match": True}
+            ok, text_out = _groq_stt_try(path)
+            if not ok:
+                if not GROQ_STT_LOCAL_FALLBACK:
+                    return jsonify({
+                        "error": "Transcription failed (GROQ_STT_LOCAL_FALLBACK=0; set GROQ_API_KEY or enable local fallback)",
+                    }), 503
+                text_out = _api_transcribe_local_whisper(path)
+                if text_out is None:
+                    return jsonify({
+                        "error": "Transcription failed (Groq and local Whisper; install openai-whisper+ffmpeg, check GROQ_API_KEY)",
+                    }), 503
+            out = {"text": text_out or "", "speaker_match": True}
+            emo = _analyze_voice_clip_emotion(path, text_out)
+            if isinstance(emo, dict):
+                out["emotion"] = emo.get("emotion") or "neutral"
+                out["emotion_meta"] = {
+                    "volume": emo.get("volume"),
+                    "rms": emo.get("rms"),
+                    "variation": emo.get("variation"),
+                    "zcr": emo.get("zcr"),
+                    "voiced_ratio": emo.get("voiced_ratio"),
+                    "model": emo.get("model"),
+                    "model_emotion": emo.get("model_emotion"),
+                    "model_confidence": emo.get("model_confidence"),
+                }
             if score is not None:
                 out["speaker_score"] = round(score, 4)
             return jsonify(out)
@@ -13049,7 +16463,21 @@ def api_translate_voice():
         text = _whisper_translate(path)
         if text is None:
             return jsonify({"error": "Translation failed (install openai-whisper and ffmpeg)"}), 503
-        return jsonify({"text": text})
+        out = {"text": text}
+        emo = _analyze_voice_clip_emotion(path, text)
+        if isinstance(emo, dict):
+            out["emotion"] = emo.get("emotion") or "neutral"
+            out["emotion_meta"] = {
+                "volume": emo.get("volume"),
+                "rms": emo.get("rms"),
+                "variation": emo.get("variation"),
+                "zcr": emo.get("zcr"),
+                "voiced_ratio": emo.get("voiced_ratio"),
+                "model": emo.get("model"),
+                "model_emotion": emo.get("model_emotion"),
+                "model_confidence": emo.get("model_confidence"),
+            }
+        return jsonify(out)
     except Exception as e:
         return jsonify({"error": str(e)[:200]}), 500
     finally:
@@ -13065,6 +16493,27 @@ def _handle_bang(msg: str, scope: str) -> str:
     cmd = parts[0].lower()
     args = (parts[1] if len(parts) > 1 else "").strip()
     if cmd in ("!help","!commands","!files"): return HELP_TEXT
+    if cmd in ("!twitch_title", "!title"):
+        if not args:
+            return "Usage: !twitch_title <new stream title>"
+        ok, r = _twitch_update_title(args)
+        return f"✅ {r}" if ok else f"❌ {r}"
+    if cmd in ("!twitch_poll", "!poll"):
+        # Manual: !twitch_poll Title | option1 | option2 [| option3...]
+        # Autonomous: !twitch_poll <topic>  -> Luna drafts title/options and creates immediately.
+        if not args:
+            return "Usage: !twitch_poll <title> | <option1> | <option2> [| <option3> ...] OR !twitch_poll <topic>"
+        parts_poll = [p.strip() for p in args.split("|")]
+        duration = 120
+        q = ""
+        opts: list[str] = []
+        if len(parts_poll) >= 3:
+            q = parts_poll[0]
+            opts = parts_poll[1:]
+        else:
+            q, opts = _twitch_poll_idea_from_topic(args)
+        ok, r = _twitch_create_poll(q, opts, duration=duration)
+        return f"✅ {r}" if ok else f"❌ {r}"
     if cmd == "!news":
         ok, r = _fetch_news(); return r if ok else f"❌ {r}"
     if cmd == "!search":
@@ -13328,15 +16777,29 @@ async def on_ready():
     await _set_discord_status(default_status, DISCORD_STATUS_TYPE)
     bot.loop.create_task(_reminder_loop())
     bot.loop.create_task(_calendar_notification_loop())
+    if LUNA_DM_GREETINGS:
+        bot.loop.create_task(_dm_greeting_loop())
+        md = (
+            f" mid-day {LUNA_DM_MIDDAY_H0}-{LUNA_DM_MIDDAY_H1}h (Ollama + profile)"
+            if LUNA_DM_MIDDAY
+            else " (mid-day off: LUNA_DM_MIDDAY=0)"
+        )
+        print(
+            f"[DM greetings] ON — morning {LUNA_DM_MORNING_H0}-{LUNA_DM_MORNING_H1}h,{md} night {LUNA_DM_NIGHT_H0}-{LUNA_DM_NIGHT_H1}h "
+            f"({LUNA_DM_GREET_TZ}). Add gender/pronouns in profile for tone. Set LUNA_DM_GREETINGS=0 to disable.",
+            flush=True,
+        )
     bot.loop.create_task(_pc_context_observer_loop())
     bot.loop.create_task(_ml_learning_loop())
     bot.loop.create_task(_proactive_heartbeat_loop())
     if _stream_solo_banter_env_on():
         bot.loop.create_task(_stream_solo_banter_loop())
         print(
-            "[Stream solo] Idle/lore/LoL lobby lines → /vrm/ viewer (poll) + hub chat; server TTS if VRM tab closed. "
-            "Set LUNA_STREAM_SOLO_BYPASS_VRM=1 for speaker-only. Needs TWITCH_TTS=1. "
-            "Stream mode: LUNA_STREAM_MODE or /api/stream-mode. (Not Twitch chat unless LUNA_STREAM_SOLO_CHAT=1.)",
+            "[Stream solo] TAKEOVER: when live (Twitch/LoL/OBS) or stream mode, Luna can fill air after "
+            "LUNA_STREAM_SOLO_IDLE_SEC with *broadcaster* silence (viewers in chat no longer block her). "
+            "Set TWITCH_BROADCASTER_LOGIN to your Twitch login. LUNA_STREAM_TAKEOVER=0 to disable. "
+            "LUNA_STREAM_TAKEOVER_STREAMER_IDLE=0 uses old global activity. "
+            "VRM+TTS; LUNA_STREAM_SOLO_BYPASS_VRM=1 for speaker-only. LUNA_STREAM_SOLO_CHAT for Twitch text.",
             flush=True,
         )
     bot.loop.create_task(_reflection_loop())
@@ -13359,6 +16822,7 @@ async def on_ready():
                     fast=_chat_fast_enabled(),
                     force_stream_mode=_stream_mode_env_on(),
                 ),
+                build_commentary_system=_build_lol_observer_commentary_system,
                 # Only generate a commentary line when the user hasn't been talking recently
                 should_emit=lambda: time.time() - _last_user_activity >= _LOL_COMMENTARY_USER_QUIET_SEC,
             )
@@ -13376,11 +16840,26 @@ async def on_message(message: discord.Message):
     # Celine: voice clips
     effective = (message.content or "").strip()
     celine_route = None
+    voice_from_clip = False
+    voice_emotion_meta = None
     voice_text, celine_route = await celine.process_voice_message(
         message, transcribe_fn=_whisper_transcribe,
         route_decider=lambda t: "shadow" if strip_shadow_prefix(t) is not None or _likely_command(t) else "luna",
         run_in_thread=asyncio.to_thread)
-    if voice_text: effective = voice_text
+    if voice_text:
+        effective = voice_text
+        voice_from_clip = True
+    else:
+        clip_text, had_audio_clip, clip_err, clip_meta = await _discord_transcribe_voice_clip(message)
+        if clip_text:
+            effective = clip_text
+            voice_text = clip_text
+            voice_from_clip = True
+            voice_emotion_meta = clip_meta
+        elif had_audio_clip:
+            await message.reply(f"<@{message.author.id}> {clip_err or 'I could not transcribe that voice clip.'}")
+            await bot.process_commands(message)
+            return
 
     # Conversational music: "Which song?" pick
     if message.guild:
@@ -13421,7 +16900,12 @@ async def on_message(message: discord.Message):
                         await message.reply("\n".join(lines))
                 return
 
-    if not (isinstance(message.channel, discord.DMChannel) or (bot.user and bot.user.mentioned_in(message))):
+    if not (
+        isinstance(message.channel, discord.DMChannel)
+        or (bot.user and bot.user.mentioned_in(message))
+        or voice_from_clip
+        or re.search(r"^!tts\b", (effective or "").strip(), re.I)
+    ):
         await bot.process_commands(message)
         return
 
@@ -13431,12 +16915,53 @@ async def on_message(message: discord.Message):
         _greet = "Hey! I'm **Luna** — chat or say **Shadow, command**. **!help** for list."
         await message.reply(f"<@{message.author.id}> {_greet}")
         _schedule_discord_vc_tts_reply(message, _greet)
+        _schedule_discord_file_tts(message, _greet)
         return
 
-    global _last_user_activity
+    global _last_user_activity, _last_streamer_luna_at
     _last_user_activity = time.time()
+    if _linked_int and message.author.id == _linked_int:
+        _last_streamer_luna_at = time.time()
     scope = _scope_for(message.author.id, message.guild.id if message.guild else None)
     mention = f"<@{message.author.id}>"
+    tts_match = re.match(r"^!tts(?:\s+(.*))?$", (text or "").strip(), re.IGNORECASE | re.DOTALL)
+    if tts_match:
+        luna_line = (tts_match.group(1) or "").strip()
+        if not luna_line:
+            await message.reply(
+                f"{mention} Usage: `!tts` **<what I should say>** — you write **my** line and I post it in **my** voice (MP3). "
+                "This is for a specific line you want *me* to say, not for turning *your* message into audio. "
+                "Web: **Luna says (TTS) → …** in Media (http://127.0.0.1:5050)."
+            )
+            return
+        if not _can_use_tts_exclaim_command(message):
+            await message.reply(
+                f"{mention} Use `!tts` in DMs, in a channel listed in **DISCORD_TTS_CHANNEL_IDS**, or as the linked/admin user."
+            )
+            return
+        ok = await _discord_post_tts_voice_files(message.channel, luna_line)
+        await message.reply(
+            f"{mention} {'Done — I posted that in my voice.' if ok else 'I could not generate audio just now.'}"
+        )
+        return
+    if voice_from_clip:
+        try:
+            shown = textwrap.shorten(text, width=260, placeholder="...")
+            emo_suffix = ""
+            if isinstance(voice_emotion_meta, dict):
+                emo = str(voice_emotion_meta.get("emotion") or "neutral")
+                vol = str(voice_emotion_meta.get("volume") or "normal")
+                conf = voice_emotion_meta.get("model_confidence")
+                if conf is not None:
+                    emo_suffix = f" | Emotion: **{emo}** ({vol}, conf {float(conf):.2f})"
+                else:
+                    emo_suffix = f" | Emotion: **{emo}** ({vol})"
+            await message.reply(f"{mention} 📝 Voice clip transcribed: {shown}{emo_suffix}")
+            scope_clip = _scope_for(message.author.id, message.guild.id if message.guild else None)
+            await asyncio.to_thread(append_exchange, scope_clip, "[voice clip]", shown)
+        except Exception:
+            pass
+        # Continue into normal Luna chat flow so voice clips get full responses.
 
     # Pending identity file
     if scope in _pending_file_update:
@@ -13449,6 +16974,7 @@ async def on_message(message: discord.Message):
             await asyncio.to_thread(append_exchange, scope, text, reply)
             await message.reply(f"{mention} {reply}")
             _schedule_discord_vc_tts_reply(message, reply)
+            _schedule_discord_file_tts(message, reply)
             return
 
     if _is_retry(text):
@@ -13456,12 +16982,14 @@ async def on_message(message: discord.Message):
         await asyncio.to_thread(append_exchange, scope, text, reply)
         await message.reply(f"{mention} {reply}")
         _schedule_discord_vc_tts_reply(message, reply)
+        _schedule_discord_file_tts(message, reply)
         return
 
     if text.strip().lower() in ("!help","!commands","!files"):
         await asyncio.to_thread(append_exchange, scope, text, HELP_TEXT)
         await _discord_reply_split(message, HELP_TEXT, prefix=mention)
         _schedule_discord_vc_tts_reply(message, HELP_TEXT)
+        _schedule_discord_file_tts(message, HELP_TEXT)
         return
 
     _cf = _chat_fast_enabled()
@@ -13478,6 +17006,7 @@ async def on_message(message: discord.Message):
         await asyncio.to_thread(append_exchange, scope, text, reply)
         await message.reply(f"{mention} {reply}")
         _schedule_discord_vc_tts_reply(message, reply)
+        _schedule_discord_file_tts(message, reply)
         return
 
     # NL commands — instruction-style routing only when not in fast mode (LUNA_CHAT_FAST=0).
@@ -13488,6 +17017,7 @@ async def on_message(message: discord.Message):
             if cmd == "help":
                 await message.reply(f"{mention} {HELP_TEXT}")
                 _schedule_discord_vc_tts_reply(message, HELP_TEXT)
+                _schedule_discord_file_tts(message, HELP_TEXT)
                 return
             if _is_privileged(message.author.id) or cmd not in ("suno","suno_ready","create_code","msg","dm","call","share_x","share_facebook","yt_comment","yt_like","ig_dm","fb_msg","remind"):
                 reply = await asyncio.to_thread(_run_cmd, cmd, params, scope, text)
@@ -13500,22 +17030,39 @@ async def on_message(message: discord.Message):
                     await asyncio.to_thread(append_exchange, scope, text, reply)
                     await message.reply(f"{mention} {reply}")
                     _schedule_discord_vc_tts_reply(message, reply)
+                    _schedule_discord_file_tts(message, reply)
                     return
 
     # Luna chat
+    chat_text = text
+    if voice_from_clip and isinstance(voice_emotion_meta, dict):
+        emo = str(voice_emotion_meta.get("emotion") or "neutral")
+        vol = str(voice_emotion_meta.get("volume") or "normal")
+        rms = voice_emotion_meta.get("rms")
+        var = voice_emotion_meta.get("variation")
+        zcr = voice_emotion_meta.get("zcr")
+        chat_text = (
+            f"[Voice clip emotion context]\n"
+            f"Detected emotion: {emo}\n"
+            f"Volume: {vol}\n"
+            f"RMS: {rms}\n"
+            f"Energy variation: {var}\n"
+            f"Tone roughness (ZCR): {zcr}\n\n"
+            f"User transcript: {text}"
+        )
     history = await asyncio.to_thread(get_recent_conversation, scope, 30)
     history = _compact_history(history, fast=_cf)
     system = await asyncio.to_thread(
         _prepare_main_chat_system,
         scope,
-        text,
+        chat_text,
         fast=_cf,
         force_stream_mode=_stream_mode_env_on(),
     )
     try:
         reply = await asyncio.to_thread(
             lambda: ollama_chat(
-                text,
+                chat_text,
                 system=system,
                 scope=scope,
                 history=history,
@@ -13539,6 +17086,7 @@ async def on_message(message: discord.Message):
     await message.reply(f"{mention} {reply}")
     if reply and reply != COMMAND_ONLY:
         _schedule_discord_vc_tts_reply(message, reply)
+        _schedule_discord_file_tts(message, reply)
     await bot.process_commands(message)
 
 async def _play_from_url(message: discord.Message, url: str):
@@ -13681,14 +17229,239 @@ async def _stop_in_discord_for_linked_user_async() -> tuple[bool, str]:
         vc.stop()
     return True, "⏹️ Stopped."
 
+def _local_whisper_transcribe_chunked(
+    model,
+    path: str,
+    kwargs: dict,
+    *,
+    chunk_sec: float,
+    overlap_sec: float,
+    label: str,
+) -> str:
+    """Run local Whisper in short overlapping chunks for better long-clip robustness."""
+    if not _WHISPER_CHUNKING_ON:
+        return (model.transcribe(path, **kwargs).get("text") or "").strip()
+    fd = wav_fd = None
+    chunk_paths: list[str] = []
+    t0 = time.time()
+    try:
+        fd, wav_fd = tempfile.mkstemp(suffix=".wav")
+        os.close(fd)
+        fd = None
+        if not _ffmpeg_to_wav16_mono_voice(path, wav_fd):
+            return (model.transcribe(path, **kwargs).get("text") or "").strip()
+        with wave.open(wav_fd, "rb") as wr:
+            rate = int(wr.getframerate() or 16000)
+            sampwidth = int(wr.getsampwidth() or 2)
+            channels = int(wr.getnchannels() or 1)
+            frames = int(wr.getnframes() or 0)
+            if frames <= 0:
+                return ""
+            pcm = wr.readframes(frames)
+        duration = frames / float(max(1, rate))
+        step_sec = max(0.8, float(chunk_sec) - float(overlap_sec))
+        if duration <= max(2.0, chunk_sec + 0.25):
+            return (model.transcribe(wav_fd, **kwargs).get("text") or "").strip()
+        frame_bytes = max(1, sampwidth * channels)
+        chunk_frames = max(1, int(chunk_sec * rate))
+        step_frames = max(1, int(step_sec * rate))
+        parts: list[str] = []
+        start = 0
+        guard = 0
+        while start < frames and guard < 240:
+            end = min(frames, start + chunk_frames)
+            left = start * frame_bytes
+            right = end * frame_bytes
+            seg = pcm[left:right]
+            if len(seg) < rate * frame_bytes * 0.35:
+                break
+            fd_c, p = tempfile.mkstemp(suffix=".wav")
+            os.close(fd_c)
+            with wave.open(p, "wb") as ww:
+                ww.setnchannels(channels)
+                ww.setsampwidth(sampwidth)
+                ww.setframerate(rate)
+                ww.writeframes(seg)
+            chunk_paths.append(p)
+            txt = (model.transcribe(p, **kwargs).get("text") or "").strip()
+            if txt:
+                parts.append(txt)
+            start += step_frames
+            guard += 1
+        merged = " ".join(parts).strip()
+        merged = re.sub(r"\s+", " ", merged)
+        if LUNA_CALL_DEBUG:
+            print(
+                f"[CallDebug {datetime.now().strftime('%H:%M:%S')}] {label}_chunked_done | "
+                f"ms={int((time.time()-t0)*1000)}, dur_sec={duration:.1f}, chunks={len(chunk_paths)}, chars={len(merged)}",
+                flush=True,
+            )
+        return merged
+    except Exception:
+        return (model.transcribe(path, **kwargs).get("text") or "").strip()
+    finally:
+        for p in chunk_paths:
+            try:
+                if p and os.path.isfile(p):
+                    os.unlink(p)
+            except Exception:
+                pass
+        try:
+            if wav_fd and os.path.isfile(wav_fd):
+                os.unlink(wav_fd)
+        except Exception:
+            pass
+        try:
+            if fd is not None:
+                os.close(fd)
+        except Exception:
+            pass
 
-def _whisper_transcribe(path: str) -> str | None:
+
+def _local_whisper_transcribe(path: str) -> str | None:
+    """Pre-Groq local STT: model cached on _whisper_transcribe. Used when Groq fails or limit hit."""
+    t0 = time.time()
     try:
         import whisper
         model = getattr(_whisper_transcribe, "_model", None)
-        if model is None: model = whisper.load_model("base"); _whisper_transcribe._model = model
-        return (model.transcribe(path, **_whisper_transcribe_kwargs()).get("text") or "").strip()
-    except Exception: return None
+        if model is None:
+            model = whisper.load_model("base")
+            _whisper_transcribe._model = model
+        out = _local_whisper_transcribe_chunked(
+            model,
+            path,
+            _whisper_transcribe_kwargs(),
+            chunk_sec=WHISPER_CHUNK_SEC,
+            overlap_sec=WHISPER_CHUNK_OVERLAP_SEC,
+            label="whisper",
+        )
+        if LUNA_CALL_DEBUG:
+            print(
+                f"[CallDebug {datetime.now().strftime('%H:%M:%S')}] whisper_done | ms={int((time.time()-t0)*1000)}, chars={len(out)}",
+                flush=True,
+            )
+        return out
+    except Exception as e:
+        if LUNA_CALL_DEBUG:
+            print(
+                f"[CallDebug {datetime.now().strftime('%H:%M:%S')}] whisper_error | ms={int((time.time()-t0)*1000)}, err={str(e)[:220]}",
+                flush=True,
+            )
+        return None
+
+
+def _local_whisper_transcribe_relaxed(path: str) -> str | None:
+    """Pre-Groq relaxed STT: same shared _whisper_transcribe._model, looser VAD/silence thresholds."""
+    t0 = time.time()
+    try:
+        import whisper
+        model = getattr(_whisper_transcribe, "_model", None)
+        if model is None:
+            model = whisper.load_model("base")
+            _whisper_transcribe._model = model
+        kw = dict(_whisper_transcribe_kwargs())
+        kw["no_speech_threshold"] = 0.82
+        kw["logprob_threshold"] = -2.0
+        kw["compression_ratio_threshold"] = 2.8
+        out = _local_whisper_transcribe_chunked(
+            model,
+            path,
+            kw,
+            chunk_sec=WHISPER_CHUNK_SEC,
+            overlap_sec=WHISPER_CHUNK_OVERLAP_SEC,
+            label="whisper_relaxed",
+        )
+        if LUNA_CALL_DEBUG:
+            print(
+                f"[CallDebug {datetime.now().strftime('%H:%M:%S')}] whisper_relaxed_done | ms={int((time.time()-t0)*1000)}, chars={len(out)}",
+                flush=True,
+            )
+        return out
+    except Exception as e:
+        if LUNA_CALL_DEBUG:
+            print(
+                f"[CallDebug {datetime.now().strftime('%H:%M:%S')}] whisper_relaxed_error | ms={int((time.time()-t0)*1000)}, err={str(e)[:220]}",
+                flush=True,
+            )
+        return None
+
+
+def _api_transcribe_local_whisper(path: str) -> str | None:
+    """Pre-Groq /api/transcribe path: its own model cache on api_transcribe (separate from _whisper_transcribe)."""
+    t0 = time.time()
+    try:
+        import whisper
+        model = getattr(api_transcribe, "_model", None)
+        if model is None:
+            model = whisper.load_model("base")
+            api_transcribe._model = model
+        out = _local_whisper_transcribe_chunked(
+            model,
+            path,
+            _whisper_transcribe_kwargs(),
+            chunk_sec=WHISPER_CHUNK_SEC,
+            overlap_sec=WHISPER_CHUNK_OVERLAP_SEC,
+            label="api_transcribe_whisper",
+        )
+        if LUNA_CALL_DEBUG:
+            print(
+                f"[CallDebug {datetime.now().strftime('%H:%M:%S')}] api_transcribe_whisper_done | ms={int((time.time()-t0)*1000)}, chars={len(out)}",
+                flush=True,
+            )
+        return out
+    except Exception as e:
+        if LUNA_CALL_DEBUG:
+            print(
+                f"[CallDebug {datetime.now().strftime('%H:%M:%S')}] api_transcribe_whisper_error | ms={int((time.time()-t0)*1000)}, err={str(e)[:220]}",
+                flush=True,
+            )
+        return None
+
+
+def _whisper_transcribe(path: str) -> str | None:
+    t0 = time.time()
+    ok, groq_text = _groq_stt_try(path)
+    if ok:
+        if LUNA_CALL_DEBUG:
+            print(
+                f"[CallDebug {datetime.now().strftime('%H:%M:%S')}] groq_stt_done | ms={int((time.time()-t0)*1000)}, chars={len(groq_text or '')}",
+                flush=True,
+            )
+        return groq_text
+    if not GROQ_STT_LOCAL_FALLBACK:
+        if LUNA_CALL_DEBUG:
+            print(
+                f"[CallDebug {datetime.now().strftime('%H:%M:%S')}] stt_groq_only | GROQ_STT_LOCAL_FALLBACK=0",
+                flush=True,
+            )
+        return None
+    if LUNA_CALL_DEBUG:
+        print(
+            f"[CallDebug {datetime.now().strftime('%H:%M:%S')}] stt_fallback_local | reason=groq_skip_or_error",
+            flush=True,
+        )
+    return _local_whisper_transcribe(path)
+
+
+def _whisper_transcribe_relaxed(path: str) -> str | None:
+    """Fallback STT for noisy/Discord: Groq first, then local relaxed Whisper."""
+    t0 = time.time()
+    ok, groq_text = _groq_stt_try(path)
+    if ok:
+        if LUNA_CALL_DEBUG:
+            print(
+                f"[CallDebug {datetime.now().strftime('%H:%M:%S')}] groq_stt_relaxed_done | ms={int((time.time()-t0)*1000)}, chars={len(groq_text or '')}",
+                flush=True,
+            )
+        return groq_text
+    if not GROQ_STT_LOCAL_FALLBACK:
+        return None
+    if LUNA_CALL_DEBUG:
+        print(
+            f"[CallDebug {datetime.now().strftime('%H:%M:%S')}] stt_fallback_local_relaxed | reason=groq_skip_or_error",
+            flush=True,
+        )
+    return _local_whisper_transcribe_relaxed(path)
 
 
 def _whisper_translate(path: str) -> str | None:
@@ -13934,6 +17707,10 @@ async def cmd_call(ctx, *, contact: str = ""):
     elif r:
         await ctx.reply(r)
 
+@bot.command(name="listen", aliases=["record_listen", "vc_listen"])
+async def cmd_listen(ctx):
+    await ctx.reply("Use a Discord voice clip attachment instead. `!listen` is disabled.")
+
 @bot.command(name="dm")
 async def cmd_dm(ctx, *, args: str = ""):
     if not _is_privileged(ctx.author.id): await ctx.reply("Linked user/admin only."); return
@@ -14135,6 +17912,7 @@ async def cmd_join(ctx):
 
 @bot.command(name="leave")
 async def cmd_leave(ctx):
+    global _call_session
     if not ctx.voice_client: await ctx.reply("Not in a voice channel."); return
     if ctx.guild: _clear_music(ctx.guild.id)
     try:
@@ -14142,6 +17920,8 @@ async def cmd_leave(ctx):
     except Exception: pass
     name = ctx.voice_client.channel.name
     await ctx.voice_client.disconnect()
+    with _call_session_lock:
+        _call_session = None
     await ctx.reply(f"Left **{name}**.")
 
 # ── Startup ───────────────────────────────────────────────────────────────────
@@ -14159,6 +17939,8 @@ def _warmup():
 def main():
     _configure_social()
     threading.Thread(target=_warmup, daemon=True).start()
+    if LUNA_STREAM_AWARENESS:
+        threading.Thread(target=_stream_presence_worker, daemon=True).start()
     threading.Thread(target=lambda: web.run(host="127.0.0.1", port=5050, use_reloader=False, threaded=True), daemon=True).start()
     threading.Thread(target=lambda: (time.sleep(2), webbrowser.open("http://127.0.0.1:5050")), daemon=True).start()
     print("Web UI: http://127.0.0.1:5050")

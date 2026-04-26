@@ -407,12 +407,23 @@ def get_live_context(max_chars: int = 1500) -> str:
         ts = _latest_ts
     if not snap:
         return ""
+    map_txt = str(snap.get("map") or "")
+    queue_txt = str(snap.get("queue") or "")
+    gtype_txt = str(snap.get("gameType") or "")
+    mode_hint = str(snap.get("modeHint") or "").strip().upper()
+    if not mode_hint:
+        blob = " ".join((map_txt, queue_txt, gtype_txt)).lower()
+        if any(k in blob for k in ("aram", "howling abyss", "howlingabyss")):
+            mode_hint = "ARAM"
+        elif any(k in blob for k in ("summoner", "rift", "classic")):
+            mode_hint = "SR"
     out: dict[str, Any] = {
         "source": src or snap.get("source") or "unknown",
         "map": snap.get("map"),
         "queue": snap.get("queue"),
         "gameTimeMmSs": snap.get("gameTimeMmSs"),
         "gameType": snap.get("gameType"),
+        "modeHint": mode_hint or None,
         "activeSummoner": snap.get("activeSummoner"),
     }
     teams = snap.get("teams")
@@ -448,10 +459,19 @@ def get_live_context(max_chars: int = 1500) -> str:
         out["updatedSecAgo"] = max(0, int(time.time() - ts))
     txt = json.dumps(out, ensure_ascii=False)
     txt = txt[: max(250, int(max_chars))]
+    mode_guard = ""
+    if mode_hint == "ARAM":
+        mode_guard = (
+            "\nMode rule: This is ARAM/Howling Abyss. Do NOT call it Summoner's Rift, "
+            "and avoid lane/objective language tied to SR (top/jungle/dragon/baron lanes)."
+        )
+    elif mode_hint == "SR":
+        mode_guard = "\nMode rule: This is Summoner's Rift (not ARAM)."
     return (
         "\n\n## Live League context\n"
         "The user is currently in a live League match. Use this as situational context for conversation/coaching. "
-        "Don't ignore their direct question; blend game awareness naturally.\n"
+        "Don't ignore their direct question; blend game awareness naturally."
+        f"{mode_guard}\n"
         f"{txt}"
     )
 
@@ -746,16 +766,24 @@ def build_snapshot_from_live_client(data: dict[str, Any]) -> dict[str, Any]:
         gt = 0.0
     elapsed_sec = max(0, int(gt))
     map_mode = (gd.get("mapMode") or "").strip() or "?"
+    map_terrain = (gd.get("mapTerrain") or "").strip()
     try:
         mnum = int(gd.get("mapNumber") or 0)
     except (TypeError, ValueError):
         mnum = 0
+    mode_blob = f"{map_mode} {map_terrain}".lower()
+    is_aram = (mnum == 12) or ("aram" in mode_blob) or ("howling" in mode_blob)
+    is_sr = (mnum == 11) or ("summoner" in mode_blob) or ("rift" in mode_blob)
     if mnum == 11:
         map_display = "Summoner's Rift"
     elif mnum == 12:
         map_display = "Howling Abyss (ARAM)"
     else:
-        map_display = (gd.get("mapTerrain") or map_mode or "?").strip() or "?"
+        map_display = (map_terrain or map_mode or "?").strip() or "?"
+    if is_aram and "aram" not in map_display.lower():
+        map_display = "Howling Abyss (ARAM)"
+    queue_display = "ARAM" if is_aram else ("Summoner's Rift" if is_sr else (map_mode or "?"))
+    mode_hint = "ARAM" if is_aram else ("SR" if is_sr else None)
 
     teams: dict[str, list[dict[str, Any]]] = {"100": [], "200": []}
     players = data.get("allPlayers")
@@ -821,7 +849,8 @@ def build_snapshot_from_live_client(data: dict[str, Any]) -> dict[str, Any]:
         "source": "live_client",
         "gameType": map_mode,
         "map": map_display,
-        "queue": map_mode,
+        "queue": queue_display,
+        "modeHint": mode_hint,
         "gameTimeSeconds": elapsed_sec,
         "gameTimeMmSs": f"{elapsed_sec // 60}:{elapsed_sec % 60:02d}",
         "teams": teams,
@@ -840,6 +869,7 @@ def generate_luna_comment(
     ollama_chat: A_OllamaChat,
     model: str,
     build_chat_system: Callable[[], str],
+    build_commentary_system: Callable[[], str] | None = None,
 ) -> str:
     if _env_truthy("RIOT_LOL_SOUNDBOARD", "1"):
         sb = try_soundboard_line(snap)
@@ -848,7 +878,10 @@ def generate_luna_comment(
 
     body = json.dumps(snap, indent=2, ensure_ascii=False)[:6000]
     try:
-        system = build_chat_system()
+        if build_commentary_system is not None:
+            system = build_commentary_system()
+        else:
+            system = build_chat_system()
     except Exception as ex:
         print(f"[LoL spectator] build_chat_system failed: {ex}", flush=True)
         system = (
@@ -858,9 +891,11 @@ def generate_luna_comment(
     persona = _persona_prompt_block()
     prompt = (
         "Here is the current League of Legends match snapshot (Riot cloud and/or local Live Client data).\n"
-        "Write **one or two short chill spoken sentences** for stream banter, following your system persona"
+        "Write **one or two short chill spoken lines** to the player, following your system persona"
         + (" and the streamer-specific block below" if persona else "")
         + ".\n"
+        "Speak to **you** (second person). This is a voice line, not a recap article — do **not** narrate the player as"
+        " “the user/the player” and do **not** start with “Based on the snapshot / Looking at the data”.\n"
         "Do NOT read stats like a news caster. Use the JSON as background context and react naturally to interesting moments.\n"
         "If there is nothing notable and it would be filler, output exactly: SKIP\n"
         "When there IS something notable, prefer champion names + key moment context. Mention numbers only when truly relevant.\n"
@@ -879,6 +914,7 @@ async def commentary_loop(
     ollama_model: str,
     on_luna_reply: Callable[[str], None],
     build_chat_system: Callable[[], str],
+    build_commentary_system: Callable[[], str] | None = None,
     should_emit: Callable[[], bool] | None = None,
 ) -> None:
     """Background task: Live Client (local) and/or Riot cloud.
@@ -1077,7 +1113,12 @@ async def commentary_loop(
             print("[LoL spectator] Generating standalone commentary line…", flush=True)
 
             comment = await asyncio.to_thread(
-                generate_luna_comment, snap, ollama_chat, ollama_model, build_chat_system
+                generate_luna_comment,
+                snap,
+                ollama_chat,
+                ollama_model,
+                build_chat_system,
+                build_commentary_system,
             )
             if not comment:
                 _set_ui(message="Model returned empty line (check Ollama)")

@@ -7,7 +7,7 @@ _DATA = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 _PROFILE_FILE = os.path.join(_DATA, "profiles.json")
 _lock = threading.Lock()
 
-PROFILE_FIELDS = ["name", "hobbies", "about", "preferences", "style", "goals"]
+PROFILE_FIELDS = ["name", "hobbies", "about", "preferences", "style", "goals", "gender", "pronouns"]
 
 _PROFILE_LABELS = {
     "name": "Name",
@@ -16,6 +16,8 @@ _PROFILE_LABELS = {
     "preferences": "Preferences",
     "style": "Communication style",
     "goals": "Goals",
+    "gender": "Gender (for tone — optional)",
+    "pronouns": "Pronouns (optional)",
 }
 
 # ── Disk helpers ──────────────────────────────────────────────────────────────

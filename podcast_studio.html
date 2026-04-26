@@ -203,7 +203,7 @@
     <option value="">— Click Enable first —</option>
   </select>
   <button type="button" id="btn-share-again" style="display:none;width:100%;margin-top:8px" title="Pick a different window, tab, or monitor">Share… (pick another window)</button>
-  <label for="mic-select">Microphone (orb + recording)</label>
+  <label for="mic-select">Microphone (recording)</label>
   <select id="mic-select" disabled>
     <option value="">— Same as above —</option>
   </select>
@@ -215,7 +215,7 @@
   <div class="hint" style="margin-top:6px">
     VTuber mode: idle <code style="color:#8ab4e8">standing2</code> and talking <code style="color:#8ab4e8">Standing Arguing</code>.
   </div>
-  <button type="button" class="primary" id="btn-perm" title="Webcam or window on the virtual screen + mic for the orb. Full screen / Luna recording uses Launch OBS + VTuber mode instead.">Enable microphone &amp; video</button>
+  <button type="button" class="primary" id="btn-perm" title="Webcam or window on the virtual screen + mic input. Full screen / Luna recording uses Launch OBS + VTuber mode instead.">Enable microphone &amp; video</button>
   <div class="row">
     <button type="button" id="btn-rec-full" disabled title="System picker: choose your whole display">● Full screen</button>
     <button type="button" id="btn-rec-luna" disabled title="Requires /vrm/ on the virtual screen (VTuber or Load page)">● Luna only</button>
@@ -223,7 +223,7 @@
   <div class="row">
     <button type="button" class="danger" id="btn-stop-rec" disabled style="width:100%">■ Stop recording</button>
   </div>
-  <div class="status" id="status"><strong>Recording:</strong> click <strong>Launch OBS + VTuber mode</strong> — that loads <code>/vrm/</code>, asks for the mic, and unlocks <strong>Full screen</strong> / <strong>Luna only</strong>. Use <strong>Enable microphone &amp; video</strong> only if you need webcam or window capture on the virtual screen for the orb (optional for recording).</div>
+  <div class="status" id="status"><strong>Recording:</strong> click <strong>Launch OBS + VTuber mode</strong> — that loads <code>/vrm/</code>, asks for the mic, and unlocks <strong>Full screen</strong> / <strong>Luna only</strong>. Use <strong>Enable microphone &amp; video</strong> only if you need webcam or window capture on the virtual screen (optional for recording).</div>
   <div class="hint"><strong>Scene:</strong> drag orbit · wheel zoom · middle-drag pan · <strong>arrows</strong> move view.</div>
 </div>
 
@@ -337,6 +337,7 @@ let studioYtSyncTimer = null;
 let studioYtScheduleSessionId = 0;
 let studioYtSchedule = null;
 const studioYtEmittedIds = new Set();
+let studioYtBeatCursorPrimed = false; // once true, old beats (already behind current time) are skipped on reopen
 let studioYtApiLoading = false;
 // postMessage-based time tracking — works even when YT.Player.getCurrentTime() is unavailable
 let ytPmCurrentTime = 0;
@@ -1079,6 +1080,7 @@ function stopStudioYtWatchSync() {
   studioYtSchedule = null;
   studioYtEmittedIds.clear();
   studioYtScheduleSessionId = 0;
+  studioYtBeatCursorPrimed = false;
   studioTwitchSince = 0;
   if (ytPmTimeProbeTimer) { clearInterval(ytPmTimeProbeTimer); ytPmTimeProbeTimer = null; }
   ytPmCurrentTime = 0;
@@ -1161,6 +1163,7 @@ async function pollStudioYtSchedule() {
     if (sid > 0 && sid !== studioYtScheduleSessionId) {
       studioYtScheduleSessionId = sid;
       studioYtEmittedIds.clear();
+      studioYtBeatCursorPrimed = false;
     }
     if (j.ready && Array.isArray(j.items)) {
       studioYtSchedule = j;
@@ -1244,6 +1247,19 @@ function tickStudioYtWatchSync() {
   const t = ytEstimatedTime();
   if (!(t > 0)) return; // video hasn't started yet
   const items = [...(studioYtSchedule.items || [])].sort((a, b) => (Number(a.sec) || 0) - (Number(b.sec) || 0));
+  // On first sync after opening/reopening studio, skip beats already behind current playback position.
+  // This prevents re-firing old beats if the viewer reconnects mid-session.
+  if (!studioYtBeatCursorPrimed) {
+    for (const it of items) {
+      const id = Number(it.id);
+      const sec = Number(it.sec);
+      if (!id) continue;
+      if (Number.isFinite(sec) && sec <= t + 0.2) {
+        studioYtEmittedIds.add(id);
+      }
+    }
+    studioYtBeatCursorPrimed = true;
+  }
   let added = false;
   for (const it of items) {
     const id = Number(it.id);
@@ -2148,33 +2164,8 @@ function initThree() {
 
   buildDarkStudioWorld(scene);
 
-  const orbGeo = new THREE.SphereGeometry(0.4, 96, 96);
-  const orbMat = new THREE.MeshPhysicalMaterial({
-    color: 0xc4a574,
-    emissive: new THREE.Color(0x5c4a30),
-    emissiveIntensity: 0.14,
-    metalness: 0.22,
-    roughness: 0.58,
-    envMapIntensity: 0.88,
-    clearcoat: 0.62,
-    clearcoatRoughness: 0.28,
-    sheen: 0.35,
-    sheenRoughness: 0.55,
-    sheenColor: new THREE.Color(0xffe8c8),
-  });
-  orbMesh = new THREE.Mesh(orbGeo, orbMat);
-  orbHome.set(0, 1.28, 0.38);
-  orbMesh.position.copy(orbHome);
-  orbPosSmooth.copy(orbHome);
-  orbMesh.castShadow = true;
-  orbBaseScale = 1;
-  scene.add(orbMesh);
-
-  const orbGlow = new THREE.PointLight(0xf5d4a0, 1.55, 14, 2.1);
-  orbGlow.position.copy(orbMesh.position);
-  orbGlow.castShadow = false;
-  scene.add(orbGlow);
-  orbMesh.userData.glow = orbGlow;
+  // Orb sphere intentionally removed from studio scene.
+  orbMesh = null;
 
   screenGroup = new THREE.Group();
   screenGroup.position.set(0, 3.68, -10.8);

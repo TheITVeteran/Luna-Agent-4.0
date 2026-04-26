@@ -181,6 +181,33 @@
       background: rgba(8, 13, 28, 0.66);
       padding: 12px;
     }
+    .interact-grid {
+      margin-top: 14px;
+      display: grid;
+      grid-template-columns: minmax(320px, 1fr) minmax(320px, 1fr);
+      gap: 12px;
+      align-items: start;
+    }
+    .vrm-shell {
+      border: 1px solid rgba(88, 215, 255, 0.2);
+      border-radius: 12px;
+      background: rgba(8, 13, 28, 0.66);
+      padding: 10px;
+      display: grid;
+      gap: 9px;
+    }
+    .vrm-frame {
+      width: 100%;
+      aspect-ratio: 16 / 10;
+      border: 1px solid rgba(88, 215, 255, 0.22);
+      border-radius: 10px;
+      background: rgba(4, 8, 16, 0.8);
+    }
+    .vrm-actions {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
     .chat-log {
       max-height: 290px; overflow: auto;
       display: flex; flex-direction: column; gap: 10px; padding: 4px;
@@ -232,6 +259,7 @@
       .menu a { text-align: center; width: 100%; }
       .chat-row { grid-template-columns: 1fr; }
       .chat-row .btn { width: 100%; }
+      .interact-grid { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -246,6 +274,7 @@
         <button class="menu-toggle" id="menu-toggle" aria-label="Toggle navigation">☰</button>
         <div class="menu" id="menu">
           <a href="#home" class="active">Home</a>
+          <a href="#interact">Interact</a>
           <a href="#about">About</a>
           <a href="#latest-upgrades">Latest Upgrades</a>
           <a href="#videos">Videos</a>
@@ -265,6 +294,42 @@
         </p>
         <div class="hero-actions">
           <button class="btn primary" type="button" id="talk-btn">Talk to Luna</button>
+        </div>
+      </section>
+
+      <section id="interact" class="section">
+        <div class="section-card">
+          <h2>Talk With Luna Live</h2>
+          <p>Chat is now front and center, with Luna's VRM viewer right here for instant interaction and info.</p>
+          <div class="interact-grid">
+            <div class="vrm-shell">
+              <iframe
+                class="vrm-frame"
+                src="/vrm/?vtuber=1&env=stage"
+                title="Luna VRM Viewer"
+                loading="lazy"
+                allow="microphone"
+              ></iframe>
+              <div class="vrm-actions">
+                <a class="btn" href="/vrm/?vtuber=1&env=stage" target="_blank" rel="noopener noreferrer">Open VRM full screen</a>
+              </div>
+            </div>
+            <div class="chat-shell">
+              <div class="chat-log" id="chat-log" aria-live="polite">
+                <div class="bubble luna">Hi, I am Luna. Ask me anything.</div>
+              </div>
+              <form class="chat-row" id="chat-form">
+                <input class="chat-input" id="chat-input" placeholder="Type your message for Luna..." maxlength="500" />
+                <button class="btn primary" type="submit">Send</button>
+              </form>
+              <div class="chips">
+                <button class="chip" type="button" data-msg="Who are you and what can you do?">Who are you?</button>
+                <button class="chip" type="button" data-msg="Give me a quick tour of your best features.">Feature tour</button>
+                <button class="chip" type="button" data-msg="How can viewers interact with you during a stream?">Viewer interaction</button>
+              </div>
+              <div class="chat-status" id="chat-status"></div>
+            </div>
+          </div>
         </div>
       </section>
 
@@ -373,28 +438,6 @@
               <h3>YouTube</h3>
               <p>Loading your community profiles...</p>
             </a>
-          </div>
-        </div>
-      </section>
-
-      <section class="section">
-        <div class="section-card">
-          <h2>Interact With Luna</h2>
-          <p>Ask a question and Luna replies live from this page.</p>
-          <div class="chat-shell">
-            <div class="chat-log" id="chat-log" aria-live="polite">
-              <div class="bubble luna">Hi, I am Luna. Ask me anything.</div>
-            </div>
-            <form class="chat-row" id="chat-form">
-              <input class="chat-input" id="chat-input" placeholder="Type your message for Luna..." maxlength="500" />
-              <button class="btn primary" type="submit">Send</button>
-            </form>
-            <div class="chips">
-              <button class="chip" type="button" data-msg="Who are you and what can you do?">Who are you?</button>
-              <button class="chip" type="button" data-msg="Give me a quick tour of your best features.">Feature tour</button>
-              <button class="chip" type="button" data-msg="How can viewers interact with you during a stream?">Viewer interaction</button>
-            </div>
-            <div class="chat-status" id="chat-status"></div>
           </div>
         </div>
       </section>

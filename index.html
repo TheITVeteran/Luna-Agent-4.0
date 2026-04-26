@@ -14,7 +14,6 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js" defer></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/autoloader/prism-autoloader.min.js" defer></script>
 <script type="module" src="https://unpkg.com/@splinetool/viewer@1/build/spline-viewer.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
 <style>
   :root {
     --cyan: #00d4ff;
@@ -766,63 +765,6 @@
     min-width: 0;
   }
 
-  /* ── MIND PANEL (D3 graph next to chat) ── */
-  .mind-panel {
-    width: 280px;
-    flex-shrink: 0;
-    display: flex;
-    flex-direction: column;
-    border-left: 1px solid var(--border);
-    background: rgba(0,8,20,0.6);
-    position: relative;
-  }
-  .mind-panel.collapsed { width: 0; min-width: 0; overflow: hidden; border-left: none; }
-  .mind-panel-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 10px 12px;
-    border-bottom: 1px solid rgba(0,212,255,0.15);
-    flex-shrink: 0;
-  }
-  .mind-panel-title {
-    font-family: var(--font-data);
-    font-size: 10px;
-    letter-spacing: 0.2em;
-    color: var(--cyan);
-    text-transform: uppercase;
-  }
-  .mind-panel-toggle, .mind-panel-full {
-    background: none;
-    border: none;
-    color: rgba(0,212,255,0.7);
-    cursor: pointer;
-    font-size: 11px;
-    padding: 2px 6px;
-  }
-  .mind-panel-toggle:hover, .mind-panel-full:hover { color: var(--cyan); }
-  .mind-panel-full { text-decoration: none; }
-  #mind-graph-container {
-    flex: 1;
-    min-height: 200px;
-    position: relative;
-  }
-  #mind-graph-container svg { width: 100%; height: 100%; display: block; }
-  #mind-graph-container .node { cursor: pointer; }
-  #mind-graph-container .node circle { stroke-width: 1; }
-  #mind-graph-container .node.core circle { fill: var(--cyan); stroke: #fff; }
-  #mind-graph-container .node.drive circle { fill: #8b5cf6; }
-  #mind-graph-container .node.knowledge circle { fill: #22c55e; }
-  #mind-graph-container .node.action circle { fill: #0ea5e9; }
-  #mind-graph-container .node.nudge circle { fill: #f59e0b; }
-  #mind-graph-container .node.memory circle { fill: #ec4899; }
-  #mind-graph-container .node.proactive circle { fill: var(--magenta); }
-  #mind-graph-container .node.existential circle { fill: #b45309; stroke: rgba(180,83,9,0.6); }
-  #mind-graph-container .node.draft circle { fill: #a855f7; stroke: rgba(168,85,247,0.6); }
-  #mind-graph-container .node.evolution circle { fill: #06b6d4; stroke: rgba(6,182,212,0.6); }
-  #mind-graph-container .node text { font-size: 8px; fill: var(--text); text-anchor: middle; dominant-baseline: middle; pointer-events: none; }
-  #mind-graph-container .link { stroke: rgba(0,212,255,0.2); stroke-width: 0.8; fill: none; }
-
   /* Luna full-page Spline 3D + Spotlight background */
   .luna-bg-layer {
     position: fixed;
@@ -1528,7 +1470,7 @@
     font-size: 13px;
   }
   .settings-row label { color: var(--text); flex: 1; }
-  .settings-row select, .settings-row input[type="text"] {
+  .settings-row select, .settings-row input[type="text"], .settings-row input[type="password"] {
     background: rgba(0,20,40,0.6);
     border: 1px solid rgba(0,212,255,0.2);
     border-radius: 4px;
@@ -1561,9 +1503,6 @@
   .toggle-switch.on::after { transform: translateX(16px); }
 
   /* ── RESPONSIVE ── */
-  @media (max-width: 900px) {
-    .mind-panel { display: none; }
-  }
   @media (max-width: 700px) {
     .side-panel { position: fixed; left: 0; top: 0; bottom: 0; z-index: 100; width: 240px; transform: translateX(-100%); transition: transform 0.25s; background: rgba(2,11,20,0.97); }
     .side-panel.mobile-open { transform: translateX(0); }
@@ -1732,8 +1671,11 @@
       <button class="cmd-btn" onclick="(function(){ insertCommand('!yt_watch_react ', 'paste YouTube URL, then Send'); try { window.open(new URL('/podcast/?cowatch=1', window.location.origin).href, '_blank', 'noopener,noreferrer'); } catch (e) {} })()" title="Opens Podcast studio in a new tab (video on main screen, Luna VRM on second); inserts !yt_watch_react — paste URL and Send">
         <span class="cmd-icon">📺</span> YT Watch react
       </button>
-      <button class="cmd-btn" onclick="openAnalyticsScreenPicker()" title="Choose a window or monitor, then vision reads analytics (OLLAMA_VISION_MODEL).">
-        <span class="cmd-icon">👁</span> Read screen analytics
+      <button class="cmd-btn" onclick="insertCommand('!twitch_title ', 'new stream title, then Send')" title="Update Twitch stream title (broadcaster OAuth required)">
+        <span class="cmd-icon">🏷</span> Twitch title
+      </button>
+      <button class="cmd-btn" onclick="insertCommand('!twitch_poll ', 'topic OR title | option1 | option2, then Send')" title="Create Twitch poll (auto from topic, or manual options with | separators)">
+        <span class="cmd-icon">📊</span> Twitch poll
       </button>
       <button class="cmd-btn" onclick="insertCommand('!ig_dm ', 'username then optional message')" title="Instagram DM — type username then message, then Send">
         <span class="cmd-icon">📷</span> Instagram DM
@@ -1762,7 +1704,7 @@
       <a class="cmd-btn" href="/translate/" style="text-decoration:none;color:inherit;display:inline-flex;align-items:center;gap:6px;" title="Open Luna's translate module for text or voice clips">
         <span class="cmd-icon">🔊</span> Translate
       </a>
-      <a class="cmd-btn" href="/luna-website/" target="_blank" rel="noopener noreferrer" style="text-decoration:none;color:inherit;display:inline-flex;align-items:center;gap:6px;" title="Open Luna's Website intro page in a new tab">
+      <a class="cmd-btn" href="/website/" target="_blank" rel="noopener noreferrer" style="text-decoration:none;color:inherit;display:inline-flex;align-items:center;gap:6px;" title="Open Luna's Website intro page in a new tab">
         <span class="cmd-icon">🌐</span> Luna's Website
       </a>
       <input type="file" id="translate-voice-file" accept="audio/*,.ogg,.webm,.mp3,.m4a,.opus" style="display:none"/>
@@ -1796,6 +1738,15 @@
       <button class="cmd-btn" onclick="sendQuick('!stop')" title="Stop playback and clear queue in Discord">
         <span class="cmd-icon">⏹</span> Stop
       </button>
+      <button class="cmd-btn" onclick="lunaTtsDispatch('dm')" title="Luna posts an MP3 of *her* saying the line in the message box. Type what *she* should say (her script), not a message to her. Same idea as !tts in Discord.">
+        <span class="cmd-icon">🎤</span> Luna says (TTS) → DM
+      </button>
+      <button class="cmd-btn" onclick="lunaTtsDispatch('channel')" title="Same as → DM, but to a server text channel. Set DISCORD_TTS_HUB_DEFAULT_CHANNEL_ID or DISCORD_TTS_CHANNEL_IDS.">
+        <span class="cmd-icon">🎤</span> Luna says (TTS) → server
+      </button>
+      <button class="cmd-btn" onclick="lunaTtsDispatch('both')" title="Post her TTS line to your linked DM and the configured text channel.">
+        <span class="cmd-icon">🎤</span> Luna says (TTS) → DM + server
+      </button>
         </div>
       </div>
 
@@ -1823,8 +1774,8 @@
       <button class="cmd-btn" onclick="sendQuick('luna vitals')" title="Luna process status">
         <span class="cmd-icon">✨</span> Luna vitals
       </button>
-      <button type="button" class="cmd-btn" id="camera-btn" onclick="toggleCamera()" title="Turn on so Luna can see you; ask 'what do you see' for object and face recognition">
-        <span class="cmd-icon">📷</span> <span id="camera-btn-label">Camera</span>
+      <button type="button" class="cmd-btn" id="camera-btn" onclick="toggleVision()" title="Open vision source picker (Camera or Screen Share) for live video vision">
+        <span class="cmd-icon">👁</span> <span id="camera-btn-label">Vision</span>
       </button>
       <button class="cmd-btn" onclick="sendQuick('!briefing')" title="Morning briefing: weather, calendar, todos, news">
         <span class="cmd-icon">🌅</span> Briefing
@@ -1999,17 +1950,6 @@
     </div>
   </div>
 
-  <!-- Luna's Mind (D3 graph) -->
-  <aside class="mind-panel" id="mind-panel">
-    <div class="mind-panel-header">
-      <span class="mind-panel-title">Luna's Mind</span>
-      <div>
-        <a class="mind-panel-full" href="/mind/" target="_blank" rel="noopener" title="Open full mind map">Full</a>
-        <button type="button" class="mind-panel-toggle" id="mind-panel-toggle" title="Collapse panel">◀</button>
-      </div>
-    </div>
-    <div id="mind-graph-container"></div>
-  </aside>
 </div>
 
 <!-- DM popup: continue conversation from UI -->
@@ -2034,7 +1974,7 @@
 <div class="camera-popup-overlay" id="camera-popup-overlay">
   <div class="camera-popup" id="camera-popup">
     <div class="camera-popup-title">
-      <span>📷 What Luna sees</span>
+      <span id="vision-popup-title">👁 What Luna sees</span>
       <button type="button" class="close-camera-popup" id="close-camera-popup" aria-label="Close">×</button>
     </div>
     <div class="camera-popup-video-wrap">
@@ -2048,6 +1988,20 @@
         <input type="text" class="camera-popup-chat-input" id="camera-popup-chat-input" placeholder="Ask about what you see…" />
         <button type="button" class="camera-popup-chat-send" id="camera-popup-chat-send">Send</button>
       </div>
+    </div>
+  </div>
+</div>
+
+<div class="feedback-popup-overlay" id="vision-source-overlay">
+  <div class="feedback-popup" id="vision-source-popup">
+    <div class="feedback-popup-title">Choose vision source</div>
+    <p class="feedback-popup-message">What should Luna watch right now?</p>
+    <div class="feedback-popup-options">
+      <button type="button" class="opt-btn" id="vision-source-camera">📷 Camera</button>
+      <button type="button" class="opt-btn" id="vision-source-screen">🖥 Screen share</button>
+    </div>
+    <div class="feedback-popup-actions">
+      <button type="button" class="feedback-popup-cancel" id="vision-source-cancel">Cancel</button>
     </div>
   </div>
 </div>
@@ -2178,6 +2132,14 @@
       <label>Streaming animation</label>
       <div class="toggle-switch on" id="setting-stream-anim" onclick="toggleSetting(this)"></div>
     </div>
+    <div class="settings-row" style="align-items:flex-start;flex-direction:column;gap:8px;">
+      <label style="width:100%;">ngrok auth token</label>
+      <div style="display:flex;gap:8px;width:100%;">
+        <input type="password" id="ngrok-token-input" placeholder="Paste ngrok authtoken" autocomplete="off" style="flex:1;max-width:none;" />
+        <button type="button" class="cmd-btn" onclick="saveNgrokToken()" style="padding:6px 10px;white-space:nowrap;">Save</button>
+      </div>
+      <div id="ngrok-token-status" style="font-size:11px;color:rgba(0,212,255,0.8);">Checking…</div>
+    </div>
   </div>
 </div>
 
@@ -2209,6 +2171,7 @@ syncSettingsUI();
 document.getElementById('settings-btn').addEventListener('click', () => {
   document.getElementById('settings-overlay').classList.add('open');
   loadModelList();
+  refreshNgrokTokenStatus();
 });
 document.getElementById('settings-overlay').addEventListener('click', e => { if (e.target.id === 'settings-overlay') e.target.classList.remove('open'); });
 async function loadModelList() {
@@ -2219,6 +2182,58 @@ async function loadModelList() {
     const current = d.chat_model || '';
     sel.innerHTML = '<option value="' + escapeHtml(current) + '">' + escapeHtml(current) + '</option>';
   } catch (_) {}
+}
+
+function setNgrokStatus(text, ok = true) {
+  const el = document.getElementById('ngrok-token-status');
+  if (!el) return;
+  el.textContent = text || '';
+  el.style.color = ok ? 'rgba(0,212,255,0.8)' : 'rgba(255,94,140,0.95)';
+}
+
+async function refreshNgrokTokenStatus() {
+  try {
+    const r = await fetch('/api/ngrok/authtoken');
+    const d = await r.json();
+    if (!r.ok || !d.ok) throw new Error(d.error || 'Status failed');
+    if (!d.ngrok_available) {
+      setNgrokStatus('ngrok not found. Install it or set NGROK_EXE in .env.', false);
+      return;
+    }
+    if (d.configured) {
+      const last4 = d.last4 ? ('••••' + d.last4) : 'saved';
+      setNgrokStatus('Configured locally (' + last4 + ').');
+    } else {
+      setNgrokStatus('No ngrok token saved yet.');
+    }
+  } catch (e) {
+    setNgrokStatus('Could not check ngrok token status.', false);
+  }
+}
+
+async function saveNgrokToken() {
+  const input = document.getElementById('ngrok-token-input');
+  const token = (input?.value || '').trim();
+  if (!token) {
+    setNgrokStatus('Paste your ngrok token first.', false);
+    return;
+  }
+  setNgrokStatus('Saving token…');
+  try {
+    const r = await fetch('/api/ngrok/authtoken', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token }),
+    });
+    const d = await r.json();
+    if (!r.ok || !d.ok) throw new Error(d.error || 'Save failed');
+    if (input) input.value = '';
+    const last4 = d.last4 ? ('••••' + d.last4) : 'saved';
+    setNgrokStatus('Saved. Active token: ' + last4 + '.');
+    try { showToast('ngrok token saved'); } catch (_) {}
+  } catch (e) {
+    setNgrokStatus(String(e?.message || 'Could not save token'), false);
+  }
 }
 
 // ── Clock ──
@@ -2387,7 +2402,9 @@ pollStreamSoloChat();
 
 // !yt_watch_react timed reactions — show in hub; VRM speaks via /vrm/ poll
 let ytWatchReactSince = 0;
+let ytWatchReactCursorReady = false;
 async function pollYtWatchReactChat() {
+  if (!ytWatchReactCursorReady) return;
   try {
     const res = await fetch('/api/yt-watch-react/pending?since=' + ytWatchReactSince);
     if (!res.ok) return;
@@ -2399,8 +2416,23 @@ async function pollYtWatchReactChat() {
     }
   } catch (_) {}
 }
+async function initYtWatchReactCursor() {
+  try {
+    const res = await fetch('/api/yt-watch-react/pending?since=0');
+    if (!res.ok) return;
+    const data = await res.json();
+    const events = data.events || [];
+    for (const ev of events) {
+      if (ev.id > ytWatchReactSince) ytWatchReactSince = ev.id;
+    }
+  } catch (_) {
+    /* */
+  } finally {
+    ytWatchReactCursorReady = true;
+  }
+}
 setInterval(pollYtWatchReactChat, 2500);
-pollYtWatchReactChat();
+void initYtWatchReactCursor().then(() => { void pollYtWatchReactChat(); });
 
 function updateLolObserverUI(lo) {
   const strip = document.getElementById('lol-observer-strip');
@@ -2622,9 +2654,21 @@ function hubVadThreshold() {
   const v = parseFloat(localStorage.getItem('lunaHubVadThreshold') || '');
   return Number.isFinite(v) && v > 0 && v < 1 ? v : HUB_VAD_THRESHOLD_DEFAULT;
 }
-const HUB_SILENCE_HOLD_MS = 900;
-const HUB_MIN_SEGMENT_MS = 1000;
-const HUB_MAX_SEGMENT_MS = 9000;
+const HUB_SILENCE_HOLD_MS_DEFAULT = 1400;
+const HUB_MIN_SEGMENT_MS_DEFAULT = 1200;
+const HUB_MAX_SEGMENT_MS_DEFAULT = 15000;
+function hubSilenceHoldMs() {
+  const v = parseInt(localStorage.getItem('lunaHubVaSilenceHoldMs') || '', 10);
+  return Number.isFinite(v) && v >= 400 && v <= 6000 ? v : HUB_SILENCE_HOLD_MS_DEFAULT;
+}
+function hubMinSegmentMs() {
+  const v = parseInt(localStorage.getItem('lunaHubVaMinSegmentMs') || '', 10);
+  return Number.isFinite(v) && v >= 500 && v <= 12000 ? v : HUB_MIN_SEGMENT_MS_DEFAULT;
+}
+function hubMaxSegmentMs() {
+  const v = parseInt(localStorage.getItem('lunaHubVaMaxSegmentMs') || '', 10);
+  return Number.isFinite(v) && v >= 3000 && v <= 60000 ? v : HUB_MAX_SEGMENT_MS_DEFAULT;
+}
 
 /** WebRTC processing: noise suppression + AEC + AGC (does not remove sound leaking from headphones into the mic). */
 async function lunaGetUserMediaMic() {
@@ -3019,6 +3063,32 @@ async function ytLikeFromInput() {
   }
 }
 
+async function lunaTtsDispatch(target) {
+  var line = (inputEl && inputEl.value || '').trim();
+  if (!line) {
+    showToast('Put the exact line *Luna* should say (as her) in the message box — not a question *to* her. Then use this button.', true);
+    return;
+  }
+  if (line.length > 5000) {
+    showToast('Text is too long (max 5000).', true);
+    return;
+  }
+  showToast('Luna TTS: posting her line to Discord…', false);
+  try {
+    const r = await fetch('/api/discord/tts-clip', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: line, target: target })
+    });
+    const j = await r.json().catch(function() { return {}; });
+    var msg = j.message || (j.ok ? 'Done.' : 'Request failed.');
+    showToast(msg, !j.ok);
+    if (j.ok) appendMsg('luna', '✅ ' + msg);
+  } catch (e) {
+    showToast('Network or server error.', true);
+  }
+}
+
 function showHelp() {
   inputEl.value = '!help';
   sendMessage();
@@ -3209,7 +3279,7 @@ const MORE_COMMANDS = {
       { label: 'Suno ready', icon: '✓', desc: "Tell Luna you're logged into Suno (!suno_ready)", run: function() { sendQuick('!suno_ready'); } },
       { label: 'Share song (cmd)', icon: '𝕏', desc: 'Same as the Share Song button (!share_song)', run: function() { sendQuick('!share_song'); } },
       { label: 'Share Facebook (cmd)', icon: '📘', desc: 'Same as Share Facebook (!share_facebook)', run: function() { sendQuick('!share_facebook'); } },
-      { label: 'Read screen analytics', icon: '👁', desc: 'Pick window or monitor, then vision (!analytics_screen)', run: function() { openAnalyticsScreenPicker(); } },
+      { label: 'Vision source', icon: '👁', desc: 'Choose Camera or Screen share for live vision', run: function() { toggleVision(); } },
       { label: 'YT watch stop', icon: '⏹', desc: 'Stop live YT watch-react session (!yt_watch_stop)', run: function() { sendQuick('!yt_watch_stop'); } },
     ]
   },
@@ -3307,11 +3377,14 @@ document.addEventListener('keydown', function(e) {
     if (a && a.classList.contains('open')) closeAudiobookCreateDialog();
     var an = document.getElementById('analytics-screen-overlay');
     if (an && an.classList.contains('open')) closeAnalyticsScreenPicker();
+    var vs = document.getElementById('vision-source-overlay');
+    if (vs && vs.classList.contains('open')) closeVisionSourcePicker();
   }
 });
 
 // ── Camera (object + face recognition) ──
 let cameraStream = null;
+let visionSource = null; // "camera" | "screen" | null
 let cameraIntervalId = null;
 let cameraCaptureCanvas = null;
 let cameraCaptureVideo = null;
@@ -3411,15 +3484,29 @@ function closeCameraPopup() {
   document.getElementById('camera-popup-overlay').classList.remove('open');
 }
 
-async function toggleCamera() {
+function openVisionSourcePicker() {
+  const o = document.getElementById('vision-source-overlay');
+  if (o) o.classList.add('open');
+}
+
+function closeVisionSourcePicker() {
+  const o = document.getElementById('vision-source-overlay');
+  if (o) o.classList.remove('open');
+}
+
+function stopVisionStream() {
   const btn = document.getElementById('camera-btn');
   const label = document.getElementById('camera-btn-label');
   const popupOverlay = document.getElementById('camera-popup-overlay');
   const popupVideo = document.getElementById('camera-popup-video');
+  const titleEl = document.getElementById('vision-popup-title');
   const analysisEl = document.getElementById('camera-popup-analysis');
-  if (cameraStream) {
+  if (!cameraStream) return;
+  try {
     cameraStream.getTracks().forEach(t => t.stop());
+  } catch (_) {}
     cameraStream = null;
+    visionSource = null;
     cameraCaptureCanvas = null;
     cameraCaptureVideo = null;
     cameraCaptureCtx = null;
@@ -3428,13 +3515,41 @@ async function toggleCamera() {
     cameraIntervalId = null;
     closeCameraPopup();
     if (analysisEl) { analysisEl.textContent = 'Analyzing…'; analysisEl.classList.add('empty'); }
-    label.textContent = 'Camera';
+    if (titleEl) titleEl.textContent = '👁 What Luna sees';
+    label.textContent = 'Vision';
     btn.classList.remove('camera-on');
-    btn.title = 'Turn on so Luna can see you; ask "what do you see" for object and face recognition';
-    return;
+    btn.title = 'Open vision source picker (Camera or Screen Share) for live video vision';
+}
+
+async function startVision(source) {
+  const btn = document.getElementById('camera-btn');
+  const label = document.getElementById('camera-btn-label');
+  const popupOverlay = document.getElementById('camera-popup-overlay');
+  const popupVideo = document.getElementById('camera-popup-video');
+  const titleEl = document.getElementById('vision-popup-title');
+  const analysisEl = document.getElementById('camera-popup-analysis');
+  closeVisionSourcePicker();
+  if (cameraStream) {
+    stopVisionStream();
   }
   try {
-    cameraStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } } });
+    if (source === 'screen') {
+      cameraStream = await navigator.mediaDevices.getDisplayMedia({
+        video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 8, max: 12 } },
+        audio: false
+      });
+      visionSource = 'screen';
+      const vtracks = cameraStream.getVideoTracks ? cameraStream.getVideoTracks() : [];
+      if (vtracks && vtracks[0]) {
+        vtracks[0].addEventListener('ended', function() { stopVisionStream(); });
+      }
+    } else {
+      cameraStream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } }
+      });
+      visionSource = 'camera';
+    }
+    if (titleEl) titleEl.textContent = visionSource === 'screen' ? '🖥 What Luna sees (screen share)' : '📷 What Luna sees (camera)';
     popupVideo.srcObject = cameraStream;
     popupVideo.muted = true;
     popupVideo.playsInline = true;
@@ -3448,8 +3563,8 @@ async function toggleCamera() {
     await video.play();
     cameraCaptureVideo = video;
     const canvas = document.createElement('canvas');
-    canvas.width = 640;
-    canvas.height = 480;
+    canvas.width = visionSource === 'screen' ? 1280 : 640;
+    canvas.height = visionSource === 'screen' ? 720 : 480;
     const ctx = canvas.getContext('2d');
     cameraCaptureCanvas = canvas;
     cameraCaptureCtx = ctx;
@@ -3466,22 +3581,39 @@ async function toggleCamera() {
           .then(r => r.json())
           .then(data => updateCameraPopupAnalysis(data))
           .catch(() => {});
-      }, 'image/jpeg', 0.85);
+      }, 'image/jpeg', visionSource === 'screen' ? 0.88 : 0.85);
     }
     cameraIntervalId = setInterval(captureAndSend, CAMERA_FRAME_MS);
     captureAndSend();
     loadCameraChatHistory();
-    label.textContent = 'Camera on';
+    label.textContent = visionSource === 'screen' ? 'Vision (screen on)' : 'Vision (camera on)';
     btn.classList.add('camera-on');
-    btn.title = 'Camera is on — ask Luna "what do you see" for object and face recognition. Click again to turn off.';
+    btn.title = visionSource === 'screen'
+      ? 'Screen share vision is on. Click to stop.'
+      : 'Camera vision is on. Click to stop.';
   } catch (err) {
-    showToast('Camera access denied or unavailable', true);
+    showToast((source === 'screen' ? 'Screen share' : 'Camera') + ' access denied or unavailable', true);
+    stopVisionStream();
   }
+}
+
+function toggleVision() {
+  if (cameraStream) {
+    stopVisionStream();
+    return;
+  }
+  openVisionSourcePicker();
 }
 
 document.getElementById('close-camera-popup').addEventListener('click', closeCameraPopup);
 document.getElementById('camera-popup-overlay').addEventListener('click', function(e) {
   if (e.target === this) closeCameraPopup();
+});
+document.getElementById('vision-source-camera').addEventListener('click', function() { startVision('camera'); });
+document.getElementById('vision-source-screen').addEventListener('click', function() { startVision('screen'); });
+document.getElementById('vision-source-cancel').addEventListener('click', closeVisionSourcePicker);
+document.getElementById('vision-source-overlay').addEventListener('click', function(e) {
+  if (e.target === this) closeVisionSourcePicker();
 });
 document.getElementById('camera-popup-chat-send').addEventListener('click', sendCameraChat);
 document.getElementById('camera-popup-chat-input').addEventListener('keydown', function(e) {
@@ -3773,44 +3905,6 @@ document.getElementById('evolution-log-btn').addEventListener('click', async fun
   }
 });
 
-// ── Luna's Mind (inline D3 graph) ──
-function radius(d) {
-  if (d.type === 'core') return 14;
-  if (d.type === 'drive') return 5 + (d.value || 0) * 5;
-  return 4;
-}
-function renderMindGraph() {
-  const container = document.getElementById('mind-graph-container');
-  if (!container || typeof d3 === 'undefined') return;
-  container.innerHTML = '';
-  const w = container.clientWidth || 260;
-  const h = Math.max(200, container.clientHeight || 300);
-  const svg = d3.select(container).append('svg').attr('viewBox', [0, 0, w, h]).attr('width', '100%').attr('height', '100%');
-  const g = svg.append('g');
-  fetch('/api/mind').then(r => r.json()).then(function(data) {
-    const links = data.links.map(l => ({ ...l }));
-    const nodes = data.nodes.map(d => ({ ...d }));
-    const link = g.append('g').attr('class', 'links').selectAll('line').data(links).join('line').attr('class', 'link');
-    const node = g.append('g').attr('class', 'nodes').selectAll('g').data(nodes).join('g').attr('class', d => 'node ' + (d.type || ''));
-    node.append('circle').attr('r', radius);
-    node.append('text').attr('dy', d => (d.type === 'core' ? 18 : 10)).text(d => (d.label || d.id).slice(0, 20));
-    d3.forceSimulation(nodes).force('link', d3.forceLink(links).id(d => d.id).distance(50)).force('charge', d3.forceManyBody().strength(-150)).force('center', d3.forceCenter(w/2, h/2)).force('collision', d3.forceCollide().radius(d => radius(d) + 6)).on('tick', function() {
-      link.attr('x1', d => d.source.x).attr('y1', d => d.source.y).attr('x2', d => d.target.x).attr('y2', d => d.target.y);
-      node.attr('transform', d => `translate(${d.x},${d.y})`);
-    });
-  }).catch(() => { container.innerHTML = '<div style="padding:12px;font-size:11px;color:#666;">Mind data unavailable</div>'; });
-}
-document.getElementById('mind-panel-toggle').addEventListener('click', function() {
-  const panel = document.getElementById('mind-panel');
-  panel.classList.toggle('collapsed');
-  this.textContent = panel.classList.contains('collapsed') ? '▶' : '◀';
-  if (!panel.classList.contains('collapsed')) setTimeout(renderMindGraph, 100);
-});
-setTimeout(renderMindGraph, 500);
-setInterval(function() {
-  if (!document.getElementById('mind-panel').classList.contains('collapsed')) renderMindGraph();
-}, 60000);
-
 // ── Clear chat ──
 function clearChat() {
   chatEl.innerHTML = '';
@@ -3861,6 +3955,15 @@ document.getElementById('translate-voice-file').addEventListener('change', async
 async function stopTTS() {
   try {
     await fetch('/api/tts-stop', { method: 'POST' });
+    try {
+      if (!window.__lunaVrmSpeechBc) {
+        window.__lunaVrmSpeechBc = new BroadcastChannel('luna-vrm-speech');
+      }
+      window.__lunaVrmSpeechBc.postMessage({ type: 'stop' });
+    } catch (_) {}
+    if (voiceActivityEnabled) {
+      scheduleVoiceActivityRestart();
+    }
     showToast('Voice stopped');
   } catch {}
 }
@@ -3991,13 +4094,13 @@ function monitorVoiceActivityVad() {
     voiceActivityLastVoiceAtMs = now;
   } else if (
     voiceActivitySpeechDetected &&
-    now - voiceActivityLastVoiceAtMs >= HUB_SILENCE_HOLD_MS &&
-    now - voiceActivityRecordStartedAtMs >= HUB_MIN_SEGMENT_MS
+    now - voiceActivityLastVoiceAtMs >= hubSilenceHoldMs() &&
+    now - voiceActivityRecordStartedAtMs >= hubMinSegmentMs()
   ) {
     stopVoiceActivitySegmentForTranscription();
     return;
   }
-  if (now - voiceActivityRecordStartedAtMs >= HUB_MAX_SEGMENT_MS) {
+  if (now - voiceActivityRecordStartedAtMs >= hubMaxSegmentMs()) {
     stopVoiceActivitySegmentForTranscription();
     return;
   }
@@ -4079,7 +4182,7 @@ function setVoiceActivityEnabled(on) {
   vadBtn.classList.toggle('vad-on', voiceActivityEnabled);
   vadBtn.title = voiceActivityEnabled
     ? 'Voice activity ON — mic pauses ~3.5s after Luna replies (see lunaHubVaAfterReplyMs). Click to stop.'
-    : 'Voice activity (hands-free). Tuning: lunaHubVadThreshold, lunaHubVaAfterReplyMs — then reload.';
+    : 'Voice activity (hands-free). Tuning: lunaHubVadThreshold, lunaHubVaAfterReplyMs, lunaHubVaSilenceHoldMs, lunaHubVaMinSegmentMs, lunaHubVaMaxSegmentMs — then reload.';
   if (!voiceActivityEnabled) {
     if (voiceActivityRestartTimer) {
       clearTimeout(voiceActivityRestartTimer);

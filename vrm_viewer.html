@@ -4,38 +4,117 @@
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 <title>Luna — VRM</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet"/>
 <style>
   * { margin: 0; box-sizing: border-box; }
-  html, body { height: 100%; overflow: hidden; background: #020b14; font-family: system-ui, sans-serif; }
-  #canvas-wrap { position: fixed; inset: 0; }
+  html, body { height: 100%; overflow: hidden; background: #0a0f1a; font-family: "Inter", system-ui, sans-serif; }
+  #canvas-wrap { position: fixed; inset: 0; z-index: 0; }
   canvas { display: block; width: 100%; height: 100%; }
-  #hud {
-    position: fixed; left: 12px; top: 12px; z-index: 2;
-    color: #a8d8ea; font-size: 13px; max-width: min(380px, 88vw);
-    background: rgba(0,20,40,0.75); border: 1px solid rgba(0,212,255,0.25);
-    border-radius: 8px; padding: 10px 12px;
+
+  /* —— Glass overlay (orbits: empty center stays pointer-transparent) —— */
+  .vrm-ui-root {
+    position: fixed; inset: 0; z-index: 4;
+    pointer-events: none;
   }
-  #hud strong { color: #00d4ff; }
-  #hud .err { color: #ff6b8a; margin-top: 6px; word-break: break-all; }
-  #settings-toggle {
-    position: fixed; right: 12px; top: 12px; z-index: 3;
-    width: 42px; height: 42px; border-radius: 10px;
-    border: 1px solid rgba(0,212,255,0.35);
-    background: rgba(0,20,40,0.85); color: #00d4ff;
-    cursor: pointer; font-size: 20px; line-height: 1;
-    display: flex; align-items: center; justify-content: center;
+  .vrm-glass {
+    pointer-events: auto;
+    background: hsla(220, 28%, 12%, 0.52);
+    -webkit-backdrop-filter: blur(14px) saturate(1.25);
+    backdrop-filter: blur(14px) saturate(1.25);
+    border: 1px solid hsla(210, 40%, 96%, 0.1);
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.35), inset 0 1px 0 hsla(0, 0%, 100%, 0.04);
   }
-  #settings-toggle:hover { background: rgba(0,212,255,0.12); }
+
+  .vrm-status-pill {
+    position: absolute; left: 14px; top: 14px; z-index: 2;
+    max-width: min(340px, calc(100vw - 100px));
+    border-radius: 14px; padding: 10px 14px 10px 12px;
+    color: #e8eef8;
+  }
+  .vrm-status-row { display: flex; align-items: flex-start; gap: 10px; }
+  .vrm-status-dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    margin-top: 5px; flex-shrink: 0;
+    background: #f5d742;
+    box-shadow: 0 0 0 2px rgba(245, 215, 66, 0.25);
+  }
+  .vrm-status-dot[data-state="standby"] { background: #f5d742; box-shadow: 0 0 0 2px rgba(245, 215, 66, 0.22); }
+  .vrm-status-dot[data-state="active"] { background: #3dd6a8; box-shadow: 0 0 0 2px rgba(61, 214, 168, 0.28); }
+  .vrm-status-dot[data-state="live"] { background: #5ae8b8; box-shadow: 0 0 10px rgba(40, 220, 150, 0.45); }
+  .vrm-status-dot[data-state="error"] { background: #ff6b8a; box-shadow: 0 0 0 2px rgba(255, 107, 138, 0.28); }
+  .vrm-status-title {
+    font-size: 11px; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase; color: #f0f4fc;
+  }
+  .vrm-status-sub { font-size: 11px; color: #9eb0c8; margin-top: 3px; line-height: 1.35; }
+  #err.err { color: #ff9ab0; font-size: 11px; margin-top: 8px; line-height: 1.4; word-break: break-word; }
+
+  .vrm-fps-pill {
+    position: absolute; right: 14px; top: 14px; z-index: 2;
+    min-width: 120px; border-radius: 14px; padding: 8px 14px; text-align: right;
+  }
+  .vrm-fps-label { font-size: 9px; font-weight: 600; letter-spacing: 0.14em; color: #8a9ab4; }
+  .vrm-fps-value { font-size: 22px; font-weight: 600; color: #f0f4fc; line-height: 1.1; }
+  .vrm-fps-sub { font-size: 10px; color: #7d8fa8; margin-top: 1px; }
+
+  .vrm-dock {
+    position: absolute; left: 50%; bottom: 20px; transform: translateX(-50%);
+    z-index: 2; display: flex; align-items: center; gap: 4px;
+    padding: 6px 8px; border-radius: 999px;
+    background: hsla(220, 28%, 10%, 0.55);
+    -webkit-backdrop-filter: blur(16px) saturate(1.2);
+    backdrop-filter: blur(16px) saturate(1.2);
+    border: 1px solid hsla(210, 40%, 96%, 0.1);
+    box-shadow: 0 10px 40px rgba(0, 0, 0, 0.4), inset 0 1px 0 hsla(0, 0%, 100%, 0.05);
+  }
+  .vrm-dock-btn {
+    pointer-events: auto;
+    width: 40px; height: 40px; border: none; border-radius: 12px;
+    background: transparent; color: #c5d0e0;
+    cursor: pointer; display: flex; align-items: center; justify-content: center;
+    transition: color 0.15s, background 0.15s;
+  }
+  .vrm-dock-btn:hover { color: #fff; background: hsla(210, 30%, 100%, 0.08); }
+  .vrm-dock-btn svg, .vrm-dock-mic svg { width: 22px; height: 22px; stroke: currentColor; fill: none; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+  .vrm-dock-mic svg { width: 26px; height: 26px; }
+  .vrm-dock-mic {
+    width: 52px; height: 52px; border-radius: 50%;
+    margin: 0 4px;
+    background: hsla(220, 24%, 18%, 0.85);
+    border: 1px solid hsla(150, 50%, 45%, 0.35);
+    color: #c8f5df;
+    box-shadow: 0 0 20px rgba(34, 197, 94, 0.28);
+  }
+  .vrm-dock-mic:hover { background: hsla(150, 25%, 22%, 0.95); }
+  .vrm-dock-mic.vrm-dock-mic--on,
+  .vrm-dock-mic.vrm-dock-mic--speak {
+    color: #fff;
+    border-color: rgba(52, 211, 153, 0.65);
+    box-shadow: 0 0 22px rgba(34, 197, 94, 0.55), 0 0 40px rgba(34, 197, 94, 0.15);
+  }
+  .vrm-dock-mic.vrm-dock-mic--speak { animation: vrm-mic-pulse 1.6s ease-in-out infinite; }
+  @keyframes vrm-mic-pulse { 0%, 100% { box-shadow: 0 0 18px rgba(34, 197, 94, 0.45); } 50% { box-shadow: 0 0 28px rgba(34, 197, 94, 0.7); } }
+
+  @media (max-width: 520px) {
+    .vrm-status-pill { max-width: min(52vw, 200px); }
+    .vrm-fps-pill { min-width: 100px; padding: 6px 10px; }
+    .vrm-dock { padding: 4px; gap: 0; }
+    .vrm-dock-btn { width: 36px; height: 36px; }
+    .vrm-dock-mic { width: 46px; height: 46px; }
+  }
+
   #settings-panel {
-    position: fixed; right: 12px; top: 58px; z-index: 3;
+    position: fixed; right: 14px; top: 88px; z-index: 5;
     width: min(340px, calc(100vw - 24px));
     max-height: min(90vh, 920px);
     overflow-y: auto;
-    background: rgba(0,20,40,0.95);
-    border: 1px solid rgba(0,212,255,0.3);
-    border-radius: 10px; padding: 14px 16px;
+    background: hsla(220, 32%, 10%, 0.92);
+    -webkit-backdrop-filter: blur(12px);
+    backdrop-filter: blur(12px);
+    border: 1px solid rgba(0, 212, 255, 0.25);
+    border-radius: 14px; padding: 14px 16px;
     color: #a8d8ea; font-size: 13px;
-    box-shadow: 0 8px 32px rgba(0,0,0,0.45);
+    box-shadow: 0 12px 40px rgba(0,0,0,0.5);
     display: none;
   }
   #settings-panel.open { display: block; }
@@ -94,7 +173,48 @@
 <body>
 <div id="canvas-wrap"><canvas id="c"></canvas></div>
 
-<button type="button" id="settings-toggle" title="Avatar &amp; speech" aria-expanded="false" aria-controls="settings-panel">⚙</button>
+<div class="vrm-ui-root" id="vrm-ui-root" aria-hidden="false">
+  <div class="vrm-glass vrm-status-pill" id="vrm-status-pill">
+    <div class="vrm-status-row">
+      <span class="vrm-status-dot" id="vrm-status-dot" data-state="standby"></span>
+      <div>
+        <div class="vrm-status-title" id="vrm-status-title">SYSTEM STANDBY</div>
+        <div class="vrm-status-sub" id="vrm-status-sub">Orbit the scene; open the bar below for voice + settings.</div>
+        <div class="err" id="err" hidden></div>
+      </div>
+    </div>
+  </div>
+  <div class="vrm-glass vrm-fps-pill" id="vrm-fps-pill">
+    <div class="vrm-fps-label">RENDER FPS</div>
+    <div class="vrm-fps-value" id="vrm-fps-value">—</div>
+    <div class="vrm-fps-sub" id="vrm-fps-sub">Scene ready</div>
+  </div>
+  <nav class="vrm-dock" id="vrm-dock" aria-label="VRM quick actions">
+    <button type="button" class="vrm-dock-btn" id="vrm-dock-upload" title="Model &amp; height (settings)">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v12M8 8l4-4 4 4"/><path d="M5 20h14"/></svg>
+    </button>
+    <button type="button" class="vrm-dock-btn" id="vrm-dock-screen" title="Luna studio / co&#8209;watch">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="2" y="4" width="20" height="14" rx="2"/><path d="M8 22h8"/></svg>
+    </button>
+    <button type="button" class="vrm-dock-btn vrm-dock-mic" id="vrm-dock-mic" title="Voice chat (toggle)" aria-pressed="false">
+      <svg viewBox="0 0 24 24" width="28" height="28" aria-hidden="true"><path d="M12 14a3 3 0 0 0 3-3V7a3 3 0 0 0-6 0v4a3 3 0 0 0 3 3z"/><path d="M19 11a7 7 0 0 1-14 0"/><path d="M12 18v3"/></svg>
+    </button>
+    <button type="button" class="vrm-dock-btn" id="vrm-dock-chat" title="Luna hub (full chat)">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 10h.01M12 10h.01M16 10h.01M20 5H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3l3 3v-3h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2z"/></svg>
+    </button>
+    <button type="button" class="vrm-dock-btn" id="vrm-dock-settings" title="Expression &amp; speech settings" aria-expanded="false" aria-controls="settings-panel">
+      <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+        <path stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.6" d="M9.594 3.94c.09-.542.56-.94 1.11-.94h2.593c.55 0 1.02.398 1.11.94l.213 1.281c.063.374.313.686.645.87.074.04.147.083.22.127.324.196.72.257 1.075.124l1.217-.456a1.125 1.125 0 011.37.49l1.296 2.247a1.125 1.125 0 01-.26 1.431l-1.003.827c-.293.24-.438.613-.431.992a6.759 6.759 0 010 .255c-.007.378.138.75.43.99l1.005.828c.424.35.534.954.26 1.43l-1.298 2.247a1.125 1.125 0 01-1.369.491l-1.217-.456c-.355-.133-.75-.072-1.076.124a6.57 6.57 0 01-.22.128c-.331.183-.581.495-.644.869l-.213 1.28c-.09.543-.56.941-1.11.941h-2.594c-.55 0-1.02-.398-1.11-.94l-.213-1.281c-.062-.374-.312-.686-.644-.87a6.52 6.52 0 01-.22-.127c-.325-.196-.72-.257-1.076-.124l-1.217.456a1.125 1.125 0 01-1.369-.49l-1.297-2.247a1.125 1.125 0 01.26-1.431l1.004-.827c.292-.24.437-.613.43-.992a6.932 6.932 0 010-.255c.007-.378-.138-.75-.43-.99l-1.004-.828a1.125 1.125 0 01-.26-1.43l1.297-2.247a1.125 1.125 0 011.37-.491l1.216.456c.356.133.751.072 1.076-.124.072-.044.146-.087.22-.128.332-.183.582-.495.644-.869l.213-1.281z"/>
+        <path stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.6" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/>
+      </svg>
+    </button>
+  </nav>
+</div>
+<div id="vrm-telemetry" hidden>
+  <span id="path-hint"></span>
+  <span id="env-hint"></span>
+</div>
+
 <div id="settings-panel" role="dialog" aria-label="Avatar settings">
   <h3>Expression (face)</h3>
   <div class="status" id="anim-status">Loading…</div>
@@ -121,7 +241,7 @@
     <label><input type="checkbox" id="bone-map-toggle"/> Show Mixamo ↔ Luna (VRM) bone map</label>
   </div>
   <div id="bone-map-panel" hidden></div>
-  <h3>Avatar</h3>
+  <h3 id="settings-avatar-section">Avatar</h3>
   <label for="avatar-height-slider">Luna height: <span id="avatar-height-value" style="color:#00d4ff">100%</span></label>
   <input type="range" id="avatar-height-slider" min="70" max="220" step="1" value="100" />
   <div class="hint">Scale Luna only (doesn't stretch the room). Saved locally in this browser.</div>
@@ -154,13 +274,6 @@
     <button type="button" class="btn" id="btn-speak">Speak</button>
     <button type="button" class="btn btn-secondary" id="btn-stop-speech">Stop</button>
   </div>
-</div>
-
-<div id="hud">
-  <strong>VRM viewer</strong> — orbit · zoom · ⚙ expression + TTS<br/>
-  <span style="font-size:11px;opacity:0.88">Env: <code id="env-hint" style="color:#7eb8cc">…</code> · <code>?env=stage</code> (default) or <code>?env=void</code> · <code>?vtuber=1</code></span><br/>
-  Model: <span id="path-hint">…</span>
-  <div class="err" id="err" hidden></div>
 </div>
 
 <script type="module">
@@ -390,7 +503,14 @@ const errEl = document.getElementById("err");
 const pathHint = document.getElementById("path-hint");
 const envHint = document.getElementById("env-hint");
 if (envHint) envHint.textContent = VRM_ENV;
-const settingsToggle = document.getElementById("settings-toggle");
+const settingsToggle = document.getElementById("vrm-dock-settings");
+const vrmDockMic = document.getElementById("vrm-dock-mic");
+const vrmStatusTitle = document.getElementById("vrm-status-title");
+const vrmStatusSub = document.getElementById("vrm-status-sub");
+const vrmStatusDot = document.getElementById("vrm-status-dot");
+const vrmFpsValue = document.getElementById("vrm-fps-value");
+const vrmFpsSub = document.getElementById("vrm-fps-sub");
+const settingsAvatarSection = document.getElementById("settings-avatar-section");
 const settingsPanel = document.getElementById("settings-panel");
 const idleSelect = document.getElementById("idle-select");
 const talkSelect = document.getElementById("talk-select");
@@ -504,6 +624,59 @@ let voiceChatAbort = null;
 let speakDoneOneShot = null;
 /** True from final transcript until Luna reply TTS ends (or stop). */
 let voiceTurnBusy = false;
+/** Deduplication key for the glass status pill (avoids extra DOM work each frame). */
+let vrmOverlayKey = "";
+let vrmFpsT0 = performance.now();
+let vrmFpsFrames = 0;
+
+function syncDockMicChrome() {
+  if (!vrmDockMic) return;
+  vrmDockMic.setAttribute("aria-pressed", voiceActivityEnabled ? "true" : "false");
+  vrmDockMic.classList.toggle("vrm-dock-mic--on", !!voiceActivityEnabled);
+  vrmDockMic.classList.toggle("vrm-dock-mic--speak", !!speaking);
+  vrmDockMic.title = voiceActivityEnabled
+    ? "Voice chat: ON (click to stop)"
+    : "Voice chat: OFF (click to start hands-free mic)";
+}
+
+function refreshVrmOverlayStatus() {
+  if (!vrmStatusTitle || !vrmStatusSub || !vrmStatusDot) return;
+  const envL = (envHint && envHint.textContent) || VRM_ENV;
+  const modelL = (pathHint && pathHint.textContent) || "—";
+  const modelShort = modelL.length > 56 ? `${modelL.slice(0, 54)}…` : modelL;
+  const errVisible = errEl && !errEl.hidden && String(errEl.textContent || "").trim();
+  const st = (speakSttStatus && speakSttStatus.textContent) || "";
+
+  let title = "SYSTEM STANDBY";
+  let sub = `Orbit & zoom · env ${envL} · ${modelShort}`;
+  let dot = "standby";
+  if (errVisible) {
+    title = "NEEDS ATTENTION";
+    sub = "";
+    dot = "error";
+  } else if (voiceTurnBusy) {
+    title = "LUNA IS THINKING";
+    sub = st || "Working on your reply…";
+    dot = "live";
+  } else if (speaking) {
+    title = "SPEAKING";
+    sub = ttsEngine?.value === "edge" ? "Edge TTS + lip sync" : "Browser TTS";
+    dot = "live";
+  } else if (voiceActivityEnabled) {
+    title = "VOICE CHAT";
+    sub = st || "Hands-free — speak to Luna";
+    dot = "active";
+  }
+  const key = `${!!errVisible}\0${title}\0${sub}\0${dot}\0${st}`;
+  if (key !== vrmOverlayKey) {
+    vrmOverlayKey = key;
+    vrmStatusTitle.textContent = title;
+    vrmStatusSub.textContent = sub;
+    vrmStatusSub.style.display = errVisible ? "none" : "";
+    vrmStatusDot.setAttribute("data-state", dot);
+  }
+  syncDockMicChrome();
+}
 /** Hub-style mic capture for ``/api/transcribe`` while voice activity is ON. */
 let convoMediaRecorder = null;
 /** @type {MediaStream | null} */
@@ -2342,12 +2515,27 @@ function rawTextHasEmotionTags(raw) {
   return /\[[A-Z][A-Z0-9_]*\]/i.test(String(raw || ""));
 }
 
+function inferUntaggedSpeechTag(rawText) {
+  const t = String(rawText || "").trim();
+  if (!t) return "THINKING";
+  const low = t.toLowerCase();
+  const exclam = (t.match(/!/g) || []).length;
+  const qmarks = (t.match(/\?/g) || []).length;
+  if (/(lol|lmao|rofl|haha|hehe|pfft|xd)\b/i.test(low)) return "LAUGH";
+  if (/(congrats|nice|great|awesome|love this|lets go|let's go)\b/i.test(low)) return "HAPPY";
+  if (/(sorry|sad|miss you|worried|concerned|hope you're okay)\b/i.test(low)) return "CARING";
+  if (/(why|how|what if|curious|wonder)\b/i.test(low) || qmarks >= 2) return "CURIOUS";
+  if (exclam >= 2) return "EXCITED";
+  if (qmarks >= 1) return "THINKING";
+  return "THINKING";
+}
+
 /**
  * Plain TTS (no [TAG]s) otherwise keeps only NEUTRAL — face stays flat.
  * Use emotion-test selection if set; else a gentle [THINKING]-style baseline (conversational).
  */
 function defaultSpeechEmotionEventsIfUntagged(rawText) {
-  let tag = "THINKING";
+  let tag = inferUntaggedSpeechTag(rawText);
   if (emotionTestSelect) {
     const sel = String(emotionTestSelect.value || "NEUTRAL").toUpperCase();
     if (sel && sel !== "NEUTRAL" && sel !== "RESET" && LUNA_TAG_FACE_WEIGHTS[sel]) {
@@ -2611,10 +2799,16 @@ function applyProceduralExpressionDynamics(elapsed, delta) {
   const t = elapsed;
   const shimmerA = 0.022 * Math.sin(t * 2.35);
   const shimmerB = 0.015 * Math.sin(t * 1.72 + 0.55);
+  const speechBoost = speaking ? Math.min(0.45, 0.08 + (lipAmpSmooth || 0) * 0.75) : 0;
   for (const logical of ["neutral", "angry", "fun", "joy", "sorrow", "surprised"]) {
     const key = resolvedEmotionKeys[logical];
     if (!key || !em.getExpression(key)) continue;
-    const base = currentEmotionWeights[logical] ?? 0;
+    let base = currentEmotionWeights[logical] ?? 0;
+    if (speaking && logical !== "neutral" && base > 0.01) {
+      base = Math.min(1, base + speechBoost);
+    } else if (speaking && logical === "neutral") {
+      base = Math.max(0, base - speechBoost * 0.6);
+    }
     const mix = logical === "neutral" ? shimmerA + shimmerB * 0.42 : shimmerA * 0.72 + shimmerB;
     const scale = 0.28 + 0.72 * Math.min(1, Math.max(0.1, base));
     em.setValue(key, Math.min(1, Math.max(0, base + mix * scale)));
@@ -2948,18 +3142,52 @@ if (boneMapToggle) {
   });
 }
 
-settingsToggle.addEventListener("click", () => {
-  const open = !settingsPanel.classList.contains("open");
-  settingsPanel.classList.toggle("open", open);
-  settingsToggle.setAttribute("aria-expanded", open ? "true" : "false");
+if (settingsToggle) {
+  settingsToggle.addEventListener("click", () => {
+    const open = !settingsPanel.classList.contains("open");
+    settingsPanel.classList.toggle("open", open);
+    settingsToggle.setAttribute("aria-expanded", open ? "true" : "false");
+  });
+}
+
+document.getElementById("vrm-dock-upload")?.addEventListener("click", (ev) => {
+  ev.stopPropagation();
+  settingsPanel.classList.add("open");
+  if (settingsToggle) settingsToggle.setAttribute("aria-expanded", "true");
+  settingsAvatarSection?.scrollIntoView({ behavior: "smooth", block: "start" });
+});
+
+document.getElementById("vrm-dock-screen")?.addEventListener("click", (ev) => {
+  ev.stopPropagation();
+  try {
+    window.open(new URL("/podcast/?cowatch=1", window.location.origin).href, "_blank", "noopener,noreferrer");
+  } catch {
+    /* */
+  }
+});
+
+document.getElementById("vrm-dock-chat")?.addEventListener("click", (ev) => {
+  ev.stopPropagation();
+  try {
+    window.open(new URL("/", window.location.origin).href, "_blank", "noopener,noreferrer");
+  } catch {
+    /* */
+  }
+});
+
+vrmDockMic?.addEventListener("click", (ev) => {
+  ev.stopPropagation();
+  if (btnSpeak) btnSpeak.click();
 });
 
 document.addEventListener("click", (ev) => {
   if (!settingsPanel.classList.contains("open")) return;
-  if (ev.target === settingsToggle || settingsToggle.contains(ev.target)) return;
-  if (settingsPanel.contains(ev.target)) return;
+  const t = ev.target;
+  if (settingsToggle && (t === settingsToggle || settingsToggle.contains(t))) return;
+  if (settingsPanel.contains(t)) return;
+  if (t && t.closest && t.closest("#vrm-dock")) return;
   settingsPanel.classList.remove("open");
-  settingsToggle.setAttribute("aria-expanded", "false");
+  if (settingsToggle) settingsToggle.setAttribute("aria-expanded", "false");
 });
 
 idleSelect.addEventListener("change", () => {
@@ -3084,6 +3312,7 @@ function syncVoiceActivityUi() {
   }
   if (!hasHubTranscribeVoiceActivitySupport()) setSpeakSttStatus("Voice activity needs microphone recording support.");
   else if (!voiceActivityEnabled) setSpeakSttStatus("Voice activity is off.");
+  refreshVrmOverlayStatus();
 }
 
 function startVoiceActivity() {
@@ -3451,6 +3680,7 @@ let ytWatchReactSinceVrm = 0;
 /** Serialize watch-react TTS so a new line does not cancel the previous clip (chat/UI still updates immediately). */
 const ytWatchReactSpeakQueue = [];
 let ytWatchReactSpeakBusy = false;
+let ytWatchReactCursorReadyVrm = false;
 
 function ytWatchReactQueueHasId(idn) {
   for (let i = 0; i < ytWatchReactSpeakQueue.length; i++) {
@@ -3482,6 +3712,7 @@ function pumpYtWatchReactSpeakQueue() {
 }
 
 async function pollYtWatchReactForVrm() {
+  if (!ytWatchReactCursorReadyVrm) return;
   try {
     const res = await fetch(new URL("/api/yt-watch-react/pending?since=" + ytWatchReactSinceVrm, window.location.origin).href);
     if (!res.ok) return;
@@ -3501,8 +3732,23 @@ async function pollYtWatchReactForVrm() {
     /* */
   }
 }
+async function initYtWatchReactCursorForVrm() {
+  try {
+    const res = await fetch(new URL("/api/yt-watch-react/pending?since=0", window.location.origin).href);
+    if (!res.ok) return;
+    const data = await res.json();
+    const events = data.events || [];
+    for (const ev of events) {
+      if (ev.id > ytWatchReactSinceVrm) ytWatchReactSinceVrm = ev.id;
+    }
+  } catch {
+    /* */
+  } finally {
+    ytWatchReactCursorReadyVrm = true;
+  }
+}
 setInterval(pollYtWatchReactForVrm, 2500);
-pollYtWatchReactForVrm();
+void initYtWatchReactCursorForVrm().then(() => { void pollYtWatchReactForVrm(); });
 
 let lolSpectatorSinceVrm = 0;
 /** Serialize LoL spectator lines so they do not overlap/cancel each other. */
@@ -3744,6 +3990,16 @@ function animate() {
   applyVtuberHeadTrack(delta);
   if (vrm) vrm.update(delta);
   renderer.render(scene, camera);
+  vrmFpsFrames += 1;
+  const tnow = performance.now();
+  if (tnow - vrmFpsT0 >= 450) {
+    const fps = Math.max(0, Math.round((vrmFpsFrames * 1000) / (tnow - vrmFpsT0)));
+    vrmFpsFrames = 0;
+    vrmFpsT0 = tnow;
+    if (vrmFpsValue) vrmFpsValue.textContent = String(fps);
+    if (vrmFpsSub) vrmFpsSub.textContent = vrm ? (errEl && !errEl.hidden ? "Check status" : "Scene ready") : "Loading model…";
+  }
+  refreshVrmOverlayStatus();
 }
 animate();
 </script>

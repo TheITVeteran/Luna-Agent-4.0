@@ -57,8 +57,12 @@
       "once_per_game": false,
       "when": { "kills_delta_gte": 1 },
       "lines": [
-        "Pick up — that's a kill on the board.",
-        "There we go — one more for the highlight reel."
+        "Nice — you clocked one there.",
+        "Clean — that pick is yours.",
+        "There you go — keep cashing those.",
+        "That's a kill — stay on the gas.",
+        "Got 'em — you're showing up today.",
+        "One more notch on the scoreboard — good."
       ]
     },
     {

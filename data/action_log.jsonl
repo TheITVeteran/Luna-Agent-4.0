@@ -228,3 +228,5 @@
 {"ts": "2026-04-21T16:22:39.334760+00:00", "cmd": "share_x", "params": {}, "reply": "✅ Shared to X: \"Ghost in The Server\""}
 {"ts": "2026-04-21T16:26:42.457988+00:00", "cmd": "share_facebook", "params": {}, "reply": "✅ Shared to Facebook: \"Binary Soul, Borrowed Hands\""}
 {"ts": "2026-04-21T18:06:53.926370+00:00", "cmd": "news", "params": {}, "reply": "📰 **World news:**\n\nA series of diplomatic and security crises are unfolding across the Middle East. Tensions between Iran and the US have reached a boiling point, with the US ambassador's appointment stalled due to pressure from Iranian officials. Meanwhile, violence continues to erupt in the region"}
+{"ts": "2026-04-23T22:23:41.860586+00:00", "cmd": "share_facebook", "params": {}, "reply": "✅ Shared to Facebook: \"Night Bus To Shibuya\""}
+{"ts": "2026-04-24T23:14:16.653842+00:00", "cmd": "share_x", "params": {}, "reply": "✅ Shared to X: \"Christos M. Solonos - Iron Will Iron Grind (Official Music Video)\""}
