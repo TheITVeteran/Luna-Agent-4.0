@@ -981,6 +981,9 @@ _last_streamer_luna_at: float = time.time()
 _twitch_live_cache: dict = {"ts": 0.0, "live": False}
 # Seconds of user silence before LoL commentary TTS plays (set LUNA_LOL_COMMENTARY_QUIET_SEC to override)
 _LOL_COMMENTARY_USER_QUIET_SEC: float = max(30.0, float(_env("LUNA_LOL_COMMENTARY_QUIET_SEC", "90") or "90"))
+# Old standalone LoL observer-commentary loop (JSON-only) is off by default now.
+# Use chat with fused LoL data + vision instead. Set 1 only if you explicitly want the old loop.
+_LOL_STANDALONE_COMMENTARY: bool = _env("LUNA_LOL_STANDALONE_COMMENTARY", "0").strip().lower() in ("1", "true", "yes", "on")
 _yt_watch_stops: dict[str, threading.Event] = {}
 
 # Autonomous evolution (growing-agent style: when Evolve is on and Luna is idle, she proposes and absorbs new tools)
@@ -16015,8 +16018,60 @@ def api_chat():
     if not _rate_ok(ip):
         return jsonify({"error": "Too many requests. Slow down."}), 429
     data = request.get_json(force=True, silent=True) or {}
+    # Optional vision frame from website VRM viewer (camera/screen share) for Gemini-aware replies.
+    try:
+        vf = data.get("vision_frame") if isinstance(data, dict) else None
+        media_state = data.get("media_state") if isinstance(data, dict) else None
+        if (
+            isinstance(vf, dict)
+            and isinstance(vf.get("b64"), str)
+            and vf.get("b64")
+            and isinstance(media_state, dict)
+            and bool(media_state.get("active"))
+        ):
+            b64s = (vf.get("b64") or "").strip()
+            # Bound payload size (~1.6MB base64) to avoid chat abuse / huge uploads.
+            if b64s and len(b64s) <= 1_600_000:
+                img_bytes = base64.b64decode(b64s, validate=False)
+                if img_bytes:
+                    kind = str(media_state.get("type") or "camera").strip().lower()
+                    vp = (
+                        "Describe this current shared frame concisely for Luna chat context. "
+                        "Focus on visible people, actions, objects, and on-screen text. "
+                        "Do not guess hidden details."
+                    )
+                    vs = _vision_describe_image(img_bytes, prompt=vp, timeout=min(30, max(8, int(OLLAMA_VISION_TIMEOUT))), wait_for_lock=False)
+                    if vs:
+                        vs = str(vs).strip()
+                        if vs:
+                            vs = vs[:1400]
+                            ps = data.get("page_state") if isinstance(data.get("page_state"), dict) else {}
+                            ps["vision_context"] = {
+                                "active": True,
+                                "source": kind or "camera",
+                                "summary": vs,
+                            }
+                            data["page_state"] = ps
+                            data["vision_context"] = ps["vision_context"]
+    except Exception:
+        pass
     msg = (data.get("message") or "").strip()
     if not msg: return jsonify({"error": "No message"}), 400
+    # If a fresh vision summary exists (camera/screen share), inject it directly into the
+    # user turn text so the active chat model cannot miss visual context.
+    try:
+        vc = data.get("vision_context") if isinstance(data.get("vision_context"), dict) else {}
+        if vc and bool(vc.get("active")):
+            src = str(vc.get("source") or "camera").strip().lower() or "camera"
+            vsum = str(vc.get("summary") or "").strip()
+            if vsum:
+                msg = (
+                    f"[Live vision context — {src}]\n"
+                    f"{vsum[:1400]}\n"
+                    f"[User message]\n{msg}"
+                )
+    except Exception:
+        pass
     scope = LINKED_SCOPE or "web"
     out = _execute_chat_turn(scope, msg, data, chat_source="web")
     if out.get("need_feedback"):
@@ -16810,7 +16865,7 @@ async def on_ready():
     _lol_observer_run = getattr(_lol_spectator, "observer_should_run", None)
     if _lol_observer_run is None:
         _lol_observer_run = getattr(_lol_spectator, "is_enabled", lambda: False)
-    if _lol_spectator and _lol_observer_run():
+    if _lol_spectator and _lol_observer_run() and _LOL_STANDALONE_COMMENTARY:
         bot.loop.create_task(
             _lol_spectator.commentary_loop(
                 ollama_chat=ollama_chat,
@@ -16830,6 +16885,12 @@ async def on_ready():
         print(
             f"[LoL spectator] Observer task started. Commentary ON by default — speaks when user idle >{_LOL_COMMENTARY_USER_QUIET_SEC:.0f}s. "
             "Set RIOT_LOL_EMIT_COMMENTARY=0 to disable, LUNA_LOL_COMMENTARY_QUIET_SEC to tune silence window.",
+            flush=True,
+        )
+    elif _lol_spectator and _lol_observer_run() and not _LOL_STANDALONE_COMMENTARY:
+        print(
+            "[LoL spectator] Standalone commentary loop OFF (using fused LoL data + vision in normal chat turns). "
+            "Set LUNA_LOL_STANDALONE_COMMENTARY=1 to re-enable old JSON-only auto commentary.",
             flush=True,
         )
 
