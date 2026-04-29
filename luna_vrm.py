@@ -600,17 +600,22 @@ def _expression_items_for_api() -> list[dict[str, Any]]:
     for i, p in enumerate(expression_vrma_paths()):
         base = os.path.basename(p)
         stem = os.path.splitext(base)[0]
-        out.append(
-            {
-                "kind": "vrma",
-                "index": i,
-                "label": _label_for_vrma_path(p),
-                "name": base,
-                "stem": stem,
-                "pool": "expression",
-                "role": "expression",
-            }
-        )
+        label = _label_for_vrma_path(p)
+        entry: dict[str, Any] = {
+            "kind": "vrma",
+            "index": i,
+            "label": label,
+            "name": base,
+            "stem": stem,
+            "pool": "expression",
+            "role": "expression",
+        }
+        stats = _vrma_motion_stats(p)
+        if stats:
+            entry["vrma_stats"] = stats
+            if stats.get("static_pose"):
+                entry["label"] = f"{label} (static)"
+        out.append(entry)
     return out
 
 

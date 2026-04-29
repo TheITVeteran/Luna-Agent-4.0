@@ -1,0 +1,14 @@
+{
+  "name": "luna-vrm-electron",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Electron wrapper for Luna VRM viewer",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "start:obs": "electron . -- --url=http://127.0.0.1:5050/vrm/?transparent=1&obs=1"
+  },
+  "devDependencies": {
+    "electron": "^35.3.0"
+  }
+}

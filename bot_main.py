@@ -30,6 +30,7 @@ from luna_memory import (get_memory_prompt, get_core_memories,
 from luna_profile import (get_profile_prompt, get_profile, set_profile_field,
     clear_profile, PROFILE_FIELDS, merge_profiles)
 from luna_conversation import get_recent_conversation, append_exchange, merge_conversations
+from luna_anamnesis import get_associative_memory_context
 import luna_social
 try:
     from luna_twitch import run_twitch_irc_reader, send_twitch_chat_message
@@ -99,6 +100,11 @@ _MODEL_CHAT_GUARD_TIMEOUT_SEC = max(10, int(_env("LUNA_CHAT_GUARD_TIMEOUT_SEC", 
 _MODEL_VISION_GUARD_TIMEOUT_SEC = max(10, int(_env("LUNA_VISION_GUARD_TIMEOUT_SEC", "75") or "75"))
 # Public website mode: lock Flask routes so ngrok can expose only safe website endpoints.
 LUNA_WEBSITE_PUBLIC_MODE = _env("LUNA_WEBSITE_PUBLIC_MODE", "0").strip().lower() in ("1", "true", "yes", "on")
+# Optional secondary associative-memory layer (Anamnesis bridge). Keep 3-level memory as source of truth.
+LUNA_ANAMNESIS_ENABLED = _env("LUNA_ANAMNESIS_ENABLED", "0").strip().lower() in ("1", "true", "yes", "on")
+LUNA_ANAMNESIS_ENDPOINT = _env("LUNA_ANAMNESIS_ENDPOINT", "").strip()
+LUNA_ANAMNESIS_TIMEOUT_SEC = max(1.5, min(20.0, float(_env("LUNA_ANAMNESIS_TIMEOUT_SEC", "4.0") or "4.0")))
+LUNA_ANAMNESIS_MAX_CHARS = max(200, min(3000, int(_env("LUNA_ANAMNESIS_MAX_CHARS", "1100") or "1100")))
 
 _chat_call_slots = threading.BoundedSemaphore(_MODEL_CHAT_MAX_CONCURRENCY)
 _vision_call_slots = threading.BoundedSemaphore(_MODEL_VISION_MAX_CONCURRENCY)
@@ -169,6 +175,7 @@ except Exception:
     LUNA_DM_MIDDAY_H1 = 15
 _DM_GREET_STATE_PATH = os.path.join(_DATA, "dm_greetings_state.json")
 _dm_greet_state_lock = threading.Lock()
+_CONVERSATIONS_PATH = os.path.join(_DATA, "conversations.json")
 
 # Social / media URLs
 SUNO_CREATE_URL  = _env("SUNO_CREATE_URL", "https://suno.com/create")
@@ -1125,6 +1132,7 @@ HELP_TEXT = (
     "• !suno <desc> — create a Suno song\n"
     "• !suno_ready — tell Luna you're already logged in to Suno (or say **I'm logged in to Suno**)\n"
     "• !share_song / !share_facebook — share to X or Facebook\n"
+    "• !distrokid_plan <release name | optional notes> — promo checklist + 30-day rollout plan\n"
     "• !yt_comment <url> — transcribe video + AI comment with real context\n"
     "• !yt_like <url> — like one video (Playwright; same **YOUTUBE_PROFILE_DIR** as !yt_comment)\n"
     "• !yt_analytics [days] [limit] — top traction videos from your channel (API key optional; fallback uses scrape metadata)\n"
@@ -1176,6 +1184,7 @@ LUNA_CAPABILITIES = (
     "When asked what you can do, your features, or your capabilities, describe YOUR real system — not generic AI/LLM abilities. "
     "You are Luna, a personal AI companion living on the user's PC. Your real capabilities include: "
     "chat and natural conversation; world news and Google search; creating Suno songs and sharing to X/Facebook; "
+    "music release support for DistroKid (release rollout checklists, posting cadence, and promo copy planning); "
     "YouTube comments and one-at-a-time likes share **YOUTUBE_PROFILE_DIR** (one account); Instagram and Messenger DMs; Discord DMs and voice (join VC, transcribe, TTS); "
     "WhatsApp messages (you type and send in the browser); reminders (Discord DM + voice at a set time); "
     "playing music and custom podcasts in Discord (and creating podcast episodes from a topic); "
@@ -1197,6 +1206,39 @@ LUNA_CAPABILITIES = (
     "learning from corrections (when the user corrects you, you remember and avoid repeating the mistake). "
     "Keep the list concise and friendly; say **!help** for the full command list."
 )
+
+def _distrokid_plan_text(topic: str) -> str:
+    release = (topic or "").strip() or "your next release"
+    return (
+        f"🎵 **DistroKid promo plan for {release}**\n"
+        "\n"
+        "**T-14 to T-7 (setup)**\n"
+        "- Finalize title/artwork/credits + upload assets in DistroKid.\n"
+        "- Prepare smart link + short links for bios.\n"
+        "- Create 6-10 content pieces: teaser, hook clip, lyric card, story prompt, BTS, countdown.\n"
+        "\n"
+        "**T-6 to T-1 (warmup)**\n"
+        "- Start countdown posts (3-4 touchpoints across Shorts/Reels/Stories/X).\n"
+        "- Send a DM list (friends, supporters, creators) with pre-save + release date.\n"
+        "- Pin one teaser post and update profile bio call-to-action.\n"
+        "\n"
+        "**Release day (T0)**\n"
+        "- Post launch message with direct link + one clear CTA.\n"
+        "- Publish 2-3 short clips in different formats/times.\n"
+        "- Reply to comments fast in first 2-4 hours to boost reach.\n"
+        "\n"
+        "**T+1 to T+7 (momentum)**\n"
+        "- Daily micro-content: hook variations, listener reactions, lyric snippets.\n"
+        "- Repost top-performing format with a new caption/hook.\n"
+        "- Ask Luna to draft platform-specific captions and reply templates.\n"
+        "\n"
+        "**T+8 to T+30 (long-tail)**\n"
+        "- Push one collab/remix/challenge angle.\n"
+        "- Bundle with catalog: \"if you liked this, try...\" cross-promo.\n"
+        "- Review analytics weekly and double down on best channel/time.\n"
+        "\n"
+        "If you want, send: genre + vibe + target audience + platforms, and Luna can generate a custom 30-day content calendar."
+    )
 
 # Entire system prompt for Fast chat — Ollama only: no RAG, nudges, biology, profile, or memory injections.
 LUNA_CHAT_COMPACT_INJECTION = (
@@ -2101,7 +2143,12 @@ def _force_stream_mode_from_request_data(data: dict | None) -> bool:
 
 
 def _prepare_main_chat_system(
-    scope: str, user_message: str, *, fast: bool | None = None, force_stream_mode: bool = False
+    scope: str,
+    user_message: str,
+    *,
+    fast: bool | None = None,
+    force_stream_mode: bool = False,
+    suppress_lol_context: bool = False,
 ) -> str:
     """System prompt for main chat.
 
@@ -2118,7 +2165,7 @@ def _prepare_main_chat_system(
     use_fast = _chat_fast_enabled() if fast is None else fast
     live_note = _live_chat_public_note(user_message)
     stream_presence = _stream_presence_suffix()
-    lol_ctx = _lol_live_context_suffix(1400 if use_fast else 1800)
+    lol_ctx = "" if suppress_lol_context else _lol_live_context_suffix(1400 if use_fast else 1800)
     auto_stream_from_lol = bool(lol_ctx) and _stream_mode_auto_lol_enabled()
     stream = _stream_mode_suffix(
         user_message,
@@ -2317,7 +2364,7 @@ def _save_json(path: str, data) -> None:
 
 
 def _dm_greeting_recipient_ids() -> list[int]:
-    """Users who have DM-related config: sync list, linked, admin, extras."""
+    """Users who should receive scheduled greetings: config IDs + known Discord conversation scopes."""
     ids: set[int] = set()
     ids |= _dm_sync_ids
     if _linked_int:
@@ -2325,6 +2372,17 @@ def _dm_greeting_recipient_ids() -> list[int]:
     if _admin_int:
         ids.add(_admin_int)
     ids |= _greet_extra
+    # Include everyone Luna has chatted with under discord:user:<id> scope.
+    conv = _load_json(_CONVERSATIONS_PATH, {})
+    if isinstance(conv, dict):
+        for k in conv.keys():
+            m = re.match(r"^discord:user:(\d{6,})$", str(k or "").strip())
+            if not m:
+                continue
+            try:
+                ids.add(int(m.group(1)))
+            except Exception:
+                pass
     return sorted(ids)
 
 
@@ -2636,6 +2694,15 @@ def _build_system(base: str, scope: str | None = None) -> str:
         if profile: parts.append(profile)
         mem = get_memory_prompt(scope)
         if mem: parts.append(mem)
+        am = get_associative_memory_context(
+            enabled=LUNA_ANAMNESIS_ENABLED,
+            endpoint=LUNA_ANAMNESIS_ENDPOINT,
+            scope=scope,
+            user_message=base,
+            timeout_sec=LUNA_ANAMNESIS_TIMEOUT_SEC,
+            max_chars=LUNA_ANAMNESIS_MAX_CHARS,
+        )
+        if am: parts.append(am)
         style = _get_style(scope)
         if style: parts.append("User style: " + style)
         goals = _get_goals(scope)
@@ -6791,6 +6858,92 @@ def _fetch_news(limit: int = 8) -> tuple[bool, str]:
     return True, f"📰 **Latest from X (@{x_user}):**\n\n" + "\n\n".join(
         f"{i}. {str(it.get('title') or '').strip()}" for i, it in enumerate(top, 1)
     )
+
+
+def _fetch_topic_news(topic: str, limit: int = 6) -> tuple[bool, str]:
+    """Fetch current web news for a topic (today-focused) and summarize with sources."""
+    topic = (topic or "").strip()
+    if not topic:
+        return False, "Usage: ask for `news about <topic>` (e.g. `news about AI today`)."
+
+    rows: list[dict] = []
+    # Bias toward current reporting with explicit "today" and date tokens.
+    date_tokens = datetime.now(timezone.utc).strftime("%Y-%m-%d %b %d %Y")
+    query = f"{topic} news today {date_tokens}"
+    try:
+        q = urllib.parse.quote(query, safe="")
+        url = f"https://duckduckgo.com/html/?q={q}"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=20) as r:
+            html_text = r.read().decode("utf-8", errors="replace")
+        links = re.finditer(
+            r'<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>(.*?)</a>',
+            html_text,
+            re.I | re.S,
+        )
+        snippets = [
+            re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", " ", s))).strip()
+            for s in re.findall(r'<a[^>]+class="result__snippet"[^>]*>(.*?)</a>', html_text, re.I | re.S)
+        ]
+        for i, m in enumerate(links):
+            href = html.unescape(m.group(1))
+            title = re.sub(r"<[^>]+>", " ", m.group(2))
+            title = re.sub(r"\s+", " ", html.unescape(title)).strip()
+            if not href or not title:
+                continue
+            rows.append(
+                {
+                    "title": title[:160],
+                    "url": href,
+                    "snippet": snippets[i] if i < len(snippets) else "",
+                }
+            )
+            if len(rows) >= max(3, min(10, int(limit or 6))):
+                break
+    except Exception as e:
+        return False, f"News search failed: {e}"
+
+    if not rows:
+        return False, f"I could not find current web results for **{topic}**."
+
+    # Prefer concise, current-context summary with source links.
+    bullets = []
+    for it in rows[:6]:
+        t = (it.get("title") or "").strip()
+        s = (it.get("snippet") or "").strip()
+        bullets.append(f"• {t}" + (f" — {s}" if s else ""))
+    try:
+        summary = ollama_chat(
+            "Summarize today's news on the requested topic in 3–6 short bullet points. "
+            "Use only the provided search snippets; if uncertain, say uncertain.\n\n"
+            f"Topic: {topic}\n\nSearch snippets:\n" + "\n".join(bullets),
+            system=(
+                "You are a careful news summarizer. Prefer current-day relevance, avoid speculation, "
+                "and output plain bullet points only."
+            ),
+            model=OLLAMA_MODEL,
+        ).strip()
+    except Exception:
+        summary = ""
+
+    lines = [f"📰 **Current news on: {topic}**"]
+    if summary:
+        lines.append("")
+        lines.append(summary[:2200])
+    else:
+        lines.append("")
+        for i, it in enumerate(rows[:5], 1):
+            t = (it.get("title") or "").strip()
+            s = (it.get("snippet") or "").strip()
+            lines.append(f"{i}. **{t}**" + (f" — {s}" if s else ""))
+    lines.append("")
+    lines.append("Sources:")
+    for it in rows[:5]:
+        u = (it.get("url") or "").strip()
+        t = (it.get("title") or "").strip()
+        if u:
+            lines.append(f"- {t}: {u}")
+    return True, "\n".join(lines[:120])
 
 # ── Search ────────────────────────────────────────────────────────────────────
 
@@ -12512,6 +12665,7 @@ def _run_cmd(cmd: str, params: dict, scope: str | None = None, user_message: str
 def _run_cmd_impl(cmd: str, p: dict, scope: str | None, user_message: str) -> str | dict:
     dispatch = {
         "news":           lambda: _fetch_news(),
+        "news_topic":     lambda: _fetch_topic_news((p.get("topic") or p.get("query") or "").strip(), int(p.get("limit") or 6)),
         "search":         lambda: _search(p.get("query","").strip()),
         "suno":           lambda: _run_suno(p.get("description","").strip()),
         "share_x":        lambda: _run_x_share(),
@@ -12815,7 +12969,25 @@ def _parse_command(text: str) -> tuple[str, dict] | None:
     low = raw.lower()
     if low.startswith("!"): return None
 
-    # News
+    # News (topic-specific first, then general headlines)
+    m_news_topic = re.search(
+        r"\b(?:news|headlines|latest updates?|current updates?)\s+(?:about|on|for)\s+(.+?)(?:\s+(?:today|right now|now|currently))?$",
+        raw,
+        re.I | re.S,
+    )
+    if m_news_topic:
+        topic = (m_news_topic.group(1) or "").strip(" .,!?:;")
+        if topic:
+            return "news_topic", {"topic": topic}
+    m_news_topic2 = re.search(
+        r"\b(?:what(?:'s| is)?\s+(?:the\s+)?)?(?:latest|current|today'?s)\s+news\s+(?:on|about)\s+(.+)$",
+        raw,
+        re.I | re.S,
+    )
+    if m_news_topic2:
+        topic = (m_news_topic2.group(1) or "").strip(" .,!?:;")
+        if topic:
+            return "news_topic", {"topic": topic}
     if re.search(r"\b(?:news|headlines|latest news|world news)\b", low): return "news", {}
     # Suno — "I'm logged in to Suno" / "suno ready" so Luna uses create flow next time
     if re.search(r"\b(?:suno\s+logged\s+in|logged\s+in\s+to\s+suno|suno\s+ready|i'?m\s+logged\s+in)\b", low):
@@ -13037,8 +13209,16 @@ def _likely_command(text: str) -> bool:
     return any(low.startswith(s) for s in starters) or low in ("play","news","help","skip","stop","ask me","digest","daily digest","todo","todo list","calendar","calendar list","calendar today","calendar week","youtube analytics","yt analytics") or "luna status" in low or "pc status" in low or bool(re.search(r"\b(what do you see|what can you see|do you see me|describe what you see)\b", low)) or bool(re.search(r"\b(?:read|analyze|scan)\s+(?:my\s+)?(?:analytics|dashboard|stats)\b", low))
 
 def _is_retry(msg: str) -> bool:
-    low = (msg or "").strip().lower()
-    return any(p in low for p in ("retry","try again","retry that","retry and fix"))
+    # Strict retry command detection only (avoid accidental trigger in normal conversation).
+    low = re.sub(r"\s+", " ", (msg or "").strip().lower()).strip(" .!?…")
+    return low in {
+        "retry",
+        "!retry",
+        "/retry",
+        "retry that",
+        "retry and fix",
+        "try again",
+    }
 
 # ── Recent social (for "continue conversation" / notification box in UI) ───────
 
@@ -15419,7 +15599,11 @@ def _execute_chat_turn(scope: str, msg: str, data: dict | None = None, *, chat_s
             _store_correction(correction)
 
     system = _prepare_main_chat_system(
-        scope, msg, fast=use_fast, force_stream_mode=_force_stream_mode_from_request_data(data)
+        scope,
+        msg,
+        fast=use_fast,
+        force_stream_mode=_force_stream_mode_from_request_data(data),
+        suppress_lol_context=bool((data or {}).get("suppress_lol_context")),
     )
 
     briefing_reply = None
@@ -16051,8 +16235,19 @@ def api_chat():
                                 "source": kind or "camera",
                                 "summary": vs,
                             }
+                            # When live vision is active, suppress unrelated LoL auto-context for this turn.
+                            data["suppress_lol_context"] = True
                             data["page_state"] = ps
                             data["vision_context"] = ps["vision_context"]
+    except Exception:
+        pass
+    # Optional avatar self-state from VRM frontend so Luna can reason about her own live body motion.
+    try:
+        vrm_state = data.get("vrm_state") if isinstance(data, dict) else None
+        if isinstance(vrm_state, dict) and bool(vrm_state.get("active")):
+            ps = data.get("page_state") if isinstance(data.get("page_state"), dict) else {}
+            ps["vrm_state"] = vrm_state
+            data["page_state"] = ps
     except Exception:
         pass
     msg = (data.get("message") or "").strip()
@@ -16068,8 +16263,45 @@ def api_chat():
                 msg = (
                     f"[Live vision context — {src}]\n"
                     f"{vsum[:1400]}\n"
+                    f"[Interpretation rule]\n"
+                    f"Prioritize this live frame context over unrelated telemetry. If uncertain, say what is unclear.\n"
                     f"[User message]\n{msg}"
                 )
+    except Exception:
+        pass
+    # Inject concise VRM self-state so chat model is explicitly aware of current avatar motion/mood.
+    try:
+        vs = data.get("vrm_state") if isinstance(data.get("vrm_state"), dict) else {}
+        if vs and bool(vs.get("active")):
+            speaking_now = bool(vs.get("speaking"))
+            body_mode = str(vs.get("body_mode") or ("talk" if speaking_now else "idle")).strip().lower() or "idle"
+            dom = str(vs.get("dominant_emotion") or "neutral").strip().lower() or "neutral"
+            pb = 0.0
+            try:
+                pb = float(vs.get("procedural_blend") or 0.0)
+            except Exception:
+                pb = 0.0
+            intent = vs.get("intent") if isinstance(vs.get("intent"), dict) else {}
+            intent_name = str(intent.get("name") or "baseline").strip().lower() or "baseline"
+            ex = ge = he = 0.0
+            try:
+                ex = float(intent.get("expressivity") or 0.0)
+                ge = float(intent.get("gesture") or 0.0)
+                he = float(intent.get("head") or 0.0)
+            except Exception:
+                ex = ge = he = 0.0
+            summary = (
+                f"speaking={speaking_now}; body_mode={body_mode}; dominant_emotion={dom}; "
+                f"procedural_blend={max(0.0, min(1.0, pb)):.2f}; intent={intent_name}; "
+                f"intent_levels(expressivity={max(0.0, min(1.0, ex)):.2f}, gesture={max(0.0, min(1.0, ge)):.2f}, head={max(0.0, min(1.0, he)):.2f})"
+            )
+            msg = (
+                f"[Live VRM self-state]\n"
+                f"{summary}\n"
+                f"[Behavior rule]\n"
+                f"Be aware of this current avatar state and adapt your next expression/body style smoothly; avoid abrupt jumps.\n"
+                f"[User message]\n{msg}"
+            )
     except Exception:
         pass
     scope = LINKED_SCOPE or "web"
@@ -16669,6 +16901,8 @@ def _handle_bang(msg: str, scope: str) -> str:
         ok, r = _run_fb_share()
         if not ok: _record_failure("share_facebook", r, {})
         return f"✅ {r}" if ok else f"❌ {r}"
+    if cmd in ("!distrokid_plan", "!dk_plan", "!release_plan"):
+        return _distrokid_plan_text(args)
     if cmd in ("!yt_comment","!youtube_comment"):
         if not args: return "Usage: !yt_comment <url>"
         url = (re.search(r"https?://[^\s]+", args) or type("",(), {"group": lambda s,x: args})()).group(0)
@@ -17070,29 +17304,46 @@ async def on_message(message: discord.Message):
         _schedule_discord_file_tts(message, reply)
         return
 
-    # NL commands — instruction-style routing only when not in fast mode (LUNA_CHAT_FAST=0).
-    if not _cf and _likely_command(text):
+    # NL commands. In fast mode we still allow a safe subset
+    # so @Luna "search ..." does not silently fall back to plain chat.
+    _fast_mode_nl_allow = {
+        "search",
+        "news",
+        "news_topic",
+        "summarize",
+        "yt_analytics",
+        "analytics_screen",
+        "briefing",
+        "todo",
+        "calendar",
+    }
+    if _likely_command(text):
         parsed = await asyncio.to_thread(_parse_command, text)
         if parsed:
             cmd, params = parsed
-            if cmd == "help":
-                await message.reply(f"{mention} {HELP_TEXT}")
-                _schedule_discord_vc_tts_reply(message, HELP_TEXT)
-                _schedule_discord_file_tts(message, HELP_TEXT)
-                return
-            if _is_privileged(message.author.id) or cmd not in ("suno","suno_ready","create_code","msg","dm","call","share_x","share_facebook","yt_comment","yt_like","ig_dm","fb_msg","remind"):
-                reply = await asyncio.to_thread(_run_cmd, cmd, params, scope, text)
-                reply = _normalize_cmd_reply(reply)
-                if isinstance(reply, dict) and reply.get("need_feedback"):
-                    await _discord_reply_split(message, _format_discord_need_feedback(reply), prefix=mention)
+            if _cf and cmd not in _fast_mode_nl_allow:
+                parsed = None
+            if not parsed:
+                pass
+            else:
+                if cmd == "help":
+                    await message.reply(f"{mention} {HELP_TEXT}")
+                    _schedule_discord_vc_tts_reply(message, HELP_TEXT)
+                    _schedule_discord_file_tts(message, HELP_TEXT)
                     return
-                if reply:
-                    await asyncio.to_thread(_log_action, cmd, params, reply)
-                    await asyncio.to_thread(append_exchange, scope, text, reply)
-                    await message.reply(f"{mention} {reply}")
-                    _schedule_discord_vc_tts_reply(message, reply)
-                    _schedule_discord_file_tts(message, reply)
-                    return
+                if _is_privileged(message.author.id) or cmd not in ("suno","suno_ready","create_code","msg","dm","call","share_x","share_facebook","yt_comment","yt_like","ig_dm","fb_msg","remind"):
+                    reply = await asyncio.to_thread(_run_cmd, cmd, params, scope, text)
+                    reply = _normalize_cmd_reply(reply)
+                    if isinstance(reply, dict) and reply.get("need_feedback"):
+                        await _discord_reply_split(message, _format_discord_need_feedback(reply), prefix=mention)
+                        return
+                    if reply:
+                        await asyncio.to_thread(_log_action, cmd, params, reply)
+                        await asyncio.to_thread(append_exchange, scope, text, reply)
+                        await message.reply(f"{mention} {reply}")
+                        _schedule_discord_vc_tts_reply(message, reply)
+                        _schedule_discord_file_tts(message, reply)
+                        return
 
     # Luna chat
     chat_text = text
