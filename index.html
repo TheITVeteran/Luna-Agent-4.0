@@ -1130,6 +1130,26 @@
     gap: 6px;
     align-items: center;
   }
+  .chat-image-chip {
+    display: none;
+    margin-top: 6px;
+    font-size: 11px;
+    color: rgba(168, 216, 234, 0.92);
+  }
+  .chat-image-chip.show {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .chat-image-chip button {
+    border: 1px solid rgba(0, 212, 255, 0.28);
+    background: rgba(0, 35, 55, 0.45);
+    color: var(--cyan);
+    border-radius: 6px;
+    font-size: 11px;
+    padding: 2px 6px;
+    cursor: pointer;
+  }
 
   .icon-btn {
     width: 40px; height: 40px;
@@ -1932,6 +1952,8 @@
         </div>
         <div class="input-btns">
           <button type="button" class="chat-mode-btn" id="chat-mode-btn" aria-pressed="true">Fast</button>
+          <button class="icon-btn" id="image-btn" title="Attach image to message">🖼</button>
+          <input type="file" id="chat-image-file" accept="image/*" style="display:none" />
           <button class="icon-btn" id="mic-btn" title="Hold to record voice">🎙</button>
           <button class="icon-btn" id="vad-btn" title="Voice activity (hands-free). Tuning: lunaHubVadThreshold (sensitivity), lunaHubVaAfterReplyMs (pause after Luna speaks, default 3500).">VA</button>
           <button class="icon-btn" id="stop-btn" onclick="stopTTS()" title="Stop voice">◼</button>
@@ -1941,6 +1963,7 @@
         </div>
       </div>
       <div class="input-hint">
+        <span class="chat-image-chip" id="chat-image-chip"><span id="chat-image-chip-text"></span><button type="button" id="chat-image-clear">Clear</button></span>
         <span class="hint-item"><kbd>Enter</kbd> Send</span>
         <span class="hint-item"><kbd>Shift+Enter</kbd> New line</span>
         <span class="hint-item"><kbd>Shadow,</kbd> Commands</span>
@@ -2705,6 +2728,13 @@ function scheduleVoiceActivityRestart() {
 const chatEl = document.getElementById('chat');
 const inputEl = document.getElementById('input');
 const sendBtn = document.getElementById('send-btn');
+const chatImageBtn = document.getElementById('image-btn');
+const chatImageFileInput = document.getElementById('chat-image-file');
+const chatImageChip = document.getElementById('chat-image-chip');
+const chatImageChipText = document.getElementById('chat-image-chip-text');
+const chatImageClearBtn = document.getElementById('chat-image-clear');
+let pendingChatVisionFrame = null;
+let pendingChatImageLabel = '';
 
 /** Web chat: `fast` (compact prompt) vs `instruction` (full system + inner monologue). */
 let chatMode = localStorage.getItem('lunaChatMode') === 'instruction' ? 'instruction' : 'fast';
@@ -2935,10 +2965,61 @@ function removeThinking() {
   if (t) t.remove();
 }
 
+function refreshPendingChatImageUi() {
+  if (!chatImageChip || !chatImageChipText) return;
+  const hasImage = !!(pendingChatVisionFrame && pendingChatVisionFrame.b64);
+  chatImageChip.classList.toggle('show', hasImage);
+  chatImageChipText.textContent = hasImage
+    ? ('Image attached: ' + (pendingChatImageLabel || 'image'))
+    : '';
+}
+
+function clearPendingChatImage() {
+  pendingChatVisionFrame = null;
+  pendingChatImageLabel = '';
+  if (chatImageFileInput) chatImageFileInput.value = '';
+  refreshPendingChatImageUi();
+}
+
+async function readImageFileAsVisionFrame(file) {
+  if (!file) return null;
+  if (!String(file.type || '').toLowerCase().startsWith('image/')) return null;
+  const dataUrl = await new Promise((resolve, reject) => {
+    const fr = new FileReader();
+    fr.onload = () => resolve(String(fr.result || ''));
+    fr.onerror = () => reject(new Error('Could not read image'));
+    fr.readAsDataURL(file);
+  });
+  const img = await new Promise((resolve, reject) => {
+    const i = new Image();
+    i.onload = () => resolve(i);
+    i.onerror = () => reject(new Error('Image decode failed'));
+    i.src = dataUrl;
+  });
+  const iw = Number(img.naturalWidth || 0);
+  const ih = Number(img.naturalHeight || 0);
+  if (!(iw > 0 && ih > 0)) return null;
+  const maxW = 768;
+  const scale = Math.min(1, maxW / iw);
+  const w = Math.max(64, Math.round(iw * scale));
+  const h = Math.max(64, Math.round(ih * scale));
+  const cv = document.createElement('canvas');
+  cv.width = w;
+  cv.height = h;
+  const cx = cv.getContext('2d');
+  if (!cx) return null;
+  cx.drawImage(img, 0, 0, w, h);
+  const outDataUrl = cv.toDataURL('image/jpeg', 0.72);
+  const b64 = String(outDataUrl.split(',', 2)[1] || '').trim();
+  if (!b64) return null;
+  return { mime: 'image/jpeg', b64 };
+}
+
 // ── Send message ──
 async function sendMessage() {
   const msg = inputEl.value.trim();
-  if (!msg || isSending) return;
+  const hasImage = !!(pendingChatVisionFrame && pendingChatVisionFrame.b64);
+  if ((!msg && !hasImage) || isSending) return;
 
   isSending = true;
   sendBtn.disabled = true;
@@ -2950,16 +3031,22 @@ async function sendMessage() {
   const isShadow = /^shadow[,\s]/i.test(msg);
   document.getElementById('stat-mode').textContent = isShadow ? 'SHADOW' : 'LUNA';
 
-  appendMsg('user', msg);
+  if (msg) appendMsg('user', msg + (hasImage ? '\n[Image attached]' : ''));
+  else appendMsg('user', '[Image attached]');
   showThinking();
 
   const t0 = performance.now();
 
   try {
+    const body = { message: msg || 'Please describe this image.', chat_mode: chatMode };
+    if (hasImage) {
+      body.vision_frame = pendingChatVisionFrame;
+      body.media_state = { active: true, type: 'upload', mobile_device: false, website_embed: false };
+    }
     const res = await fetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: msg, chat_mode: chatMode })
+      body: JSON.stringify(body)
     });
     const raw = await res.text();
     let data = {};
@@ -2997,6 +3084,7 @@ async function sendMessage() {
     }
     const reply = data.reply || data.error || 'No response.';
     appendMsg('luna', reply, { responseTime: elapsed });
+    clearPendingChatImage();
     loadRecentSocial();
     updateWorkingStatus();
   } catch (err) {
@@ -3014,6 +3102,28 @@ async function sendMessage() {
   }
   setTimeout(() => document.getElementById('stat-mode').textContent = 'LUNA', 3000);
 }
+
+chatImageBtn?.addEventListener('click', () => {
+  chatImageFileInput?.click();
+});
+chatImageClearBtn?.addEventListener('click', clearPendingChatImage);
+chatImageFileInput?.addEventListener('change', async () => {
+  const f = chatImageFileInput?.files?.[0];
+  if (!f) {
+    clearPendingChatImage();
+    return;
+  }
+  try {
+    const frame = await readImageFileAsVisionFrame(f);
+    if (!frame) throw new Error('Unsupported image');
+    pendingChatVisionFrame = frame;
+    pendingChatImageLabel = String(f.name || 'image').slice(0, 80);
+    refreshPendingChatImageUi();
+  } catch (e) {
+    clearPendingChatImage();
+    showToast('Could not use that image. Try PNG/JPG/WebP.', true);
+  }
+});
 
 // ── Quick commands ──
 function sendQuick(cmd) {

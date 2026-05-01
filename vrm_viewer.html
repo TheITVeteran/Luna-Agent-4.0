@@ -173,9 +173,24 @@
   }
   .chat-bubble-row {
     display: grid;
-    grid-template-columns: 1fr auto;
+    grid-template-columns: auto 1fr auto;
     gap: 8px;
     margin-top: 8px;
+  }
+  .chat-bubble-attach {
+    border: 1px solid rgba(130, 220, 255, 0.35);
+    background: rgba(110, 200, 255, 0.1);
+    color: #d7efff;
+    border-radius: 10px;
+    font-size: 12px;
+    font-weight: 600;
+    padding: 8px 10px;
+    cursor: pointer;
+  }
+  .chat-bubble-img-note {
+    margin-top: 6px;
+    font-size: 11px;
+    color: rgba(160, 225, 255, 0.84);
   }
   .chat-bubble-input {
     width: 100%;
@@ -402,9 +417,12 @@
       <div class="chat-bubble-msg luna">Hi, I am Luna. Ask me anything.</div>
     </div>
     <form class="chat-bubble-row" id="chat-bubble-form">
+      <button type="button" class="chat-bubble-attach" id="chat-bubble-attach" title="Attach image">🖼</button>
       <input class="chat-bubble-input" id="chat-bubble-input" maxlength="500" placeholder="Type your message..." />
+      <input type="file" id="chat-bubble-image-file" accept="image/*" style="display:none" />
       <button type="submit" class="chat-bubble-send" id="chat-bubble-send">Send</button>
     </form>
+    <div class="chat-bubble-img-note" id="chat-bubble-img-note"></div>
   </div>
 </div>
 <div id="vrm-telemetry" hidden>
@@ -470,7 +488,7 @@
     <strong>Browser</strong> uses OS voices (Web Speech API) — Ava is not listed there.
     Mouth visemes: Edge uses live audio level; browser uses text-timed shapes.
     The main Luna page (<code style="color:#00d4ff">/</code>) mirrors replies here; this page also polls Twitch when IRC ingest is enabled (same as the chat UI). Keep <code style="color:#00d4ff">/vrm/</code> open for avatar + Edge TTS.
-    <strong>Website voice</strong> uses <strong>push-to-talk</strong>: hold the bar mic while speaking, then release to send. This avoids noisy auto-listening.
+    <strong>Website voice</strong> (embedded <code style="color:#00d4ff">?website=1</code>): tap the <strong>dock mic</strong> to record, tap again to send — or use <strong>Voice activity</strong> below to turn listening on/off. This avoids noisy always-on capture.
     Manual / dev: <code style="color:#00d4ff">BroadcastChannel(&quot;luna-vrm-speech&quot;)</code> → <code style="color:#00d4ff">{ type: &quot;speak&quot;, text: &quot;…&quot;, engine?: &quot;edge&quot; | &quot;browser&quot; }</code>. Leading <code>[HAPPY]</code>-style tags (same set as Luna’s chat prompt) drive VRM face presets during TTS; lip-sync still controls vowel shapes.
   </div>
   <label for="tts-engine">Engine</label>
@@ -523,7 +541,7 @@ const API_TTS = new URL("api/tts", BASE).href;
 const API_CHAT = new URL("/api/chat", window.location.origin).href;
 const API_TRANSCRIBE = new URL("/api/transcribe", window.location.origin).href;
 const URL_PARAMS = new URLSearchParams(window.location.search);
-/** ``?website=1`` enables website-embedded push-to-talk (hold mic, release to send). */
+/** ``?website=1`` enables website-embedded mode (tap-to-record on the dock mic; same as turn-based VRM voice). */
 const WEBSITE_EMBED_PTT_MODE = (() => {
   const raw = (URL_PARAMS.get("website") ?? "").trim().toLowerCase();
   return raw === "1" || raw === "true" || raw === "yes" || raw === "on";
@@ -779,6 +797,11 @@ const chatBubbleLog = document.getElementById("chat-bubble-log");
 const chatBubbleForm = document.getElementById("chat-bubble-form");
 const chatBubbleInput = document.getElementById("chat-bubble-input");
 const chatBubbleSend = document.getElementById("chat-bubble-send");
+const chatBubbleAttach = document.getElementById("chat-bubble-attach");
+const chatBubbleImageFile = document.getElementById("chat-bubble-image-file");
+const chatBubbleImgNote = document.getElementById("chat-bubble-img-note");
+let chatBubbleVisionFrame = null;
+let chatBubbleVisionLabel = "";
 const settingsAvatarSection = document.getElementById("settings-avatar-section");
 const transparentBgToggle = document.getElementById("transparent-bg-toggle");
 const settingsPanel = document.getElementById("settings-panel");
@@ -934,12 +957,23 @@ let voiceChatAbort = null;
 let speakDoneOneShot = null;
 /** True from final transcript until Luna reply TTS ends (or stop). */
 let voiceTurnBusy = false;
-/** Website-only PTT press state (``?website=1``). */
-let websitePttHolding = false;
-/** True when user released PTT before MediaRecorder became active. */
-let websitePttPendingStop = false;
-let websitePttHoldStartedAtMs = 0;
-let websitePttDelayedStopTimer = 0;
+const VOICE_TURN_STATE = Object.freeze({
+  IDLE: "idle",
+  LISTENING: "listening",
+  TRANSCRIBING: "transcribing",
+  THINKING: "thinking",
+  SPEAKING: "speaking",
+  BARGED: "barged",
+});
+let voiceTurnState = VOICE_TURN_STATE.IDLE;
+
+function setVoiceTurnState(nextState, statusText = "") {
+  voiceTurnState = nextState || VOICE_TURN_STATE.IDLE;
+  voiceTurnBusy = voiceTurnState === VOICE_TURN_STATE.TRANSCRIBING || voiceTurnState === VOICE_TURN_STATE.THINKING;
+  if (statusText) setSpeakSttStatus(statusText);
+  refreshVrmOverlayStatus();
+}
+
 let externalMediaStream = null;
 let externalMediaKind = "";
 /** Mobile website mic adaptation: start raw, switch to assisted if analyzer sees low input repeatedly. */
@@ -959,9 +993,15 @@ function syncDockMicChrome() {
   vrmDockMic.setAttribute("aria-pressed", voiceActivityEnabled ? "true" : "false");
   vrmDockMic.classList.toggle("vrm-dock-mic--on", !!voiceActivityEnabled);
   vrmDockMic.classList.toggle("vrm-dock-mic--speak", !!speaking);
-  vrmDockMic.title = voiceActivityEnabled
-    ? "Voice chat: ON (click to stop)"
-    : "Voice chat: OFF (click to start hands-free mic)";
+  if (turnBasedListening) {
+    vrmDockMic.title = voiceActivityEnabled
+      ? "Tap: record · tap again: send (turn off voice in Speech → Voice activity)"
+      : "Tap to turn voice mode on";
+  } else {
+    vrmDockMic.title = voiceActivityEnabled
+      ? "Voice: ON — same VA as Luna hub (lunaHubVadThreshold / lunaHubVaAfterReplyMs). Click to stop."
+      : "Voice: OFF — click to start hub-style listening";
+  }
 }
 
 function refreshVrmOverlayStatus() {
@@ -979,17 +1019,21 @@ function refreshVrmOverlayStatus() {
     title = "NEEDS ATTENTION";
     sub = "";
     dot = "error";
-  } else if (voiceTurnBusy) {
+  } else if (voiceTurnState === VOICE_TURN_STATE.THINKING || voiceTurnState === VOICE_TURN_STATE.TRANSCRIBING) {
     title = "LUNA IS THINKING";
     sub = st || "Working on your reply…";
     dot = "live";
+  } else if (voiceTurnState === VOICE_TURN_STATE.BARGED) {
+    title = "INTERRUPTED";
+    sub = st || "Switching to your voice…";
+    dot = "active";
   } else if (speaking) {
     title = "SPEAKING";
     sub = ttsEngine?.value === "edge" ? "Edge TTS + lip sync" : "Browser TTS";
     dot = "live";
   } else if (voiceActivityEnabled) {
     title = "VOICE CHAT";
-    sub = st || "Hands-free — speak to Luna";
+    sub = st || (turnBasedListening ? "Tap dock mic to record, tap again to send" : "Hands-free — speak to Luna");
     dot = "active";
   }
   const key = `${!!errVisible}\0${title}\0${sub}\0${dot}\0${st}`;
@@ -1015,16 +1059,16 @@ let convoVadRaf = 0;
 let convoVadCtx = null;
 let convoVadAnalyser = null;
 let convoVadBuf = null;
-const CONVO_VAD_THRESHOLD = 0.02;
-const CONVO_SILENCE_HOLD_MS = 900;
-const CONVO_MIN_SEGMENT_MS = 650;
-const CONVO_MAX_SEGMENT_MS = 9000;
-/** Reject only clearly empty recordings (short words use ~>300 B WebM in practice). */
+/** Hands-free VA matches hub ``index.html``: restart mic after Luna finishes (`lunaHubVaAfterReplyMs``, default 3500). */
+let convoVaRestartTimer = 0;
+/** Hub parity: minimum blob size before calling ``/api/transcribe`` for voice-activity segments. */
+const HUB_VA_MIN_TRANSCRIBE_BYTES = 600;
+/** PTT / short taps — smaller floor than hub VA (see hub ``applyTranscriptionBlob`` vs embedded exceptions). */
 const CONVO_MIN_AUDIO_BYTES = 80;
 /** PTT/manual mode: no VAD end-of-utterance; only manual stop or this max length. */
 const CONVO_TURN_MAX_MS = 120000;
-/** Website PTT: avoid accidental micro-taps producing empty clips. */
-const WEBSITE_PTT_MIN_HOLD_MS = 280;
+const VOICE_CHAT_BUSY_RETRY_MAX = 2;
+const VOICE_CHAT_BUSY_RETRY_DELAY_MS = 1200;
 const MOBILE_WEBSITE_DEFAULT_GAIN_PCT = 170;
 let voiceActivityEnabled = false;
 let edgeAudioCtx = null;
@@ -1033,7 +1077,7 @@ let edgeAnalyser = null;
 let edgeAnalyserToDestWired = false;
 /** @type {AudioBufferSourceNode | null} */
 let edgePlaybackSource = null;
-/** From `/vrm/api/status` — used to strip emojis for Gemma 4 family TTS. */
+/** From `/vrm/api/status` — informational (chat model id). */
 let lunaChatModelId = "";
 let lipAmpSmooth = 0;
 let lipTdBuf = null;
@@ -3262,9 +3306,36 @@ const spokenLolSpectatorEventIds = new Set();
 /** Dedupe YouTube watch-react timed lines. */
 const spokenYtWatchReactEventIds = new Set();
 
+/** Luna/VRM internal state dumps (not meant to be spoken). */
+function isVrmModelTelemetryLine(t) {
+  const s = String(t || "").trim();
+  if (!s || s.length > 2500) return false;
+  if (/intent_levels\s*\(/i.test(s)) return true;
+  return /\bspeaking\s*=/.test(s) && /\bbody_mode\s*=/.test(s) && /\bdominant_emotion\s*=/.test(s);
+}
+
+/** Drop leading telemetry lines so TTS starts at real dialogue. */
+function stripLeadingVrmTelemetryLines(text) {
+  const lines = String(text || "").split(/\r?\n/);
+  let i = 0;
+  while (i < lines.length) {
+    const t = lines[i].trim();
+    if (!t) {
+      i++;
+      continue;
+    }
+    if (isVrmModelTelemetryLine(t)) {
+      i++;
+      continue;
+    }
+    break;
+  }
+  return lines.slice(i).join("\n").replace(/^\uFEFF?\s*/, "").trimStart();
+}
+
 function plainTextForVrmSpeech(raw) {
   if (!raw || typeof raw !== "string") return "";
-  let s = raw;
+  let s = stripLeadingVrmTelemetryLines(raw);
   s = s.replace(/^🎥\s*\[\d{1,2}:\d{2}\]\s*/g, "");
   s = s.replace(/^\[\d{1,2}:\d{2}\]\s*/g, "");
   s = s.replace(/```[\s\S]*?```/g, " ");
@@ -3272,6 +3343,7 @@ function plainTextForVrmSpeech(raw) {
   s = s.replace(/\*\*([^*]+)\*\*/g, "$1");
   s = s.replace(/\[([^\]]+)\]\([^)]+\)/g, "$1");
   s = s.replace(/\s+/g, " ").trim();
+  s = stripEmojisForTts(s);
   return s.slice(0, 8000);
 }
 
@@ -3281,16 +3353,6 @@ function stripLunaEmotionTagsForSpeech(text) {
     .replace(/\[[A-Z][A-Z0-9_]*\]\s*/gi, "")
     .replace(/\s+/g, " ")
     .trim();
-}
-
-function isGemma4FamilyChatModel(id) {
-  const m = String(id || "")
-    .trim()
-    .toLowerCase()
-    .replace(/\s+/g, "");
-  if (!m) return false;
-  if (m.startsWith("gemma4")) return true;
-  return m.includes("gemma-4") || m.includes("gemma4");
 }
 
 function stripEmojisForTts(text) {
@@ -3309,11 +3371,6 @@ function stripEmojisForTts(text) {
   }
   s = s.replace(/\s+/g, " ").trim();
   return s;
-}
-
-function maybeStripEmojisForGemmaTts(text) {
-  if (!isGemma4FamilyChatModel(lunaChatModelId)) return text;
-  return stripEmojisForTts(text);
 }
 
 function normalizeTagToFaceWeights(tag) {
@@ -3806,8 +3863,9 @@ function speakBrowserTts(text, opts = {}) {
   speechSynthesis.cancel();
   lipAudioMode = false;
 
-  let speakText = stripLunaEmotionTagsForSpeech(raw);
-  speakText = maybeStripEmojisForGemmaTts(speakText || raw);
+  const rawForTags = stripLeadingVrmTelemetryLines(raw);
+  let speakText = stripLunaEmotionTagsForSpeech(rawForTags) || rawForTags;
+  speakText = stripEmojisForTts(speakText);
   if (!String(speakText || "").trim()) {
     try {
       opts.onEnd?.();
@@ -3819,7 +3877,7 @@ function speakBrowserTts(text, opts = {}) {
   lipSync.text = speakText;
   lipSync.t0 = performance.now();
   lipSync.durationSec = estimateSpeechDurationSec(lipSync.text);
-  startSpeechEmotionTimeline(raw, lipSync.text);
+  startSpeechEmotionTimeline(rawForTags, lipSync.text);
   lipSync.phase = 0;
   for (const k of LIP_NAMES) lipSync.smooth[k] = 0;
 
@@ -3942,8 +4000,9 @@ async function speakEdgeTts(text, opts = {}) {
   stopEdgePlayback();
   const myGen = ++speakGen;
 
-  let tSpeak = stripLunaEmotionTagsForSpeech(raw) || raw;
-  tSpeak = maybeStripEmojisForGemmaTts(tSpeak);
+  const rawForTags = stripLeadingVrmTelemetryLines(raw);
+  let tSpeak = stripLunaEmotionTagsForSpeech(rawForTags) || rawForTags;
+  tSpeak = stripEmojisForTts(tSpeak);
   if (!String(tSpeak).trim()) {
     try {
       opts.onEnd?.();
@@ -3953,7 +4012,7 @@ async function speakEdgeTts(text, opts = {}) {
     return;
   }
   lipSync.text = tSpeak;
-  startSpeechEmotionTimeline(raw, lipSync.text);
+  startSpeechEmotionTimeline(rawForTags, lipSync.text);
   lipAudioMode = false;
   errEl.hidden = true;
 
@@ -4310,26 +4369,77 @@ function appendChatBubbleMessage(role, text) {
   chatBubbleLog.scrollTop = chatBubbleLog.scrollHeight;
 }
 
+function setChatBubbleImage(frame, label) {
+  chatBubbleVisionFrame = frame || null;
+  chatBubbleVisionLabel = frame ? String(label || "image").slice(0, 80) : "";
+  if (chatBubbleImgNote) {
+    chatBubbleImgNote.textContent = chatBubbleVisionFrame ? `Image attached: ${chatBubbleVisionLabel}` : "";
+  }
+}
+
+async function readImageFileToVisionFrame(file) {
+  if (!file) return null;
+  if (!String(file.type || "").toLowerCase().startsWith("image/")) return null;
+  const dataUrl = await new Promise((resolve, reject) => {
+    const fr = new FileReader();
+    fr.onload = () => resolve(String(fr.result || ""));
+    fr.onerror = () => reject(new Error("Could not read image"));
+    fr.readAsDataURL(file);
+  });
+  const img = await new Promise((resolve, reject) => {
+    const i = new Image();
+    i.onload = () => resolve(i);
+    i.onerror = () => reject(new Error("Image decode failed"));
+    i.src = dataUrl;
+  });
+  const iw = Number(img.naturalWidth || 0);
+  const ih = Number(img.naturalHeight || 0);
+  if (!(iw > 0 && ih > 0)) return null;
+  const maxW = 768;
+  const scale = Math.min(1, maxW / iw);
+  const w = Math.max(64, Math.round(iw * scale));
+  const h = Math.max(64, Math.round(ih * scale));
+  const cv = document.createElement("canvas");
+  cv.width = w;
+  cv.height = h;
+  const cx = cv.getContext("2d");
+  if (!cx) return null;
+  cx.drawImage(img, 0, 0, w, h);
+  const durl = cv.toDataURL("image/jpeg", 0.72);
+  const b64 = String(durl.split(",", 2)[1] || "").trim();
+  if (!b64) return null;
+  return { mime: "image/jpeg", b64 };
+}
+
 async function sendFromChatBubble() {
   const raw = String(chatBubbleInput?.value || "").trim();
-  if (!raw) return;
-  appendChatBubbleMessage("user", raw);
+  const hasImage = !!(chatBubbleVisionFrame && chatBubbleVisionFrame.b64);
+  if (!raw && !hasImage) return;
+  if (raw) appendChatBubbleMessage("user", raw + (hasImage ? "\n[Image attached]" : ""));
+  else appendChatBubbleMessage("user", "[Image attached]");
   if (chatBubbleInput) chatBubbleInput.value = "";
   if (chatBubbleSend) chatBubbleSend.disabled = true;
+  if (chatBubbleAttach) chatBubbleAttach.disabled = true;
   try {
-    const reply = await fetchLunaChatReply(raw);
+    const reply = await fetchLunaChatReply(raw || "Please describe this image.", {
+      visionFrame: hasImage ? chatBubbleVisionFrame : null,
+      mediaType: hasImage ? "upload" : "",
+    });
     const taggedReply = ensureReplyUsesViewerExpressionTag(reply);
     const visibleReply = stripLunaEmotionTagsForSpeech(taggedReply) || String(taggedReply || "").trim() || "I am here.";
     appendChatBubbleMessage("luna", visibleReply);
     if (ttsText) ttsText.value = taggedReply.slice(0, 12000);
     if (ttsEngine?.value === "edge") void speakEdgeTts(taggedReply);
     else speakBrowserTts(taggedReply);
+    if (chatBubbleImageFile) chatBubbleImageFile.value = "";
+    setChatBubbleImage(null, "");
   } catch (e) {
     const msg = String(e?.message || e || "Chat failed");
     appendChatBubbleMessage("luna", "I hit a connection issue. Please try again.");
     setSpeakSttStatus(msg);
   } finally {
     if (chatBubbleSend) chatBubbleSend.disabled = false;
+    if (chatBubbleAttach) chatBubbleAttach.disabled = false;
     chatBubbleInput?.focus();
   }
 }
@@ -4387,6 +4497,11 @@ async function startExternalMediaPreview(kind) {
     externalMediaStream = stream;
     externalMediaKind = kind;
     if (mediaPreviewVideo) mediaPreviewVideo.srcObject = stream;
+    try {
+      await mediaPreviewVideo?.play();
+    } catch {
+      /* priming decode; fetch path will retry */
+    }
     syncMirrorVisionUi();
     if (mediaPreviewLabel) mediaPreviewLabel.textContent = kind === "camera" ? "Camera preview" : "Screen share preview";
     mediaPreview?.classList.add("open");
@@ -4448,48 +4563,50 @@ chatBubbleForm?.addEventListener("submit", (ev) => {
   ev.preventDefault();
   void sendFromChatBubble();
 });
+chatBubbleAttach?.addEventListener("click", () => {
+  chatBubbleImageFile?.click();
+});
+chatBubbleImageFile?.addEventListener("change", async () => {
+  const f = chatBubbleImageFile?.files?.[0];
+  if (!f) {
+    setChatBubbleImage(null, "");
+    return;
+  }
+  try {
+    const frame = await readImageFileToVisionFrame(f);
+    if (!frame) throw new Error("Unsupported image");
+    setChatBubbleImage(frame, f.name || "image");
+  } catch {
+    if (chatBubbleImageFile) chatBubbleImageFile.value = "";
+    setChatBubbleImage(null, "");
+    setSpeakSttStatus("Could not attach that image. Try PNG/JPG/WebP.");
+  }
+});
 
-if (WEBSITE_EMBED_PTT_MODE) {
-  vrmDockMic?.addEventListener("pointerdown", (ev) => {
-    ev.preventDefault();
-    ev.stopPropagation();
-    try {
-      if (vrmDockMic && typeof vrmDockMic.setPointerCapture === "function" && ev.pointerId != null) {
-        vrmDockMic.setPointerCapture(ev.pointerId);
-      }
-    } catch {
-      /* */
+vrmDockMic?.addEventListener("click", (ev) => {
+  ev.stopPropagation();
+  if (turnBasedListening) {
+    if (!voiceActivityEnabled) {
+      startVoiceActivity();
+      return;
     }
-    startWebsitePttHold();
-  });
-  vrmDockMic?.addEventListener("pointerup", (ev) => {
-    ev.preventDefault();
-    ev.stopPropagation();
-    stopWebsitePttHold();
-  });
-  vrmDockMic?.addEventListener("pointercancel", stopWebsitePttHold);
-  vrmDockMic?.addEventListener("lostpointercapture", () => {
-    if (websitePttHolding) stopWebsitePttHold();
-  });
-} else {
-  vrmDockMic?.addEventListener("click", (ev) => {
-    ev.stopPropagation();
-    if (turnBasedListening) {
-      if (!voiceActivityEnabled) {
-        startVoiceActivity();
-        return;
-      }
-      if (voiceTurnBusy) return;
-      if (convoMediaRecorder && convoMediaRecorder.state === "recording") {
-        stopConversationSegmentForTranscription({ forceTranscribe: true });
-        return;
-      }
+    if (voiceTurnState === VOICE_TURN_STATE.THINKING || voiceTurnState === VOICE_TURN_STATE.TRANSCRIBING) return;
+    if (speaking || voiceTurnState === VOICE_TURN_STATE.SPEAKING) {
+      setVoiceTurnState(VOICE_TURN_STATE.BARGED, "Interrupted Luna. Recording your turn…");
+      stopAllSpeech();
       void startConversationRecognition();
       return;
     }
-    if (btnSpeak) btnSpeak.click();
-  });
-}
+    if (convoMediaRecorder && convoMediaRecorder.state === "recording") {
+      stopConversationSegmentForTranscription({ forceTranscribe: true });
+      return;
+    }
+    void startConversationRecognition();
+    return;
+  }
+  if (voiceActivityEnabled) stopVoiceActivity();
+  else startVoiceActivity();
+});
 
 document.addEventListener("click", (ev) => {
   const t = ev.target;
@@ -4635,23 +4752,106 @@ function setSpeakSttStatus(msg) {
 
 function notifyTurnWait() {
   if (voiceActivityEnabled && turnBasedListening) {
-    setSpeakSttStatus(WEBSITE_EMBED_PTT_MODE ? "Hold the bar mic to talk" : "Tap the mic for your next turn");
+    setSpeakSttStatus("Tap the dock mic to record, tap again to send");
   }
 }
 
-/** After a segment or reply: re-open the mic only in continuous (non-PTT) mode. */
-function scheduleVoiceListenRestart() {
+/**
+ * Hands-free VA matches hub ``index.html``: delayed reopen after Luna speaks (`lunaHubVaAfterReplyMs`).
+ * Pass `{ immediate: true }` after skipped segments / hub-style immediate restart.
+ */
+function scheduleVoiceListenRestart(opts) {
   if (!voiceActivityEnabled) return;
   if (voiceTurnBusy) return;
   if (turnBasedListening) {
     notifyTurnWait();
     return;
   }
-  queueMicrotask(() => void startConversationRecognition());
+  clearVoiceListenRestartTimer();
+  if (opts && opts.immediate) {
+    queueMicrotask(() => {
+      if (!voiceActivityEnabled || voiceTurnBusy || turnBasedListening) return;
+      void startConversationRecognition();
+    });
+    return;
+  }
+  const delay = hubVaAfterReplyMs();
+  convoVaRestartTimer = setTimeout(() => {
+    convoVaRestartTimer = 0;
+    if (!voiceActivityEnabled || voiceTurnBusy || turnBasedListening) return;
+    void startConversationRecognition();
+  }, delay);
 }
 
 function hasHubTranscribeVoiceActivitySupport() {
   return !!(window.MediaRecorder && navigator.mediaDevices?.getUserMedia);
+}
+
+/** Same defaults / ``localStorage`` keys as hub ``index.html`` (VA button). */
+const HUB_VA_COOLDOWN_AFTER_REPLY_MS = 3500;
+const HUB_VAD_THRESHOLD_DEFAULT = 0.032;
+const HUB_SILENCE_HOLD_MS_DEFAULT = 1400;
+const HUB_MIN_SEGMENT_MS_DEFAULT = 1200;
+const HUB_MAX_SEGMENT_MS_DEFAULT = 15000;
+
+function hubVadThreshold() {
+  const v = parseFloat(localStorage.getItem("lunaHubVadThreshold") || "");
+  return Number.isFinite(v) && v > 0 && v < 1 ? v : HUB_VAD_THRESHOLD_DEFAULT;
+}
+
+function hubSilenceHoldMs() {
+  const v = parseInt(localStorage.getItem("lunaHubVaSilenceHoldMs") || "", 10);
+  return Number.isFinite(v) && v >= 400 && v <= 6000 ? v : HUB_SILENCE_HOLD_MS_DEFAULT;
+}
+
+function hubMinSegmentMs() {
+  const v = parseInt(localStorage.getItem("lunaHubVaMinSegmentMs") || "", 10);
+  return Number.isFinite(v) && v >= 500 && v <= 12000 ? v : HUB_MIN_SEGMENT_MS_DEFAULT;
+}
+
+function hubMaxSegmentMs() {
+  const v = parseInt(localStorage.getItem("lunaHubVaMaxSegmentMs") || "", 10);
+  return Number.isFinite(v) && v >= 3000 && v <= 60000 ? v : HUB_MAX_SEGMENT_MS_DEFAULT;
+}
+
+function hubVaAfterReplyMs() {
+  const raw = localStorage.getItem("lunaHubVaAfterReplyMs");
+  const parsed = parseInt(raw || "", 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : HUB_VA_COOLDOWN_AFTER_REPLY_MS;
+}
+
+/** Hub WebRTC processing: noise suppression + AEC + AGC */
+async function lunaGetUserMediaMic() {
+  const constraints = {
+    audio: {
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl: true,
+    },
+  };
+  try {
+    return await navigator.mediaDevices.getUserMedia(constraints);
+  } catch {
+    return await navigator.mediaDevices.getUserMedia({ audio: true });
+  }
+}
+
+async function vrmConversationMicStream() {
+  if (WEBSITE_EMBED_PTT_MODE && IS_MOBILE_DEVICE && mobileMicMode === "raw") {
+    try {
+      return await navigator.mediaDevices.getUserMedia(preferredConversationAudioConstraints());
+    } catch {
+      return await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+    }
+  }
+  return await lunaGetUserMediaMic();
+}
+
+function clearVoiceListenRestartTimer() {
+  if (convoVaRestartTimer) {
+    clearTimeout(convoVaRestartTimer);
+    convoVaRestartTimer = 0;
+  }
 }
 
 /** On phone + website PTT, prefer the device's native/raw mic profile; fall back to generic audio if rejected. */
@@ -4721,7 +4921,7 @@ function updateMicLevelBadge(rms) {
   if (!vrmMicLevel || !vrmMicLevelText) return;
   let level = "idle";
   let text = "Mic: idle";
-  if (voiceActivityEnabled && (convoMediaRecorder || websitePttHolding || speaking)) {
+  if (voiceActivityEnabled && (convoMediaRecorder || speaking)) {
     if (rms >= 0.028) {
       level = "high";
       text = "Mic: high";
@@ -4846,6 +5046,7 @@ function stopConversationRecognition() {
 }
 
 function teardownVoiceToLunaUi() {
+  clearVoiceListenRestartTimer();
   stopConversationRecognition();
   updateMicLevelBadge(0);
   setSpeakSttStatus("");
@@ -4853,35 +5054,31 @@ function teardownVoiceToLunaUi() {
 
 function syncVoiceActivityUi() {
   if (btnSpeak) {
-    if (WEBSITE_EMBED_PTT_MODE) {
-      btnSpeak.textContent = "Website mic: hold to talk";
-      btnSpeak.title = "Website mode uses push-to-talk on the dock mic.";
-      btnSpeak.disabled = true;
-    } else if (turnBasedListening) {
-      btnSpeak.textContent = voiceActivityEnabled ? "Voice mode: ON (PTT)" : "Voice mode: OFF";
+    btnSpeak.disabled = false;
+    if (turnBasedListening) {
+      btnSpeak.textContent = voiceActivityEnabled ? "Voice mode: ON" : "Voice mode: OFF";
       btnSpeak.title = voiceActivityEnabled
-        ? "Push-to-talk: hold the bar mic to speak, release to send. Click to turn voice mode off."
-        : "Enable voice mode, then hold the bar mic to speak.";
+        ? "Turn off voice mode, or keep it on and use the dock mic: tap to record, tap again to send."
+        : "Turn on voice mode, then tap the dock mic to record each message.";
     } else {
       btnSpeak.textContent = voiceActivityEnabled ? "Voice activity: ON" : "Voice activity: OFF";
       btnSpeak.title = voiceActivityEnabled
-        ? "Click to stop hands-free microphone chat."
-        : "Click to start hands-free microphone chat.";
+        ? "Stop hands-free VA (same as Luna hub: lunaHubVadThreshold, lunaHubVaSilenceHoldMs, lunaHubVaAfterReplyMs)."
+        : "Start hands-free VA — matches hub VA button behavior and tuning.";
     }
   }
   if (!hasHubTranscribeVoiceActivitySupport()) setSpeakSttStatus("Voice activity needs microphone recording support.");
-  else if (!voiceActivityEnabled) setSpeakSttStatus(WEBSITE_EMBED_PTT_MODE ? "Hold the bar mic to talk" : "Voice activity is off.");
-  else if (WEBSITE_EMBED_PTT_MODE) setSpeakSttStatus(websitePttHolding ? "Recording... release to send" : "Hold the bar mic to talk");
-  else if (turnBasedListening) setSpeakSttStatus("Hold the bar mic to talk");
+  else if (!voiceActivityEnabled) setSpeakSttStatus("Voice activity is off.");
+  else if (turnBasedListening) setSpeakSttStatus("Tap the dock mic to record, tap again to send");
   else setSpeakSttStatus("Voice activity is on.");
   if (vrmDockMic) {
-    vrmDockMic.title = WEBSITE_EMBED_PTT_MODE
-      ? "Hold to talk, release to send"
-      : turnBasedListening
+    vrmDockMic.title = turnBasedListening
       ? !voiceActivityEnabled
-        ? "Enable voice mode (then tap to record each turn)"
-        : "1st tap: start recording. 2nd tap: send to Luna (or wait for auto max length)"
-      : "Toggle hands-free voice (same as Voice mode in settings)";
+        ? "Enable voice mode (dock mic or Voice activity below)"
+        : "Tap: start recording · tap again: send"
+      : voiceActivityEnabled
+        ? "Voice: ON — hub VA (lunaHubVadThreshold / lunaHubVaAfterReplyMs). Click dock mic to stop."
+        : "Voice: OFF — click dock mic for hub-style listening";
   }
   refreshVrmOverlayStatus();
 }
@@ -4901,9 +5098,10 @@ function startVoiceActivity() {
     return;
   }
   if (turnBasedListening) {
-    setSpeakSttStatus(WEBSITE_EMBED_PTT_MODE ? "Hold the bar mic to talk" : "Hold the bar mic to talk");
+    setVoiceTurnState(VOICE_TURN_STATE.IDLE, "Tap the dock mic to record, tap again to send");
     return;
   }
+  setVoiceTurnState(VOICE_TURN_STATE.LISTENING, "Listening…");
   void startConversationRecognition();
 }
 
@@ -4917,56 +5115,8 @@ function stopVoiceActivity() {
     }
   }
   teardownVoiceToLunaUi();
+  setVoiceTurnState(VOICE_TURN_STATE.IDLE);
   syncVoiceActivityUi();
-}
-
-function startWebsitePttHold() {
-  if (!WEBSITE_EMBED_PTT_MODE) return;
-  if (websitePttHolding || voiceTurnBusy) return;
-  if (!hasHubTranscribeVoiceActivitySupport()) {
-    setSpeakSttStatus("Voice activity needs microphone recording support.");
-    return;
-  }
-  websitePttHolding = true;
-  websitePttHoldStartedAtMs = performance.now();
-  if (websitePttDelayedStopTimer) {
-    clearTimeout(websitePttDelayedStopTimer);
-    websitePttDelayedStopTimer = 0;
-  }
-  websitePttPendingStop = false;
-  if (!voiceActivityEnabled) voiceActivityEnabled = true;
-  if (!convoMediaRecorder || convoMediaRecorder.state !== "recording") {
-    void startConversationRecognition();
-  } else {
-    setSpeakSttStatus("Recording... release to send");
-  }
-  syncVoiceActivityUi();
-}
-
-function stopWebsitePttHold() {
-  if (!WEBSITE_EMBED_PTT_MODE) return;
-  if (!websitePttHolding) return;
-  websitePttHolding = false;
-  const heldMs = Math.max(0, performance.now() - (websitePttHoldStartedAtMs || 0));
-  const remainMs = Math.max(0, WEBSITE_PTT_MIN_HOLD_MS - heldMs);
-  const finalizeStop = () => {
-    if (convoMediaRecorder && convoMediaRecorder.state === "recording") {
-      stopConversationSegmentForTranscription({ forceTranscribe: true });
-    } else {
-      websitePttPendingStop = true;
-      setSpeakSttStatus("Finishing recording...");
-    }
-    syncVoiceActivityUi();
-  };
-  if (remainMs > 0) {
-    setSpeakSttStatus("Hold detected — finishing...");
-    websitePttDelayedStopTimer = setTimeout(() => {
-      websitePttDelayedStopTimer = 0;
-      finalizeStop();
-    }, remainMs);
-    return;
-  }
-  finalizeStop();
 }
 
 function round3(v) {
@@ -5012,14 +5162,79 @@ function buildVrmSelfState() {
   };
 }
 
-async function fetchLunaChatReply(message) {
+/**
+ * Screen/camera streams often report 0×0 until ``loadedmetadata`` / a decoded frame — wait before snapshotting.
+ * @param {HTMLVideoElement} video
+ * @param {number} timeoutMs
+ * @returns {Promise<boolean>}
+ */
+async function waitMediaPreviewFrameReady(video, timeoutMs = 5000) {
+  if (!video || !video.srcObject) return false;
+  if (video.videoWidth > 0 && video.videoHeight > 0) return true;
+  try {
+    await video.play();
+  } catch {
+    /* muted autoplay should succeed; ignore */
+  }
+  if (video.videoWidth > 0 && video.videoHeight > 0) return true;
+  await new Promise((resolve) => {
+    const finish = () => {
+      if (video.videoWidth > 0 && video.videoHeight > 0) {
+        cleanup();
+        resolve(undefined);
+      }
+    };
+    const cleanup = () => {
+      clearTimeout(timer);
+      video.removeEventListener("loadedmetadata", finish);
+      video.removeEventListener("loadeddata", finish);
+      video.removeEventListener("canplay", finish);
+      video.removeEventListener("resize", finish);
+    };
+    const timer = setTimeout(() => {
+      cleanup();
+      resolve(undefined);
+    }, timeoutMs);
+    video.addEventListener("loadedmetadata", finish);
+    video.addEventListener("loadeddata", finish);
+    video.addEventListener("canplay", finish);
+    video.addEventListener("resize", finish);
+    finish();
+  });
+  if (video.videoWidth > 0 && video.videoHeight > 0) return true;
+  if (typeof video.requestVideoFrameCallback === "function") {
+    await new Promise((resolve) => {
+      let cb = 0;
+      const t = setTimeout(() => {
+        try {
+          video.cancelVideoFrameCallback(cb);
+        } catch {
+          /* */
+        }
+        resolve(undefined);
+      }, Math.min(2000, timeoutMs));
+      cb = video.requestVideoFrameCallback(() => {
+        clearTimeout(t);
+        resolve(undefined);
+      });
+    });
+  }
+  return video.videoWidth > 0 && video.videoHeight > 0;
+}
+
+async function fetchLunaChatReply(message, opts) {
   const ac = new AbortController();
   voiceChatAbort = ac;
   try {
     let visionFrame = null;
-    if (externalMediaKind && mediaPreviewVideo && mediaPreviewVideo.srcObject) {
+    let mediaType = "";
+    if (opts && opts.visionFrame && typeof opts.visionFrame.b64 === "string" && opts.visionFrame.b64) {
+      visionFrame = opts.visionFrame;
+      mediaType = String(opts.mediaType || "upload").trim().toLowerCase() || "upload";
+    } else if (externalMediaKind && mediaPreviewVideo && mediaPreviewVideo.srcObject) {
       try {
         const v = mediaPreviewVideo;
+        await waitMediaPreviewFrameReady(v, 5000);
         const vw = Number(v.videoWidth || 0);
         const vh = Number(v.videoHeight || 0);
         if (vw > 0 && vh > 0) {
@@ -5039,11 +5254,16 @@ async function fetchLunaChatReply(message) {
             cx.drawImage(v, 0, 0, w, h);
             const durl = cv.toDataURL("image/jpeg", 0.68);
             const b64 = String(durl.split(",", 2)[1] || "");
-            if (b64) visionFrame = { mime: "image/jpeg", b64 };
+            if (b64) {
+              visionFrame = { mime: "image/jpeg", b64 };
+              mediaType = externalMediaKind;
+            }
           }
+        } else {
+          console.warn("[VRM] vision_frame skipped: video dimensions still 0×0 after wait (screen/camera not ready).");
         }
-      } catch {
-        /* best effort */
+      } catch (e) {
+        console.warn("[VRM] vision_frame capture failed:", e);
       }
     }
     const faceTags = Object.keys(LUNA_TAG_FACE_WEIGHTS || {}).filter((k) => !LUNA_ACTION_FACE_TAGS.has(k));
@@ -5062,10 +5282,10 @@ async function fetchLunaChatReply(message) {
         "[THINKING] Let me reason through that with you.",
       ],
     };
-    const mediaState = externalMediaKind
+    const mediaState = visionFrame
       ? {
           active: true,
-          type: externalMediaKind,
+          type: mediaType || externalMediaKind || "upload",
           mobile_device: !!IS_MOBILE_DEVICE,
           website_embed: !!WEBSITE_EMBED_PTT_MODE,
         }
@@ -5150,8 +5370,11 @@ async function transcribeVoiceBlob(blob) {
  */
 function stopConversationSegmentForTranscription(opts) {
   if (!convoMediaRecorder) return;
-  if (opts && opts.forceTranscribe) convoShouldTranscribeOnStop = true;
-  else convoShouldTranscribeOnStop = convoSpeechDetected;
+  if (opts && opts.forceTranscribe) {
+    convoShouldTranscribeOnStop = true;
+  } else {
+    convoShouldTranscribeOnStop = !!convoSpeechDetected;
+  }
   cleanupConversationCaptureNodes();
   const rec = convoMediaRecorder;
   convoMediaRecorder = null;
@@ -5168,18 +5391,19 @@ function monitorConversationVAD() {
   const rms = computeVadRms();
   updateMicLevelBadge(rms);
   if (rms > convoRmsPeak) convoRmsPeak = rms;
-  if (rms >= CONVO_VAD_THRESHOLD) {
+
+  if (rms >= hubVadThreshold()) {
     convoSpeechDetected = true;
     convoLastVoiceAtMs = now;
   } else if (
     convoSpeechDetected &&
-    now - convoLastVoiceAtMs >= CONVO_SILENCE_HOLD_MS &&
-    now - convoRecordStartedAtMs >= CONVO_MIN_SEGMENT_MS
+    now - convoLastVoiceAtMs >= hubSilenceHoldMs() &&
+    now - convoRecordStartedAtMs >= hubMinSegmentMs()
   ) {
     stopConversationSegmentForTranscription();
     return;
   }
-  if (now - convoRecordStartedAtMs >= CONVO_MAX_SEGMENT_MS) {
+  if (now - convoRecordStartedAtMs >= hubMaxSegmentMs()) {
     stopConversationSegmentForTranscription();
     return;
   }
@@ -5206,14 +5430,24 @@ function monitorConversationTurnMaxOnly() {
 async function runVoiceTurn(userText) {
   const t = (userText || "").trim();
   if (!t) return;
-  voiceTurnBusy = true;
+  setVoiceTurnState(VOICE_TURN_STATE.THINKING, "Luna is thinking…");
   stopConversationRecognition();
-  setSpeakSttStatus("Luna is thinking…");
   try {
-    const reply = await fetchLunaChatReply(t);
+    let reply = "";
+    for (let attempt = 0; attempt <= VOICE_CHAT_BUSY_RETRY_MAX; attempt++) {
+      reply = await fetchLunaChatReply(t);
+      const low = String(reply || "").toLowerCase();
+      const looksBusy =
+        low.includes("busy with other requests") ||
+        low.includes("try again in a few seconds") ||
+        low.includes("queue busy");
+      if (!looksBusy || attempt >= VOICE_CHAT_BUSY_RETRY_MAX) break;
+      setSpeakSttStatus("Luna is finishing another reply… retrying");
+      await new Promise((resolve) => setTimeout(resolve, VOICE_CHAT_BUSY_RETRY_DELAY_MS));
+    }
     const taggedReply = ensureReplyUsesViewerExpressionTag(reply);
     if (ttsText) ttsText.value = taggedReply.slice(0, 12000);
-    setSpeakSttStatus("");
+    setVoiceTurnState(VOICE_TURN_STATE.SPEAKING);
     await speakLunaReplyAndWait(taggedReply);
   } catch (e) {
     if (e?.name === "AbortError") setSpeakSttStatus("Stopped.");
@@ -5224,7 +5458,7 @@ async function runVoiceTurn(userText) {
       errEl.textContent = msg;
     }
   } finally {
-    voiceTurnBusy = false;
+    setVoiceTurnState(VOICE_TURN_STATE.IDLE);
     voiceChatAbort = null;
     scheduleVoiceListenRestart();
   }
@@ -5242,6 +5476,7 @@ async function startConversationRecognition() {
   convoRecordStartedAtMs = performance.now();
   convoLastVoiceAtMs = convoRecordStartedAtMs;
   convoChunks = [];
+  setVoiceTurnState(VOICE_TURN_STATE.LISTENING);
   setSpeakSttStatus(
     turnBasedListening
       ? WEBSITE_EMBED_PTT_MODE
@@ -5250,13 +5485,7 @@ async function startConversationRecognition() {
       : "Listening…",
   );
   try {
-    let stream = null;
-    try {
-      stream = await navigator.mediaDevices.getUserMedia(preferredConversationAudioConstraints());
-    } catch (micErr) {
-      // Some mobile browsers reject advanced constraints; retry with plain default microphone.
-      stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-    }
+    const stream = await vrmConversationMicStream();
     if (!voiceActivityEnabled || voiceTurnBusy) {
       stream.getTracks().forEach((t) => t.stop());
       return;
@@ -5269,14 +5498,18 @@ async function startConversationRecognition() {
     convoVadBuf = new Uint8Array(convoVadAnalyser.fftSize);
     src.connect(convoVadAnalyser);
 
-    // Apply user mic boost before recording so STT receives stronger phone input.
-    const gainNode = convoVadCtx.createGain();
-    gainNode.gain.value = clampMicGainPct(micGainPct) / 100;
-    const captureDest = convoVadCtx.createMediaStreamDestination();
-    src.connect(gainNode);
-    gainNode.connect(captureDest);
+    /** Hub VA records the raw processed ``MediaStream``; PTT keeps browser-only mic boost through Web Audio. */
+    let recordStream = stream;
+    if (turnBasedListening) {
+      const gainNode = convoVadCtx.createGain();
+      gainNode.gain.value = clampMicGainPct(micGainPct) / 100;
+      const captureDest = convoVadCtx.createMediaStreamDestination();
+      src.connect(gainNode);
+      gainNode.connect(captureDest);
+      recordStream = captureDest.stream;
+    }
 
-    const rec = new MediaRecorder(captureDest.stream);
+    const rec = new MediaRecorder(recordStream);
     convoMediaRecorder = rec;
     rec.ondataavailable = (ev) => {
       if (ev.data && ev.data.size > 0) convoChunks.push(ev.data);
@@ -5304,14 +5537,13 @@ async function startConversationRecognition() {
       convoChunks = [];
       if (!voiceActivityEnabled || voiceTurnBusy) return;
       if (!shouldTranscribe) {
-        scheduleVoiceListenRestart();
+        scheduleVoiceListenRestart({ immediate: true });
         return;
       }
       const blob = new Blob(chunks, { type: rec.mimeType || "audio/webm" });
-      if (blob.size < CONVO_MIN_AUDIO_BYTES) {
-        if (WEBSITE_EMBED_PTT_MODE && blob.size > 0) {
-          // On some phones tiny but valid clips still transcribe; try anyway in website PTT mode.
-        } else {
+      const minBytes = turnBasedListening ? CONVO_MIN_AUDIO_BYTES : HUB_VA_MIN_TRANSCRIBE_BYTES;
+      const allowTinyWebsiteTry = WEBSITE_EMBED_PTT_MODE && turnBasedListening && blob.size > 0;
+      if (blob.size < minBytes && !allowTinyWebsiteTry) {
         if (turnBasedListening) {
           setSpeakSttStatus(
             WEBSITE_EMBED_PTT_MODE
@@ -5319,15 +5551,15 @@ async function startConversationRecognition() {
               : "Clip was too short — hold a moment, speak, then tap the mic to finish",
           );
         } else {
-          scheduleVoiceListenRestart();
+          scheduleVoiceListenRestart({ immediate: true });
         }
         return;
-        }
       }
       try {
-        setSpeakSttStatus("Transcribing…");
+        setVoiceTurnState(VOICE_TURN_STATE.TRANSCRIBING, "Transcribing…");
         const heard = await transcribeVoiceBlob(blob);
         if (!heard) {
+          setVoiceTurnState(VOICE_TURN_STATE.IDLE);
           if (turnBasedListening) {
             setSpeakSttStatus(
               WEBSITE_EMBED_PTT_MODE
@@ -5343,6 +5575,7 @@ async function startConversationRecognition() {
         setSpeakSttStatus(`Heard: ${heard}`);
         await runVoiceTurn(heard);
       } catch (e) {
+        setVoiceTurnState(VOICE_TURN_STATE.IDLE);
         const msg = String(e?.message || e);
         setSpeakSttStatus(msg);
         errEl.hidden = false;
@@ -5350,12 +5583,7 @@ async function startConversationRecognition() {
         if (voiceActivityEnabled && !voiceTurnBusy) scheduleVoiceListenRestart();
       }
     };
-    rec.start(100);
-    if (WEBSITE_EMBED_PTT_MODE && websitePttPendingStop) {
-      websitePttPendingStop = false;
-      stopConversationSegmentForTranscription({ forceTranscribe: true });
-      return;
-    }
+    rec.start(turnBasedListening ? 100 : 250);
     if (turnBasedListening) {
       monitorConversationTurnMaxOnly();
     } else {
@@ -5408,8 +5636,8 @@ function stopAllSpeech() {
   }
   speakDoneOneShot = null;
   if (voiceActivityEnabled) {
-    voiceTurnBusy = false;
-    scheduleVoiceListenRestart();
+    setVoiceTurnState(VOICE_TURN_STATE.IDLE);
+    scheduleVoiceListenRestart({ immediate: true });
   }
 }
 

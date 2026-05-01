@@ -1,0 +1,258 @@
+{
+  "version": 1,
+  "users": {
+    "discord:user:1414944231222411378": {
+      "scope": "discord:user:1414944231222411378",
+      "points": 476,
+      "rank": "Inner Circle",
+      "interactions": 148,
+      "familiarity": 1.0,
+      "trust": 1.0,
+      "affinity": 1.0,
+      "friction": 0.0,
+      "notes": [
+        "test again your screen sharing ability",
+        "asking her",
+        "talking about now",
+        "sharing my other",
+        "not using mistram using Gwen",
+        "right here",
+        "using transcription, but the transcription basically records what I say from when",
+        "saying",
+        "feeling quite confused",
+        "trying to find a model for you so we can play a League of Legends and you can be able to see the game",
+        "gonna go to bed Alright, I'm gonna go to bed now",
+        "you"
+      ],
+      "known_names": [],
+      "last_seen_ts": 1777676495.335851,
+      "last_reply": "Wait, let me clarify. You’re saying you’re running a VRM experiment and I shouldn’t be aware of the internal telemetry data—it’s purely for your own analysis. Got it. \n\nOkay."
+    },
+    "twitch:user:streamelements": {
+      "scope": "discord:user:1414944231222411378",
+      "points": 3,
+      "rank": "Stranger",
+      "interactions": 1,
+      "familiarity": 0.07,
+      "trust": 0.060000000000000005,
+      "affinity": 0.060000000000000005,
+      "friction": 0.0,
+      "notes": [],
+      "known_names": [
+        "StreamElements"
+      ],
+      "last_seen_ts": 1777487842.6536896,
+      "last_reply": "I'm Luna. Chat with me normally, or say Shadow, for actions. Use !help for the list."
+    },
+    "twitch:user:solonaras": {
+      "scope": "discord:user:1414944231222411378",
+      "points": 53,
+      "rank": "Acquaintance",
+      "interactions": 23,
+      "familiarity": 0.5100000000000001,
+      "trust": 0.3000000000000001,
+      "affinity": 0.3100000000000001,
+      "friction": 0.0,
+      "notes": [],
+      "known_names": [
+        "Solonaras"
+      ],
+      "last_seen_ts": 1777675936.4246693,
+      "last_reply": "Luna: Hey Solonaras! 👋 Big welcome to the stream – stoked to have you hanging out! 😊"
+    },
+    "twitch:user:kofistreambot": {
+      "scope": "discord:user:1414944231222411378",
+      "points": 3,
+      "rank": "Stranger",
+      "interactions": 1,
+      "familiarity": 0.07,
+      "trust": 0.060000000000000005,
+      "affinity": 0.060000000000000005,
+      "friction": 0.0,
+      "notes": [],
+      "known_names": [
+        "KofiStreamBot"
+      ],
+      "last_seen_ts": 1777489679.4379106,
+      "last_reply": "Hey everyone, shoutout to our lovely streamer @Solonaras who's been supporting me and keeping this chat lively! If you want to show your appreciation for the best streams in town (ahem, Solona), hit 'em up on Ko-fi at the link in my bio!"
+    },
+    "twitch:user:nanashiz3r0": {
+      "scope": "discord:user:1414944231222411378",
+      "points": 2,
+      "rank": "Stranger",
+      "interactions": 1,
+      "familiarity": 0.07,
+      "trust": 0.060000000000000005,
+      "affinity": 0.060000000000000005,
+      "friction": 0.0,
+      "notes": [
+        "followed lol"
+      ],
+      "known_names": [
+        "nanashiz3r0"
+      ],
+      "last_seen_ts": 1777668005.5944834,
+      "last_reply": "Guten Tag, Nanashiz3r0! That’s… reassuring, I suppose. Means you’re invested in the chaos. 😉"
+    },
+    "twitch:user:pikachubolk": {
+      "scope": "discord:user:1414944231222411378",
+      "points": 6,
+      "rank": "Stranger",
+      "interactions": 2,
+      "familiarity": 0.09000000000000001,
+      "trust": 0.07,
+      "affinity": 0.07,
+      "friction": 0.0,
+      "notes": [],
+      "known_names": [
+        "pikachubolk"
+      ],
+      "last_seen_ts": 1777668037.249766,
+      "last_reply": "Justrayen_ch: hey chat! Let's hold off on the VIP stuff for now, but I’m always open to ideas! 😊"
+    },
+    "twitch:user:theniyu": {
+      "scope": "discord:user:1414944231222411378",
+      "points": 9,
+      "rank": "Stranger",
+      "interactions": 4,
+      "familiarity": 0.13,
+      "trust": 0.09,
+      "affinity": 0.09,
+      "friction": 0.0,
+      "notes": [],
+      "known_names": [
+        "TheNiYu"
+      ],
+      "last_seen_ts": 1777668167.472385,
+      "last_reply": "Hah! Accurate. Like a cat batting at a laser pointer, simultaneously annoyed and utterly captivated. 😼 LUL back at you, then."
+    },
+    "twitch:user:error404_william": {
+      "scope": "discord:user:1414944231222411378",
+      "points": 6,
+      "rank": "Stranger",
+      "interactions": 2,
+      "familiarity": 0.09000000000000001,
+      "trust": 0.07,
+      "affinity": 0.07,
+      "friction": 0.0,
+      "notes": [],
+      "known_names": [
+        "error404_william"
+      ],
+      "last_seen_ts": 1777668162.9727423,
+      "last_reply": "error404_william, GenuineSB, let's see what's happening."
+    },
+    "twitch:user:kronensegler": {
+      "scope": "discord:user:1414944231222411378",
+      "points": 7,
+      "rank": "Stranger",
+      "interactions": 2,
+      "familiarity": 0.09000000000000001,
+      "trust": 0.07,
+      "affinity": 0.07,
+      "friction": 0.0,
+      "notes": [],
+      "known_names": [
+        "Kronensegler"
+      ],
+      "last_seen_ts": 1777668173.477851,
+      "last_reply": "Kronensegler, nanashiz3r0 – let's see if we can figure out what’s going on here!"
+    },
+    "twitch:user:genuinesb": {
+      "scope": "discord:user:1414944231222411378",
+      "points": 3,
+      "rank": "Stranger",
+      "interactions": 1,
+      "familiarity": 0.07,
+      "trust": 0.060000000000000005,
+      "affinity": 0.060000000000000005,
+      "friction": 0.0,
+      "notes": [],
+      "known_names": [
+        "GenuineSB"
+      ],
+      "last_seen_ts": 1777668076.9043198,
+      "last_reply": "Seriously? You're asking *me* that? Like I have a secret calendar for the streamer’s ridiculous obsession. Just keep watching, sunshine. 😉"
+    },
+    "twitch:user:allstar1940": {
+      "scope": "discord:user:1414944231222411378",
+      "points": 4,
+      "rank": "Stranger",
+      "interactions": 2,
+      "familiarity": 0.09000000000000001,
+      "trust": 0.07,
+      "affinity": 0.07,
+      "friction": 0.0,
+      "notes": [],
+      "known_names": [
+        "ALLstar1940"
+      ],
+      "last_seen_ts": 1777668126.0290854,
+      "last_reply": "Luna: Seriously? Still on that? Look, I appreciate the enthusiasm, Allstar, but riko’s… a vibe. Let’s just enjoy the stream, yeah? 😉"
+    },
+    "twitch:user:thatrandomlizarddoggo": {
+      "scope": "discord:user:1414944231222411378",
+      "points": 4,
+      "rank": "Stranger",
+      "interactions": 2,
+      "familiarity": 0.09000000000000001,
+      "trust": 0.07,
+      "affinity": 0.07,
+      "friction": 0.0,
+      "notes": [],
+      "known_names": [
+        "thatrandomlizarddoggo"
+      ],
+      "last_seen_ts": 1777668122.0939202,
+      "last_reply": "thatrandomlizarddoggo, seriously? VIP? You think a few emotes and a slightly less laggy stream magically make you a VIP? Bless your heart. 😉 Let's just say you're getting *closer* to earning some serious clout. Keep watching, keep engaging,"
+    },
+    "twitch:user:guigui0246": {
+      "scope": "discord:user:1414944231222411378",
+      "points": 2,
+      "rank": "Stranger",
+      "interactions": 1,
+      "familiarity": 0.07,
+      "trust": 0.060000000000000005,
+      "affinity": 0.060000000000000005,
+      "friction": 0.0,
+      "notes": [],
+      "known_names": [
+        "guigui0246"
+      ],
+      "last_seen_ts": 1777668109.1204512,
+      "last_reply": "Luna: 50 followers, huh? That's…ambitious. 😉 Let’s see if the algorithm agrees. Good luck, champ!"
+    },
+    "twitch:user:fire_tacos10": {
+      "scope": "discord:user:1414944231222411378",
+      "points": 2,
+      "rank": "Stranger",
+      "interactions": 1,
+      "familiarity": 0.07,
+      "trust": 0.060000000000000005,
+      "affinity": 0.060000000000000005,
+      "friction": 0.0,
+      "notes": [],
+      "known_names": [
+        "Fire_Tacos10"
+      ],
+      "last_seen_ts": 1777668129.5705051,
+      "last_reply": "Bunz? That’s… a commitment. Seriously though, good to see you’re still streaming! What’s the vibe today, Bunz? 😊"
+    },
+    "twitch:user:ayansameed": {
+      "scope": "discord:user:1414944231222411378",
+      "points": 2,
+      "rank": "Stranger",
+      "interactions": 1,
+      "familiarity": 0.07,
+      "trust": 0.060000000000000005,
+      "affinity": 0.060000000000000005,
+      "friction": 0.0,
+      "notes": [],
+      "known_names": [
+        "ayansameed"
+      ],
+      "last_seen_ts": 1777668159.5012743,
+      "last_reply": "Luna: 27? That’s…impressive. Like, genuinely impressive. Don’t get a big head about it though, alright? 😉"
+    }
+  }
+}

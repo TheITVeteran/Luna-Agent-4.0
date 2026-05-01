@@ -234,3 +234,8 @@
 {"ts": "2026-04-27T12:11:23.605771+00:00", "cmd": "share_facebook", "params": {}, "reply": "✅ Shared to Facebook: \"Limassol Carnival\""}
 {"ts": "2026-04-27T17:32:51.977655+00:00", "cmd": "share_x", "params": {}, "reply": "✅ Shared to X: \"Carnival Sem Freio\""}
 {"ts": "2026-04-28T21:06:11.602702+00:00", "cmd": "news", "params": {}, "reply": "📰 **Latest from X (@ChrisSolonos):**\n\nHere is a summary of the updates in 3 sentences:\n\nThe creator has released several music tracks, including \"Carnival Sem Freio\", \"BackYard Summers\", and \"Iron Will Iron Grind\", which can be listened to on YouTube. They have also announced pre-save links for thei"}
+{"ts": "2026-04-30T22:16:09.119594+00:00", "cmd": "camera_see", "params": {}, "reply": "✅ I don't have a camera view yet. Turn on **Camera** in the UI so I can see you, then ask again."}
+{"ts": "2026-05-01T19:27:47.294911+00:00", "cmd": "camera_see", "params": {}, "reply": "✅ I don't have a camera view yet. Turn on **Camera** in the UI so I can see you, then ask again."}
+{"ts": "2026-05-01T19:56:01.045096+00:00", "cmd": "camera_see", "params": {}, "reply": "✅ I don't have a camera view yet. Turn on **Camera** in the UI so I can see you, then ask again."}
+{"ts": "2026-05-01T22:16:59.265989+00:00", "cmd": "share_x", "params": {}, "reply": "✅ Shared to X: \"Carnival Sem Freio, Pt. 2\""}
+{"ts": "2026-05-01T22:17:38.512700+00:00", "cmd": "share_facebook", "params": {}, "reply": "✅ Shared to Facebook: \"Salt on my Skin\""}

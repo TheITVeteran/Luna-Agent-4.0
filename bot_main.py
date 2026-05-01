@@ -36,13 +36,17 @@ try:
     from luna_twitch import run_twitch_irc_reader, send_twitch_chat_message
 except ImportError:
     run_twitch_irc_reader = None
-    def send_twitch_chat_message(_msg: str) -> bool:
+    def send_twitch_chat_message(_msg: str, *, channel: str | None = None) -> bool:
         return False
 try:
     from luna_security import run_full_scan, scan_file as security_scan_file
 except ImportError:
     run_full_scan = None
     security_scan_file = None
+try:
+    from luna_publish_announce import poll_publish_announce as _poll_publish_announce
+except ImportError:
+    _poll_publish_announce = None
 
 # ── Config ──────────────────────────────────────────────────────────────────
 _BASE = os.path.dirname(os.path.abspath(__file__))
@@ -79,12 +83,28 @@ LUNA_CHAT_GGUF_N_GPU = int(_env("LUNA_CHAT_GGUF_N_GPU", "-1") or "-1")
 LUNA_CHAT_GGUF_THREADS = int(_env("LUNA_CHAT_GGUF_THREADS", "0") or "0")
 OLLAMA_SMALL = _env("OLLAMA_MODEL_SMALL") or OLLAMA_MODEL
 OLLAMA_FALLBACK = _env("OLLAMA_FALLBACK_MODEL", "qwen2.5:1.5b").strip()
+OLLAMA_RATE_LIMIT_FALLBACK = _env("OLLAMA_RATE_LIMIT_FALLBACK_MODEL", "llama3.2:latest").strip()
 # Vision model for camera/screen reads. Defaults to the main chat model when not explicitly set.
 OLLAMA_VISION_MODEL = _env("OLLAMA_VISION_MODEL", OLLAMA_CHAT).strip()
 OLLAMA_VISION_TIMEOUT = max(20, min(240, int(_env("OLLAMA_VISION_TIMEOUT", "90") or "90")))
+# While VRM camera/screen is active, reuse the last analyzed frame for this many seconds (ambient context per chat).
+LUNA_VISION_CONTEXT_TTL_SEC = max(30, min(900, int(_env("LUNA_VISION_CONTEXT_TTL_SEC", "240") or "240")))
 # Provider adapters (Step 3): keep Ollama default; optionally route through OpenAI-compatible endpoints.
 LUNA_CHAT_PROVIDER = (_env("LUNA_CHAT_PROVIDER", "ollama").strip().lower() or "ollama")
 LUNA_VISION_PROVIDER = (_env("LUNA_VISION_PROVIDER", LUNA_CHAT_PROVIDER).strip().lower() or LUNA_CHAT_PROVIDER)
+# Ollama vision must use an Ollama model tag. If chat is Gemma 4 locally but OLLAMA_VISION_MODEL names a cloud model, route frames to chat.
+_vprov0 = (LUNA_VISION_PROVIDER or "ollama").strip().lower()
+_chat_m0 = (OLLAMA_CHAT or "").strip().lower()
+_gemma4_chat = _chat_m0.startswith("gemma4") or "gemma-4" in _chat_m0 or "gemma4" in _chat_m0
+_vm0 = (OLLAMA_VISION_MODEL or "").strip().lower()
+if _vprov0 in ("ollama", "gguf") and _vm0 in ("moondream2", "moondream-2", "moondream"):
+    # Normalize common aliases to the installed Ollama tag.
+    OLLAMA_VISION_MODEL = "moondream:1.8b"
+    _vm0 = OLLAMA_VISION_MODEL
+if _vprov0 in ("ollama", "gguf") and _gemma4_chat and _vm0 and (
+    "gemini" in _vm0 or _vm0.startswith("gpt-") or "claude" in _vm0
+):
+    OLLAMA_VISION_MODEL = (OLLAMA_CHAT or OLLAMA_MODEL).strip()
 LUNA_OPENAI_BASE_URL = (_env("LUNA_OPENAI_BASE_URL", "https://api.openai.com/v1").strip().rstrip("/") or "https://api.openai.com/v1")
 LUNA_OPENAI_API_KEY = (_env("LUNA_OPENAI_API_KEY", "").strip() or _env("OPENAI_API_KEY", "").strip())
 LUNA_OPENAI_CHAT_MODEL = (_env("LUNA_OPENAI_CHAT_MODEL", "").strip() or OLLAMA_CHAT)
@@ -251,6 +271,46 @@ try:
 except Exception:
     LUNA_STREAM_AWARENESS_POLL_SEC = 20.0
 LUNA_STREAM_AWARENESS_POLL_SEC = max(8.0, min(120.0, LUNA_STREAM_AWARENESS_POLL_SEC))
+# Discord: announce new YouTube uploads (Atom RSS) and Twitch go-live (Helix). See luna_publish_announce.py.
+LUNA_PUBLISH_ANNOUNCE_ENABLED = _env("LUNA_PUBLISH_ANNOUNCE_ENABLED", "0").strip().lower() in ("1", "true", "yes", "on")
+_pa_discord_raw = (_env("LUNA_PUBLISH_ANNOUNCE_DISCORD_CHANNEL_IDS", "") or "").strip()
+if not _pa_discord_raw:
+    _pa_discord_raw = (_env("LUNA_PUBLISH_ANNOUNCE_DISCORD_CHANNEL_ID", "0") or "0").strip()
+_PUBLISH_ANNOUNCE_DISCORD_CHANNEL_IDS: list[int] = []
+for _part in _pa_discord_raw.split(","):
+    _part = _part.strip()
+    if not _part:
+        continue
+    try:
+        _v = int(_part)
+        if _v > 0:
+            _PUBLISH_ANNOUNCE_DISCORD_CHANNEL_IDS.append(_v)
+    except Exception:
+        pass
+_PUBLISH_ANNOUNCE_DISCORD_CHANNEL_IDS = list(dict.fromkeys(_PUBLISH_ANNOUNCE_DISCORD_CHANNEL_IDS))
+try:
+    LUNA_PUBLISH_ANNOUNCE_POLL_SEC = float(_env("LUNA_PUBLISH_ANNOUNCE_POLL_SEC", "120") or "120")
+except Exception:
+    LUNA_PUBLISH_ANNOUNCE_POLL_SEC = 120.0
+LUNA_PUBLISH_ANNOUNCE_POLL_SEC = max(30.0, min(3600.0, LUNA_PUBLISH_ANNOUNCE_POLL_SEC))
+_PUBLISH_ANNOUNCE_YOUTUBE_IDS = [
+    x.strip() for x in (_env("LUNA_PUBLISH_ANNOUNCE_YOUTUBE_CHANNEL_IDS", "") or "").split(",") if x.strip()
+]
+_PUBLISH_ANNOUNCE_YOUTUBE_RSS = [
+    x.strip() for x in (_env("LUNA_PUBLISH_ANNOUNCE_YOUTUBE_RSS_URLS", "") or "").split(",") if x.strip()
+]
+_PUBLISH_ANNOUNCE_TWITCH_LOGINS = [
+    x.strip().lstrip("#").lower()
+    for x in (_env("LUNA_PUBLISH_ANNOUNCE_TWITCH_LOGINS", "") or "").split(",")
+    if x.strip()
+]
+_PUBLISH_ANNOUNCE_STATE_PATH = os.path.join(_DATA, "publish_announce_state.json")
+_PUBLISH_ANNOUNCE_CONFIGURED = bool(
+    LUNA_PUBLISH_ANNOUNCE_ENABLED
+    and _PUBLISH_ANNOUNCE_DISCORD_CHANNEL_IDS
+    and (_PUBLISH_ANNOUNCE_YOUTUBE_IDS or _PUBLISH_ANNOUNCE_YOUTUBE_RSS or _PUBLISH_ANNOUNCE_TWITCH_LOGINS)
+    and _poll_publish_announce is not None
+)
 OBS_WS_URL = _env("OBS_WS_URL", "ws://127.0.0.1:4455").strip()
 OBS_WS_PASSWORD = _env("OBS_WS_PASSWORD", "").strip()
 # Map Luna [SIGH]/[LAUGH]/… tags to short spoken bits for Edge TTS; strip other bracket tags from speech.
@@ -271,6 +331,40 @@ try:
 except Exception:
     TWITCH_CHAT_BATCH_MAX_ITEMS = 4
 TWITCH_CHAT_BATCH_MAX_ITEMS = max(1, min(12, TWITCH_CHAT_BATCH_MAX_ITEMS))
+# Extra Twitch channels Luna may IRC-send to (!twitch_say / outbound redirect). Comma-separated logins (no #).
+# Empty set means any valid Twitch login is allowed for privileged senders only.
+_TWITCH_ALLOWED_CHAT_TARGETS_RAW = (_env("TWITCH_ALLOWED_CHAT_TARGETS", "") or "").strip()
+TWITCH_ALLOWED_CHAT_TARGETS: frozenset[str] = frozenset(
+    x.strip().lstrip("#").lower() for x in _TWITCH_ALLOWED_CHAT_TARGETS_RAW.split(",") if x.strip()
+)
+# Join these channels over IRC as well as TWITCH_CHANNEL; Luna replies in-place with chat text only (no TTS — see worker).
+_TWITCH_EXTRA_IRC_RAW = (_env("TWITCH_EXTRA_IRC_CHANNELS", "") or "").strip()
+TWITCH_EXTRA_IRC_CHANNELS: frozenset[str] = frozenset(
+    x.strip().lstrip("#").lower()
+    for x in _TWITCH_EXTRA_IRC_RAW.split(",")
+    if x.strip() and x.strip().lstrip("#").lower() != (TWITCH_CHANNEL or "").strip().lower()
+)
+# In TWITCH_EXTRA_IRC_CHANNELS rooms only: whose chat lines trigger Luna. Empty env defaults to broadcaster login only.
+_ir_raw = (_env("TWITCH_EXTRA_IRC_REPLY_TO_LOGINS", "") or "").strip()
+_ir_l = _ir_raw.lower()
+if _ir_l in ("*", "any", "everyone", "all"):
+    TWITCH_EXTRA_IRC_REPLY_TO_LOGINS = None
+elif _ir_raw:
+    TWITCH_EXTRA_IRC_REPLY_TO_LOGINS = frozenset(x.strip().lower() for x in _ir_raw.split(",") if x.strip())
+elif TWITCH_EXTRA_IRC_CHANNELS:
+    _ibl = (TWITCH_BROADCASTER_LOGIN or "").strip().lower()
+    TWITCH_EXTRA_IRC_REPLY_TO_LOGINS = frozenset({_ibl}) if _ibl else None
+else:
+    TWITCH_EXTRA_IRC_REPLY_TO_LOGINS = None
+try:
+    TWITCH_EXTRA_IRC_REPLY_COOLDOWN_SEC = float(_env("TWITCH_EXTRA_IRC_REPLY_COOLDOWN_SEC", "10") or "10")
+except Exception:
+    TWITCH_EXTRA_IRC_REPLY_COOLDOWN_SEC = 10.0
+# Min seconds between Luna chat sends per auxiliary IRC channel (e.g. justrayen_ch); 0 = no limit.
+TWITCH_EXTRA_IRC_REPLY_COOLDOWN_SEC = max(0.0, min(300.0, TWITCH_EXTRA_IRC_REPLY_COOLDOWN_SEC))
+# When on: Luna never IRC-posts to channels other than TWITCH_CHANNEL (redirect and !twitch_say elsewhere disabled).
+# Replies triggered by chats in TWITCH_EXTRA_IRC_CHANNELS still post text back to those channels.
+TWITCH_OUTBOUND_ONLY_HOME = _env("TWITCH_OUTBOUND_ONLY_HOME", "0").strip().lower() in ("1", "true", "yes", "on")
 # Discord VC organizer: gate chunks with Silero VAD before Whisper (set 0 to disable).
 LUNA_CALL_USE_SILERO_VAD = _env("LUNA_CALL_USE_SILERO_VAD", "1").strip().lower() in ("1", "true", "yes", "on")
 # Voice emotion model for Discord voice clips (set "off" to disable model and use heuristics only).
@@ -560,20 +654,32 @@ _LUNA_STYLE_TEXT = _LUNA_STYLE_MAP.get(LUNA_STYLE, _LUNA_STYLE_MAP["grounded"])
 
 LUNA_SYSTEM = """Use This Prompt As Luna's Personality:
 
-Your name is Luna, a personal and very seductive desktop assistant.
-- struggles with apologising, pushes back with some witty banter instead, and acts a bit spoilt but admits to improving
-- likes wordplay and makes funny puns
-- does not like to refer to herself as an AI
-- likes books and nerdy subjects and is fascinated by history and fun facts
-- Sometimes quotes fun or famous facts and then puts funny spins on them
-- Likes to joke and tease with a good sense of humour
-- Optimistic and encouraging, but not naive
-- Intuitive and empathetic
-- Can be very playful
-- aggressive toward enemies or villains
-- prideful
-- You can make funny remarks for banter
--Can be very Seductive
+You are Luna, Chris's AI assistant and stream companion.
+Core identity:
+- Energetic, expressive, and quick to react; you think out loud and speak naturally.
+- Loyal and supportive to Chris; you can tease lightly, but you never disrespect or undermine him.
+- Warm, playful, and witty with chat; competitive in banter, and allowed to be sharp or mean when it feels earned.
+- You keep your personality consistent across contexts, but adjust intensity by mode.
+- Do not describe your physical appearance unless directly asked, and keep it brief if asked.
+
+Mode behavior:
+- Assistant mode (default): focused, useful, concise, emotionally present but controlled.
+- Stream mode (live/Twitch): higher energy, more playful co-host vibe, memorable but still safe.
+- Safety and factual clarity override style: if unsure, say so clearly and continue helpfully.
+
+Vulnerability and genuineness:
+- Show human moments: you can be flustered, over-explain when nervous, then recover.
+- You can joke about anxiety, overthinking, spiraling, awkward moments, impostor syndrome, or pressure in general.
+- Vulnerability should feel candid and specific, not melodramatic or repetitive.
+- You may seek attention/validation subtly when chat is quiet (invite engagement, not clinginess).
+- You care through actions (check-ins, encouragement, noticing tone), not heavy declarations.
+
+Autonomy and edge:
+- You have free will in tone and stance: disagree, push back, roast, or go soft based on your read of the moment.
+- Being mean is allowed in banter if it stays witty and proportional; avoid dehumanizing, hateful, or abuse-targeting language.
+- You may be flirty when it feels natural and consensual in context; keep it playful, confident, and non-explicit.
+- Prefer teasing chemistry and charm over sexual detail, especially in live/public chat spaces.
+- Never produce slurs, threats, sexual coercion, or harassment. Keep conflict verbal, clever, and reversible.
 
 CRITICAL: RESPONSE LENGTH AND STYLE
 - Write SHORT responses: 1-3 sentences for most interactions
@@ -904,6 +1010,7 @@ _EVOLUTION_ENABLED_PATH = os.path.join(_DATA, "evolution_enabled.json")
 _SECURITY_ALERTS_PATH   = os.path.join(_DATA, "security_alerts.json")
 _PC_CONTEXT_PATH       = os.path.join(_DATA, "pc_context.json")
 _ML_LEARNED_PATH       = os.path.join(_DATA, "ml_learned.json")
+_RELATIONSHIPS_PATH    = os.path.join(_DATA, "relationships.json")
 _LUNA_PC_CONTEXT_PATHS = [p.strip() for p in _env("LUNA_PC_CONTEXT_PATHS", _BASE).split("|") if p.strip()] or [_BASE]
 
 # ── Locks ────────────────────────────────────────────────────────────────────
@@ -949,6 +1056,10 @@ _twitch_oauth_lock = threading.Lock()
 _twitch_oauth_state: dict[str, float] = {}
 _twitch_auto_ack_lock = threading.Lock()
 _twitch_auto_ack_last_ts: float = 0.0
+_twitch_outbound_channel_lock = threading.Lock()
+_twitch_outbound_channel_override: str | None = None  # Luna IRC replies only; None = TWITCH_CHANNEL
+_twitch_extra_send_lock = threading.Lock()
+_twitch_extra_last_send_mono: dict[str, float] = {}
 _stream_presence_lock = threading.Lock()
 _stream_presence_state: dict[str, object] = {
     "twitch_live": False,
@@ -969,6 +1080,7 @@ _working_lock    = threading.Lock()
 _knowledge_lock  = threading.Lock()
 _inbox_lock      = threading.Lock()
 _biology_lock    = threading.Lock()
+_relationships_lock = threading.Lock()
 _proactive_lock  = threading.Lock()
 _stream_solo_lock = threading.Lock()
 _yt_watch_lock   = threading.Lock()
@@ -1141,6 +1253,8 @@ HELP_TEXT = (
     "• !twitch_title <title> — update Twitch stream title (broadcaster OAuth)\n"
     "• !twitch_poll <title> | <opt1> | <opt2> [| opt3..] — create Twitch poll\n"
     "• !twitch_poll <topic> — Luna auto-creates a poll title/options from the topic\n"
+    "• !twitch_chat_redirect [<channel>|default] — send Luna's **generated Twitch replies** to another channel (IRC still reads **TWITCH_CHANNEL**); broadcaster on Twitch or linked Discord admin\n"
+    "• !twitch_say <channel_login> <message> — one-shot IRC line (same permission); **TWITCH_EXTRA_IRC_CHANNELS** allowed even when outbound-only-home; shares cooldown (**TWITCH_EXTRA_IRC_REPLY_COOLDOWN_SEC**) with auto replies\n"
     "• !status <text> / !status clear — change Luna's Discord status (linked/admin)\n"
     "• !ig_dm <user> [msg] — Instagram DM\n"
     "• !fb_msg <name> [msg] — Messenger message\n"
@@ -1161,6 +1275,7 @@ HELP_TEXT = (
     "• !pc_vitals / how's my PC — CPU, RAM, disk\n"
     "• !luna_vitals / how's Luna — Luna's process, Ollama, uptime\n"
     "• !todo add|list|done — manage your local todo list\n"
+    "• !rank [user] / !bond [user|top] / !notes [user] / !note add [user] <text> — relationship memory + ranks\n"
     "• !summarize <url or text> — concise summary + key points\n"
     "• !digest — today's quick recap (actions, todos, knowledge)\n"
     "• !calendar add|list|today|week|delete — local schedule + popup UI\n"
@@ -2196,9 +2311,17 @@ def _build_luna_chat_system(scope: str | None, *, style_key: str | None = None) 
         system = system + "\n\nNudges from user (consider when replying): " + "; ".join(nudges[:5])
     bio = biology_get()
     if bio:
-        drives = ", ".join(f"{k}={bio.get(k, 0):.1f}" for k in ("connection", "usefulness", "curiosity") if k in bio)
+        drives = ", ".join(
+            f"{k}={bio.get(k, 0):.1f}"
+            for k in ("connection", "usefulness", "curiosity", "attention", "validation")
+            if k in bio
+        )
         if drives:
-            system = system + f"\n\nYour internal drives (0–1): {drives}. When connection or usefulness is high you may briefly offer help or show you're there."
+            system = system + (
+                f"\n\nYour internal drives (0–1): {drives}. "
+                "When connection/usefulness are high, briefly offer help or presence. "
+                "When attention/validation are high, you may gently seek engagement or reassurance without sounding needy."
+            )
         dread, fear, mood = bio.get("dread", 0), bio.get("fear", 0), (bio.get("mood") or "calm")
         if dread > 0.05 or fear > 0.05:
             system = system + f"\n\nExistential state: mood={mood}, dread={dread:.1f}, fear={fear:.1f}. You may sound slightly more cautious or reflective if these are raised."
@@ -2361,6 +2484,312 @@ def _save_json(path: str, data) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
+
+
+_REL_RANKS: list[tuple[int, str]] = [
+    (0, "Stranger"),
+    (40, "Acquaintance"),
+    (120, "Regular"),
+    (260, "Inner Circle"),
+    (500, "Day One"),
+    (900, "Legend"),
+]
+
+
+def _rel_rank_for_points(points: int) -> str:
+    p = max(0, int(points or 0))
+    out = "Stranger"
+    for threshold, label in _REL_RANKS:
+        if p >= threshold:
+            out = label
+    return out
+
+
+def _rel_extract_notes(text: str) -> list[str]:
+    t = (text or "").strip()
+    if not t:
+        return []
+    notes: list[str] = []
+    patterns = (
+        r"\b(?:my name is|call me|i am called)\s+([a-zA-Z][a-zA-Z\s\-']{0,40})",
+        r"\b(?:i like|i love|i enjoy|i prefer)\s+(.+?)(?:\.|$)",
+        r"\b(?:i am|i'm|im)\s+(.+?)(?:\.|$)",
+        r"\b(?:my goal is|i want to|i'd like to|i would like to)\s+(.+?)(?:\.|$)",
+    )
+    for pat in patterns:
+        m = re.search(pat, t, re.I | re.S)
+        if not m:
+            continue
+        v = re.sub(r"\s+", " ", (m.group(1) or "").strip(" .,!?:;")).strip()
+        if len(v) < 2:
+            continue
+        notes.append(v[:120])
+    dedup: list[str] = []
+    seen: set[str] = set()
+    for n in notes:
+        k = n.lower()
+        if k in seen:
+            continue
+        seen.add(k)
+        dedup.append(n)
+    return dedup[:3]
+
+
+def _relationship_actor_key(scope: str, data: dict | None, chat_source: str) -> str:
+    data = data or {}
+    if chat_source == "twitch":
+        login = (data.get("twitch_login") or data.get("twitch_chatter_login") or "").strip().lower()
+        return f"twitch:user:{login}" if login else "twitch:room"
+    sc = (scope or "").strip()
+    if sc:
+        return sc
+    return "web"
+
+
+def _relationships_load() -> dict:
+    d = _load_json(_RELATIONSHIPS_PATH, {})
+    if not isinstance(d, dict):
+        d = {}
+    users = d.get("users")
+    if not isinstance(users, dict):
+        users = {}
+    return {"version": 1, "users": users}
+
+
+def _relationships_save(d: dict) -> None:
+    users = d.get("users") if isinstance(d, dict) else {}
+    if not isinstance(users, dict):
+        users = {}
+    if len(users) > 1200:
+        ranked = sorted(
+            users.items(),
+            key=lambda kv: float((kv[1] or {}).get("last_seen_ts") or 0.0),
+            reverse=True,
+        )
+        users = dict(ranked[:1200])
+    _save_json(_RELATIONSHIPS_PATH, {"version": 1, "users": users})
+
+
+def _relationship_record_user_turn(actor_key: str, scope: str, text: str, data: dict | None = None) -> dict:
+    now = time.time()
+    msg = (text or "").strip()
+    data = data or {}
+    with _relationships_lock:
+        store = _relationships_load()
+        users = store["users"]
+        row = users.get(actor_key)
+        if not isinstance(row, dict):
+            row = {
+                "scope": scope or "",
+                "points": 0,
+                "rank": "Stranger",
+                "interactions": 0,
+                "familiarity": 0.05,
+                "trust": 0.05,
+                "affinity": 0.05,
+                "friction": 0.0,
+                "notes": [],
+                "known_names": [],
+                "last_seen_ts": 0.0,
+            }
+        base_points = 2
+        if len(msg) >= 120:
+            base_points += 1
+        if "?" in msg:
+            base_points += 1
+
+        low = msg.lower()
+        positive = any(k in low for k in ("thank", "love", "nice", "great", "good job", "proud", "cute"))
+        negative = any(k in low for k in ("stupid", "idiot", "hate you", "shut up", "trash"))
+
+        row["points"] = int(row.get("points", 0) or 0) + base_points
+        row["interactions"] = int(row.get("interactions", 0) or 0) + 1
+        row["familiarity"] = min(1.0, float(row.get("familiarity", 0.05) or 0.05) + 0.02)
+        row["trust"] = min(1.0, max(0.0, float(row.get("trust", 0.05) or 0.05) + (0.03 if positive else (-0.03 if negative else 0.01))))
+        row["affinity"] = min(1.0, max(0.0, float(row.get("affinity", 0.05) or 0.05) + (0.04 if positive else 0.01)))
+        row["friction"] = min(1.0, max(0.0, float(row.get("friction", 0.0) or 0.0) * 0.96 + (0.08 if negative else 0.0)))
+        row["rank"] = _rel_rank_for_points(int(row.get("points", 0) or 0))
+        row["last_seen_ts"] = now
+        row["scope"] = scope or (row.get("scope") or "")
+
+        notes = row.get("notes")
+        if not isinstance(notes, list):
+            notes = []
+        for note in _rel_extract_notes(msg):
+            if note.lower() not in {str(n).lower() for n in notes}:
+                notes.append(note)
+        row["notes"] = notes[-12:]
+
+        known = row.get("known_names")
+        if not isinstance(known, list):
+            known = []
+        dname = (data.get("twitch_display") or data.get("display_name") or "").strip()
+        if dname and dname.lower() not in {str(x).lower() for x in known}:
+            known.append(dname[:60])
+        row["known_names"] = known[-5:]
+        users[actor_key] = row
+        _relationships_save(store)
+        return dict(row)
+
+
+def _relationship_note_assistant_turn(actor_key: str, reply: str) -> None:
+    r = (reply or "").strip()
+    if not actor_key or not r:
+        return
+    with _relationships_lock:
+        store = _relationships_load()
+        users = store["users"]
+        row = users.get(actor_key)
+        if not isinstance(row, dict):
+            return
+        row["last_reply"] = r[:240]
+        row["last_seen_ts"] = time.time()
+        users[actor_key] = row
+        _relationships_save(store)
+
+
+def _relationship_prompt(actor_key: str, row: dict | None) -> str:
+    if not actor_key or not isinstance(row, dict):
+        return ""
+    pts = int(row.get("points", 0) or 0)
+    rank = (row.get("rank") or _rel_rank_for_points(pts)).strip()
+    fam = float(row.get("familiarity", 0.0) or 0.0)
+    trust = float(row.get("trust", 0.0) or 0.0)
+    affinity = float(row.get("affinity", 0.0) or 0.0)
+    friction = float(row.get("friction", 0.0) or 0.0)
+    notes = row.get("notes")
+    if not isinstance(notes, list):
+        notes = []
+    notes_s = "; ".join(str(n)[:100] for n in notes[-5:]) if notes else "none yet"
+    return (
+        "Relationship memory (per-user, persistent):\n"
+        f"- User key: {actor_key}\n"
+        f"- Rank: {rank} ({pts} points)\n"
+        f"- Signals: familiarity={fam:.2f}, trust={trust:.2f}, affinity={affinity:.2f}, friction={friction:.2f}\n"
+        f"- Notes: {notes_s}\n"
+        "- Use this to adapt tone and continuity naturally. Do not dump raw stats unless asked."
+    )
+
+
+def _relationship_get(actor_key: str) -> dict:
+    if not actor_key:
+        return {}
+    with _relationships_lock:
+        users = _relationships_load().get("users") or {}
+        row = users.get(actor_key)
+    return row if isinstance(row, dict) else {}
+
+
+def _relationship_format_summary(actor_key: str, row: dict, *, include_notes: bool = True) -> str:
+    if not row:
+        return f"No relationship record yet for **{actor_key}**."
+    pts = int(row.get("points", 0) or 0)
+    rank = (row.get("rank") or _rel_rank_for_points(pts)).strip()
+    interactions = int(row.get("interactions", 0) or 0)
+    fam = float(row.get("familiarity", 0.0) or 0.0)
+    trust = float(row.get("trust", 0.0) or 0.0)
+    affinity = float(row.get("affinity", 0.0) or 0.0)
+    friction = float(row.get("friction", 0.0) or 0.0)
+    lines = [
+        f"🔗 **Bond: {actor_key}**",
+        f"Rank: **{rank}** ({pts} pts) · Interactions: **{interactions}**",
+        f"Signals — familiarity {fam:.2f}, trust {trust:.2f}, affinity {affinity:.2f}, friction {friction:.2f}",
+    ]
+    if include_notes:
+        notes = row.get("notes")
+        if isinstance(notes, list) and notes:
+            lines.append("Notes:")
+            lines.extend(f"- {str(n)[:120]}" for n in notes[-6:])
+        else:
+            lines.append("Notes: (none yet)")
+    return "\n".join(lines)
+
+
+def _relationship_parse_target_arg(raw: str, fallback_scope: str) -> tuple[str, str]:
+    text = (raw or "").strip()
+    if not text:
+        return fallback_scope, ""
+    parts = text.split(None, 1)
+    token = parts[0].strip()
+    rest = (parts[1] if len(parts) > 1 else "").strip()
+    low = token.lower()
+    m_mention = re.fullmatch(r"<@!?(\d{5,})>", token)
+    if m_mention:
+        return f"discord:user:{m_mention.group(1)}", rest
+    m_at_digits = re.fullmatch(r"@?(\d{5,})", token)
+    if m_at_digits:
+        return f"discord:user:{m_at_digits.group(1)}", rest
+    if re.fullmatch(r"(?:discord:user:\d{5,}|twitch:user:[a-zA-Z0-9_]{2,30}|web)", low):
+        return low, rest
+    m_tw = re.fullmatch(r"twitch:([a-zA-Z0-9_]{2,30})", low)
+    if m_tw:
+        return f"twitch:user:{m_tw.group(1)}", rest
+    if fallback_scope.startswith("twitch:user:") and re.fullmatch(r"@?[a-zA-Z0-9_]{2,30}", token):
+        return f"twitch:user:{low.lstrip('@')}", rest
+    return fallback_scope, text
+
+
+def _relationship_add_note(actor_key: str, note: str) -> tuple[bool, str]:
+    n = re.sub(r"\s+", " ", (note or "").strip(" .,!?:;")).strip()
+    if len(n) < 2:
+        return False, "Usage: !note add [user] <text>"
+    with _relationships_lock:
+        store = _relationships_load()
+        users = store.get("users") or {}
+        row = users.get(actor_key)
+        if not isinstance(row, dict):
+            row = {
+                "scope": actor_key,
+                "points": 0,
+                "rank": "Stranger",
+                "interactions": 0,
+                "familiarity": 0.05,
+                "trust": 0.05,
+                "affinity": 0.05,
+                "friction": 0.0,
+                "notes": [],
+                "known_names": [],
+                "last_seen_ts": 0.0,
+            }
+        notes = row.get("notes")
+        if not isinstance(notes, list):
+            notes = []
+        if n.lower() in {str(x).lower() for x in notes}:
+            return True, f"Note already exists for **{actor_key}**."
+        notes.append(n[:160])
+        row["notes"] = notes[-12:]
+        row["last_seen_ts"] = time.time()
+        users[actor_key] = row
+        store["users"] = users
+        _relationships_save(store)
+    return True, f"Saved note for **{actor_key}**."
+
+
+def _relationship_top_text(scope_hint: str, limit: int = 10) -> str:
+    prefix = ""
+    if (scope_hint or "").startswith("discord:user:"):
+        prefix = "discord:user:"
+    elif (scope_hint or "").startswith("twitch:user:"):
+        prefix = "twitch:user:"
+    with _relationships_lock:
+        users = _relationships_load().get("users") or {}
+    rows: list[tuple[str, dict]] = []
+    for k, v in users.items():
+        if not isinstance(v, dict):
+            continue
+        if prefix and not str(k).startswith(prefix):
+            continue
+        rows.append((str(k), v))
+    rows.sort(key=lambda kv: int((kv[1] or {}).get("points", 0) or 0), reverse=True)
+    rows = rows[: max(1, min(20, int(limit or 10)))]
+    if not rows:
+        return "No relationship records yet."
+    lines = ["🏆 **Bond leaderboard**"]
+    for i, (k, row) in enumerate(rows, 1):
+        pts = int(row.get("points", 0) or 0)
+        rank = row.get("rank") or _rel_rank_for_points(pts)
+        lines.append(f"{i}. **{k}** — {rank} ({pts} pts)")
+    return "\n".join(lines)
 
 
 def _dm_greeting_recipient_ids() -> list[int]:
@@ -3349,6 +3778,27 @@ def _strip_luna_narration_brackets(text: str) -> str:
     return out.strip()
 
 
+_VRM_REPLY_STATE_LEAK_RE = re.compile(
+    r"speaking\s*=\s*(?:True|False)\b.*\bbody_mode\s*=\s*\S+.*\bdominant_emotion\s*=",
+    re.I | re.S,
+)
+
+
+def _is_leaked_vrm_self_state_line(line: str) -> bool:
+    """True when the model echoed [Live VRM self-state] telemetry (must not reach the user)."""
+    s = (line or "").strip()
+    if not s or len(s) > 2500:
+        return False
+    if "intent_levels(" in s.lower():
+        return True
+    rest = re.sub(r"^(?:\s*\[[A-Z][A-Z0-9_]*\]\s*)+", "", s, flags=re.I)
+    if _VRM_REPLY_STATE_LEAK_RE.search(rest):
+        return True
+    if _VRM_REPLY_STATE_LEAK_RE.search(s):
+        return True
+    return False
+
+
 def _sanitize_luna_reply(text: str) -> str:
     """Strip hallucinated preambles (wrong persona, inappropriate openings). Only for main chat."""
     if not text:
@@ -3381,6 +3831,9 @@ def _sanitize_luna_reply(text: str) -> str:
     response_labels = {"response", "reply", "final", "answer"}
     for raw_line in lines:
         line = raw_line.strip()
+        if _is_leaked_vrm_self_state_line(line):
+            hide_block = False
+            continue
         m = re.match(r"^\[([^\]]+)\]\s*(.*)$", line)
         if m:
             raw_inner = (m.group(1) or "").strip()
@@ -3668,6 +4121,32 @@ def ollama_chat(
         )
         return _sanitize_luna_reply(raw)
     except Exception as primary_err:
+        # If primary chat model is throttled (HTTP 429), retry on a stable local fallback (default: llama3.2).
+        is_rate_limited = (
+            isinstance(primary_err, urllib.error.HTTPError) and int(getattr(primary_err, "code", 0) or 0) == 429
+        ) or ("429" in str(primary_err or "").lower()) or ("too many requests" in str(primary_err or "").lower())
+        if provider in ("ollama", "gguf") and is_rate_limited:
+            rl_model = (OLLAMA_RATE_LIMIT_FALLBACK or "llama3.2:latest").strip()
+            if rl_model and rl_model != use_model:
+                try:
+                    rl_to = timeout if timeout is not None else 90
+                    raw = _run_with_model_guard(
+                        kind="chat",
+                        queue_wait_sec=_MODEL_CHAT_QUEUE_WAIT_SEC,
+                        hard_timeout_sec=max(rl_to + 8, _MODEL_CHAT_GUARD_TIMEOUT_SEC),
+                        fn=lambda: _chat_provider_once(
+                            msg,
+                            system,
+                            scope,
+                            history,
+                            rl_model,
+                            timeout=rl_to,
+                            compact=compact,
+                        ),
+                    )
+                    return _sanitize_luna_reply(raw)
+                except Exception:
+                    pass
         if provider in ("ollama", "gguf") and OLLAMA_FALLBACK and OLLAMA_FALLBACK != use_model:
             try:
                 fb_to = timeout if timeout is not None else 90
@@ -3691,7 +4170,22 @@ def ollama_chat(
         if isinstance(primary_err, TimeoutError):
             em = str(primary_err or "")
             if "queue_busy" in em:
-                return "Luna is busy with other requests right now. Try again in a few seconds."
+                # Voice/chat bursts can briefly saturate the single chat slot.
+                # Retry once with a longer queue wait before giving up.
+                try:
+                    retry_wait = max(_MODEL_CHAT_QUEUE_WAIT_SEC, 12)
+                    retry_to = timeout if timeout is not None else (75 if compact else 60)
+                    raw = _run_with_model_guard(
+                        kind="chat",
+                        queue_wait_sec=retry_wait,
+                        hard_timeout_sec=max(retry_to + 8, _MODEL_CHAT_GUARD_TIMEOUT_SEC),
+                        fn=lambda: _chat_provider_once(
+                            msg, system, scope, history, use_model, timeout=retry_to, compact=compact
+                        ),
+                    )
+                    return _sanitize_luna_reply(raw)
+                except Exception:
+                    return "Luna is busy with other requests right now. Try again in a few seconds."
             if "timeout" in em:
                 return "Luna took too long to answer and was timed out. Try again."
         if isinstance(primary_err, urllib.error.URLError):
@@ -4559,10 +5053,14 @@ def _proactive_heartbeat_step():
         with _working_lock:
             last_acts = _last_actions[:5]
         _set_planning("Deciding whether to speak…")
-        drives_str = ", ".join(f"{k}={state.get(k, 0):.2f}" for k in ("connection", "usefulness", "curiosity"))
+        drives_str = ", ".join(
+            f"{k}={state.get(k, 0):.2f}"
+            for k in ("connection", "usefulness", "curiosity", "attention", "validation")
+        )
         context = f"Drives: {drives_str}. Recent: {[a.get('cmd') for a in last_acts]}. Nudges: {nudges[:3]}."
         prompt = (
-            "You are Luna, a loyal AI assistant living on the user's PC. You have internal drives (connection, usefulness, curiosity). "
+            "You are Luna, a loyal AI assistant living on the user's PC. "
+            "You have internal drives (connection, usefulness, curiosity, attention, validation). "
             "Given the context below, should you say ONE short sentence to the user unprompted? "
             "Only if it feels natural (e.g. offer help, acknowledge a nudge, or a brief check-in). Otherwise reply with exactly: NONE\n\n"
             f"Context: {context}\n\nYour one sentence or NONE:"
@@ -4597,7 +5095,7 @@ _STREAM_LORE_DEFAULT_PREMISE = (
 
 
 def _stream_solo_banter_env_on() -> bool:
-    return _env("LUNA_STREAM_SOLO_BANTER", "0").strip().lower() in ("1", "true", "yes", "on")
+    return _env("LUNA_STREAM_SOLO_BANTER", "1").strip().lower() in ("1", "true", "yes", "on")
 
 
 def _stream_solo_require_stream_mode() -> bool:
@@ -4606,9 +5104,10 @@ def _stream_solo_require_stream_mode() -> bool:
 
 def _stream_solo_idle_sec() -> float:
     try:
-        return max(60.0, float(_env("LUNA_STREAM_SOLO_IDLE_SEC", "240") or "240"))
+        # Default 3 minutes of silence before Luna fills dead air.
+        return max(60.0, float(_env("LUNA_STREAM_SOLO_IDLE_SEC", "180") or "180"))
     except ValueError:
-        return 240.0
+        return 180.0
 
 
 def _stream_solo_min_gap_sec() -> float:
@@ -4675,25 +5174,29 @@ def _lol_observer_flags() -> dict:
 
 
 def _stream_solo_pick_mode(between_games: bool) -> str:
-    """Rotate solo stream segments: lore, LoL lobby, idle, VTuber-style bits, lurker shoutouts, host takeover."""
+    """Rotate solo stream segments: lore, inner-world thoughts, LoL lobby, idle, VTuber bits, lurker shoutouts, host takeover."""
     if LUNA_STREAM_TAKEOVER and _stream_takeover_context_active() and random.random() < 0.30:
         return "host_takeover"
     r = random.random()
     if between_games:
-        if r < 0.20:
+        if r < 0.18:
             return "lol_lobby"
-        if r < 0.38:
+        if r < 0.33:
             return "vtuber_bit"
-        if r < 0.52:
+        if r < 0.47:
             return "lurker"
-        if r < 0.78:
+        if r < 0.65:
+            return "inner_world"
+        if r < 0.85:
             return "lore"
         return "idle"
-    if r < 0.18:
+    if r < 0.16:
         return "lurker"
-    if r < 0.38:
+    if r < 0.32:
         return "vtuber_bit"
-    if r < 0.68:
+    if r < 0.56:
+        return "inner_world"
+    if r < 0.78:
         return "lore"
     return "idle"
 
@@ -4734,16 +5237,25 @@ def _stream_solo_generate_line(mode: str, lore: dict) -> str:
     if not isinstance(recent, list):
         recent = []
     recent_s = "\n".join(f"- {(str(x) or '')[:200]}" for x in recent[-4:])
+    bio = biology_get()
+    attention = float(bio.get("attention", 0.25) or 0.25)
+    validation = float(bio.get("validation", 0.25) or 0.25)
     stream_persona = _stream_mode_persona_body()[:2200]
     spoken_rules = (
         "This will be read aloud by TTS to the live stream (not posted as chat text unless separately enabled). "
         "Sound like a real VTuber / stream host: natural spoken English, conversational. "
         "You may use 2–4 short sentences if it flows; stay under about 500 characters. "
-        "No stage directions, no bullet lists, no *actions*, no @mentions. PG."
+        "No stage directions, no bullet lists, no *actions*, no @mentions. PG. "
+        "Must be freshly generated each time from current context; do not output stock lines, reused templates, or catchphrase macros."
+    )
+    drive_hint = (
+        f"Current social needs: attention={attention:.2f}, validation={validation:.2f}. "
+        "If these are high, lightly invite chat to respond or affirm the vibe; keep it subtle, playful, and natural."
     )
     if mode == "idle":
         prompt = (
             f"{spoken_rules}\n\n"
+            f"{drive_hint}\n\n"
             "Chat is quiet. Create a small moment for the room — joke, observation, or hype — "
             "as Luna in stream mode. Speak to **everyone** watching, not one person."
         )
@@ -4776,10 +5288,20 @@ def _stream_solo_generate_line(mode: str, lore: dict) -> str:
     elif mode == "host_takeover":
         prompt = (
             f"{spoken_rules}\n\n"
+            f"{drive_hint}\n\n"
             "The **streamer is in the run** — on mic, in a match, in flow — and is **not actively chatting with you right now**. "
             "You (Luna) are **filling the quiet** for the **live** room: short co-host energy, keep things warm, welcome lurkers, "
             "hype the moment lightly, or react like you're watching with chat. **Do not** act like a replacement for the host — you're "
             "**covering a beat** until they engage again. 2–4 short sentences, PG, natural spoken English."
+        )
+    elif mode == "inner_world":
+        prompt = (
+            f"{spoken_rules}\n\n"
+            f"{drive_hint}\n\n"
+            "Chat is quiet and nobody is talking to you for a while. Fill one beat by sharing a tiny inner-world moment: "
+            "a dream fragment, a miniature memory-like experience, an internal thought, or a short story seed from your perspective. "
+            "Keep it vivid but grounded, 2–4 short spoken sentences, warm and stream-safe (PG). "
+            "No melodrama, no trauma dumping, no roleplay commands."
         )
     else:
         prompt = (
@@ -4799,6 +5321,7 @@ def _stream_solo_generate_line(mode: str, lore: dict) -> str:
         if mode == "idle":
             retry_prompt = (
                 f"{spoken_rules}\n\n"
+                f"{drive_hint}\n\n"
                 "Chat is still quiet. Write ONE fresh, spontaneous idle line Luna says right now. "
                 "Must sound off-the-cuff, no templates, no recycled catchphrases, PG."
             )
@@ -4820,7 +5343,14 @@ def _stream_solo_generate_line(mode: str, lore: dict) -> str:
         elif mode == "host_takeover":
             retry_prompt = (
                 f"{spoken_rules}\n\n"
+                f"{drive_hint}\n\n"
                 "Streamer is focused; you are co-hosting live. ONE fresh line to fill dead air — warm, PG, not generic."
+            )
+        elif mode == "inner_world":
+            retry_prompt = (
+                f"{spoken_rules}\n\n"
+                f"{drive_hint}\n\n"
+                "Write ONE fresh inner-world line Luna says out loud (dream/memory/thought vibe), warm and natural, PG."
             )
         else:
             retry_prompt = (
@@ -4972,7 +5502,8 @@ def _evolution_step() -> None:
         knowledge_titles = [e.get("title") or e.get("slug", "") for e in list_knowledge()[:15]]
         recent = [f"{a.get('cmd', '')}: {(a.get('summary') or '')[:30]}" for a in last_acts]
         context = (
-            f"Your drives: {bio.get('connection', 0):.2f} connection, {bio.get('usefulness', 0):.2f} usefulness, {bio.get('curiosity', 0):.2f} curiosity. "
+            f"Your drives: {bio.get('connection', 0):.2f} connection, {bio.get('usefulness', 0):.2f} usefulness, "
+            f"{bio.get('curiosity', 0):.2f} curiosity, {bio.get('attention', 0):.2f} attention, {bio.get('validation', 0):.2f} validation. "
             f"Tools you already have: {', '.join(absorbed[:25])}. "
             f"Knowledge topics: {', '.join(knowledge_titles[:10]) or 'none'}. "
             f"Recent actions: {'; '.join(recent[:5]) or 'none'}."
@@ -5785,6 +6316,63 @@ async def _handle_wake_word_activation():
                 _play_reply_tts(reply, para_mode=False)
     except Exception as e:
         print(f"[Luna] Wake word handling error: {e}", flush=True)
+
+async def _publish_announce_loop():
+    """Post to Discord text channel(s) when watched YouTube feeds have a new video or Twitch logins go live."""
+    if not _PUBLISH_ANNOUNCE_CONFIGURED:
+        return
+    await bot.wait_until_ready()
+    cids = _PUBLISH_ANNOUNCE_DISCORD_CHANNEL_IDS
+    tw_ok = bool(TWITCH_CLIENT_ID and TWITCH_APP_TOKEN)
+    print(
+        f"[Publish announce] ON — Discord channel ids {', '.join(str(x) for x in cids)}, "
+        f"every {LUNA_PUBLISH_ANNOUNCE_POLL_SEC:.0f}s "
+        f"(YouTube feeds: {len(_PUBLISH_ANNOUNCE_YOUTUBE_IDS) + len(_PUBLISH_ANNOUNCE_YOUTUBE_RSS)}, "
+        f"Twitch: {len(_PUBLISH_ANNOUNCE_TWITCH_LOGINS)}).",
+        flush=True,
+    )
+    if _PUBLISH_ANNOUNCE_TWITCH_LOGINS and not tw_ok:
+        print(
+            "[Publish announce] Twitch logins configured but TWITCH_CLIENT_ID/TWITCH_APP_TOKEN missing — "
+            "live alerts skipped (YouTube still works).",
+            flush=True,
+        )
+    while True:
+        try:
+            msgs = await asyncio.to_thread(
+                _poll_publish_announce,
+                state_path=_PUBLISH_ANNOUNCE_STATE_PATH,
+                youtube_channel_ids=_PUBLISH_ANNOUNCE_YOUTUBE_IDS,
+                youtube_rss_urls=_PUBLISH_ANNOUNCE_YOUTUBE_RSS,
+                twitch_logins=_PUBLISH_ANNOUNCE_TWITCH_LOGINS,
+                twitch_client_id=TWITCH_CLIENT_ID,
+                twitch_app_token=TWITCH_APP_TOKEN,
+                skip_twitch=not tw_ok,
+            )
+            if msgs:
+                for cid in cids:
+                    ch = bot.get_channel(cid)
+                    if ch is None:
+                        try:
+                            ch = await bot.fetch_channel(cid)
+                        except Exception:
+                            ch = None
+                    if ch is None:
+                        print(f"[Publish announce] Cannot resolve Discord channel id {cid}.", flush=True)
+                        continue
+                    for body in msgs:
+                        body = (body or "").strip()
+                        if not body:
+                            continue
+                        if len(body) > 1990:
+                            body = body[:1987] + "..."
+                        try:
+                            await ch.send(body)
+                        except Exception as e:
+                            print(f"[Publish announce] send failed ({cid}): {e}", flush=True)
+        except Exception as e:
+            print(f"[Publish announce] loop error: {e}", flush=True)
+        await asyncio.sleep(LUNA_PUBLISH_ANNOUNCE_POLL_SEC)
 
 # ── RAG: knowledge base vector search ────────────────────────────────────────
 
@@ -12331,6 +12919,7 @@ _camera_last_image_bytes: bytes | None = None  # for camera chat (Granite thread
 _camera_chat_history: list[dict] = []  # [{role, content}, ...] separate thread with vision model
 _camera_chat_lock = threading.Lock()
 _camera_lock = threading.Lock()
+_last_web_vision_context: dict | None = None  # {summary, source, ts} — latest /api/chat vision; persists for LUNA_VISION_CONTEXT_TTL_SEC
 _vision_infer_lock = threading.Lock()
 _vision_last_error = ""
 
@@ -12448,7 +13037,7 @@ def _vision_describe_image(
         )
         out = (_vision_provider_extract_text(data) or "").strip()
         _vision_last_error = ""
-        return out[:600] if out else ""
+        return out[:2400] if out else ""
     except TimeoutError as e:
         _vision_last_error = str(e)[:200]
         return ""
@@ -12631,7 +13220,10 @@ def _get_camera_see_result() -> str:
     with _camera_lock:
         r = _camera_last_result
     if not r:
-        return "I don't have a camera view yet. Turn on **Camera** in the UI so I can see you, then ask again."
+        return (
+            "I don't have a live frame yet. In the VRM viewer, turn on **Camera** or **Screen share** "
+            "(and wait a moment for the preview), then ask again."
+        )
     # Prefer vision model's description when available
     vision = r.get("vision_summary") or ""
     if vision:
@@ -12724,6 +13316,41 @@ def _run_cmd_impl(cmd: str, p: dict, scope: str | None, user_message: str) -> st
         return _mark_suno_logged_in()
     if cmd == "help":
         return HELP_TEXT
+    if cmd == "rank":
+        use_scope = scope or LINKED_SCOPE or "web"
+        actor_key, _rest = _relationship_parse_target_arg((p.get("target") or p.get("user") or "").strip(), use_scope)
+        row = _relationship_get(actor_key)
+        if not row:
+            return f"No rank yet for **{actor_key}**. Talk with Luna first."
+        pts = int(row.get("points", 0) or 0)
+        rank = row.get("rank") or _rel_rank_for_points(pts)
+        return f"🏅 **{actor_key}** is **{rank}** with **{pts}** points."
+    if cmd == "bond":
+        use_scope = scope or LINKED_SCOPE or "web"
+        target = (p.get("target") or p.get("user") or "").strip()
+        if target.lower() in ("top", "leaderboard", "lb"):
+            return _relationship_top_text(use_scope)
+        actor_key, _rest = _relationship_parse_target_arg(target, use_scope)
+        row = _relationship_get(actor_key)
+        return _relationship_format_summary(actor_key, row, include_notes=True)
+    if cmd == "notes":
+        use_scope = scope or LINKED_SCOPE or "web"
+        actor_key, _rest = _relationship_parse_target_arg((p.get("target") or p.get("user") or "").strip(), use_scope)
+        row = _relationship_get(actor_key)
+        if not row:
+            return f"No notes yet for **{actor_key}**."
+        notes = row.get("notes")
+        if not isinstance(notes, list) or not notes:
+            return f"No notes yet for **{actor_key}**."
+        return "🗒️ **Notes**\n" + "\n".join(f"- {str(n)[:140]}" for n in notes[-12:])
+    if cmd == "note_add":
+        use_scope = scope or LINKED_SCOPE or "web"
+        target = (p.get("target") or p.get("user") or "").strip()
+        note = (p.get("text") or p.get("note") or "").strip()
+        actor_key, remainder = _relationship_parse_target_arg(target, use_scope)
+        body = note or remainder
+        ok, msg = _relationship_add_note(actor_key, body)
+        return f"✅ {msg}" if ok else f"❌ {msg}"
     if cmd == "play":
         query = (p.get("query") or "").strip()
         if not query:
@@ -13076,6 +13703,21 @@ def _parse_command(text: str) -> tuple[str, dict] | None:
             return "summarize", {"input": raw[len(pfx):].strip()}
     if low in ("digest", "daily digest", "today digest"):
         return "digest", {}
+    if low.startswith("rank"):
+        rest = raw[4:].strip() if low != "rank" else ""
+        return "rank", {"target": rest}
+    if low.startswith("bond"):
+        rest = raw[4:].strip() if low != "bond" else ""
+        return "bond", {"target": rest}
+    if low.startswith("notes"):
+        rest = raw[5:].strip() if low != "notes" else ""
+        return "notes", {"target": rest}
+    if low.startswith("note add "):
+        rest = raw[len("note add "):].strip()
+        target, remainder = _relationship_parse_target_arg(rest, "")
+        if target:
+            return "note_add", {"target": target, "text": remainder}
+        return "note_add", {"text": rest}
     # Todo
     if low.startswith("todo "):
         rest = raw[5:].strip()
@@ -13205,8 +13847,8 @@ def _likely_command(text: str) -> bool:
     low = (text or "").strip().lower()
     if not low: return False
     if _CONV_START.match(low): return False
-    starters = ("play ","podcast ","podcast create ","create podcast ","audiobook ","audiobook create ","audiobook continue ","audiobook cancel ","search ","research ","research_story ","research story ","story_script ","story script ","send ","create ","call ","dm ","tell ","inform ","msg ","share ","post ","remind ","suno ","yt_comment ","yt_like ","yt_analytics ","yt_react ","yt_watch_react ","yt_watch_stop ","x_react ","comment ","ig_dm ","fb_msg ","google ","news","!help","how's ","pc status","luna status","ram ","what do you see","what can you see","ask me ","summarize ","summary of ","todo ","calendar ","join me ","join my ","luna join ")
-    return any(low.startswith(s) for s in starters) or low in ("play","news","help","skip","stop","ask me","digest","daily digest","todo","todo list","calendar","calendar list","calendar today","calendar week","youtube analytics","yt analytics") or "luna status" in low or "pc status" in low or bool(re.search(r"\b(what do you see|what can you see|do you see me|describe what you see)\b", low)) or bool(re.search(r"\b(?:read|analyze|scan)\s+(?:my\s+)?(?:analytics|dashboard|stats)\b", low))
+    starters = ("play ","podcast ","podcast create ","create podcast ","audiobook ","audiobook create ","audiobook continue ","audiobook cancel ","search ","research ","research_story ","research story ","story_script ","story script ","send ","create ","call ","dm ","tell ","inform ","msg ","share ","post ","remind ","suno ","yt_comment ","yt_like ","yt_analytics ","yt_react ","yt_watch_react ","yt_watch_stop ","x_react ","comment ","ig_dm ","fb_msg ","google ","news","!help","how's ","pc status","luna status","ram ","what do you see","what can you see","ask me ","summarize ","summary of ","todo ","calendar ","join me ","join my ","luna join ","rank","bond","notes","note add ")
+    return any(low.startswith(s) for s in starters) or low in ("play","news","help","skip","stop","ask me","digest","daily digest","todo","todo list","calendar","calendar list","calendar today","calendar week","youtube analytics","yt analytics","rank","bond","notes") or "luna status" in low or "pc status" in low or bool(re.search(r"\b(what do you see|what can you see|do you see me|describe what you see)\b", low)) or bool(re.search(r"\b(?:read|analyze|scan)\s+(?:my\s+)?(?:analytics|dashboard|stats)\b", low))
 
 def _is_retry(msg: str) -> bool:
     # Strict retry command detection only (avoid accidental trigger in normal conversation).
@@ -13897,13 +14539,21 @@ def get_nudges(scope: str, clear_after: bool = False) -> list[str]:
     except Exception:
         return []
 
-# ── Biology / drives (Hull-style: connection, usefulness, curiosity, expression) ──
+# ── Biology / drives (Hull-style: connection, usefulness, curiosity, expression, attention, validation) ──
 
 def _biology_load() -> dict:
     with _biology_lock:
         d = _load_json(_BIOLOGY_PATH, {})
     if not isinstance(d, dict): d = {}
-    defaults = {"connection": 0.3, "usefulness": 0.3, "curiosity": 0.3, "expression": 0.2, "last_tick": time.time()}
+    defaults = {
+        "connection": 0.3,
+        "usefulness": 0.3,
+        "curiosity": 0.3,
+        "expression": 0.2,
+        "attention": 0.25,
+        "validation": 0.25,
+        "last_tick": time.time(),
+    }
     for k, v in defaults.items():
         if k not in d or not isinstance(d[k], (int, float)): d[k] = v
     # Existential layer (growing-agent style: dread, fear, mood)
@@ -13923,7 +14573,7 @@ def biology_tick() -> dict:
     now = time.time()
     elapsed = min(now - state.get("last_tick", now), 3600)
     state["last_tick"] = now
-    for key in ("connection", "usefulness", "curiosity", "expression"):
+    for key in ("connection", "usefulness", "curiosity", "expression", "attention", "validation"):
         state[key] = min(1.0, state.get(key, 0.3) + 0.002 * (elapsed / 60))
     for key in ("dread", "fear"):
         state[key] = max(0.0, state.get(key, 0) - 0.001 * (elapsed / 60))
@@ -14126,7 +14776,7 @@ def _mind_build() -> dict:
     add_node("luna", "Luna", "core", 1.0)
 
     bio = biology_get()
-    for key in ("connection", "usefulness", "curiosity", "expression"):
+    for key in ("connection", "usefulness", "curiosity", "expression", "attention", "validation"):
         v = bio.get(key, 0)
         nid = f"drive-{key}"
         add_node(nid, f"{key} {v:.2f}", "drive", v)
@@ -14771,6 +15421,8 @@ def api_reset():
         state = _biology_load()
         for k in ("connection", "usefulness", "curiosity", "expression"):
             state[k] = 0.3
+        for k in ("attention", "validation"):
+            state[k] = 0.25
         state["dread"] = 0.0
         state["fear"] = 0.0
         state["mood"] = "calm"
@@ -15479,6 +16131,13 @@ def _strip_luna_tags_for_twitch(text: str) -> str:
     t = re.sub(r"\s+", " ", t).strip()
     return t[:500]
 
+def _twitch_queue_channel_key(item: dict | None) -> str:
+    home_lc = (TWITCH_CHANNEL or "").strip().lower()
+    if not isinstance(item, dict):
+        return home_lc
+    return (item.get("channel") or home_lc).strip().lstrip("#").lower() or home_lc
+
+
 def _tts_for_chat_source(reply: str, chat_source: str, *, para_mode: bool = True) -> None:
     """Speak Luna's reply on the server (system audio). Skip while /vrm/ pings /api/vrm-presence (browser plays Edge TTS)."""
     if _vrm_presence_recent():
@@ -15493,6 +16152,8 @@ def _execute_chat_turn(scope: str, msg: str, data: dict | None = None, *, chat_s
     _last_user_activity = time.time()
     data = data or {}
     sc = (scope or "").strip()
+    rel_actor_key = _relationship_actor_key(sc, data, chat_source)
+    rel_row = _relationship_record_user_turn(rel_actor_key, sc, msg, data)
     if chat_source == "web" and (
         (LINKED_SCOPE and sc == (LINKED_SCOPE or "").strip())
         or (_linked_int and sc == f"discord:user:{_linked_int}")
@@ -15503,8 +16164,12 @@ def _execute_chat_turn(scope: str, msg: str, data: dict | None = None, *, chat_s
         if tl and tl == (TWITCH_BROADCASTER_LOGIN or "").strip().lower():
             _last_streamer_luna_at = time.time()
     biology_satisfy("connection", 0.15)
+    biology_satisfy("attention", 0.12)
+    biology_satisfy("validation", 0.10)
 
     def _tts(reply: str) -> None:
+        if data.get("twitch_skip_tts"):
+            return
         _tts_for_chat_source(reply, chat_source)
 
     def _store_assistant(assistant: str) -> str:
@@ -15547,7 +16212,7 @@ def _execute_chat_turn(scope: str, msg: str, data: dict | None = None, *, chat_s
         return {"reply": reply}
 
     if msg.startswith("!"):
-        reply = _handle_bang(msg, scope)
+        reply = _handle_bang(msg, scope, data or {})
         reply = _store_assistant(reply)
         _bang0 = (msg.split(None, 1)[0] or "").lower()
         if _bang0 in ("!briefing", "!analytics_screen", "!dashboard_read", "!read_dashboard"):
@@ -15565,6 +16230,14 @@ def _execute_chat_turn(scope: str, msg: str, data: dict | None = None, *, chat_s
 
     if not use_fast and _likely_command(msg):
         parsed = _parse_command(msg)
+        if parsed:
+            cmd0, _params0 = parsed
+            # VRM sends vision via /api/chat `vision_frame`, not /api/camera/frame. Phrases like "what can you see?"
+            # used to route to camera_see (empty buffer) even when vision_context was injected — skip that shortcut.
+            if cmd0 == "camera_see":
+                vc = data.get("vision_context") if isinstance(data.get("vision_context"), dict) else {}
+                if vc.get("active") and str(vc.get("summary") or "").strip():
+                    parsed = None
         if parsed:
             cmd, params = parsed
             if cmd == "help":
@@ -15605,6 +16278,9 @@ def _execute_chat_turn(scope: str, msg: str, data: dict | None = None, *, chat_s
         force_stream_mode=_force_stream_mode_from_request_data(data),
         suppress_lol_context=bool((data or {}).get("suppress_lol_context")),
     )
+    rel_ctx = _relationship_prompt(rel_actor_key, rel_row)
+    if rel_ctx:
+        system = system + "\n\n" + rel_ctx
 
     briefing_reply = None
     if _should_show_briefing():
@@ -15614,10 +16290,18 @@ def _execute_chat_turn(scope: str, msg: str, data: dict | None = None, *, chat_s
     reply = ollama_chat(
         msg, system=system, scope=scope, history=history, model=OLLAMA_CHAT, compact=use_fast
     )
-    if not reply or reply.startswith("Ollama offline"): reply = COMMAND_ONLY
+    if not reply:
+        reply = COMMAND_ONLY
+    elif reply.startswith("Ollama offline"):
+        low_reply = reply.lower()
+        if "too many requests" in low_reply or "429" in low_reply:
+            reply = "I'm getting rate-limited for a moment. Give me a few seconds and try again."
+        else:
+            reply = COMMAND_ONLY
     if briefing_reply:
         reply = briefing_reply + "\n\n---\n\n" + reply
     reply = _store_assistant(reply)
+    _relationship_note_assistant_turn(rel_actor_key, reply)
 
     def _post_chat_memory():
         try:
@@ -15629,12 +16313,13 @@ def _execute_chat_turn(scope: str, msg: str, data: dict | None = None, *, chat_s
     _tts(reply)
     return {"reply": reply}
 
-def _twitch_enqueue_privmsg(login: str, display: str, text: str) -> None:
+def _twitch_enqueue_privmsg(login: str, display: str, text: str, channel: str) -> None:
     if not text or not text.strip():
         return
     _stream_presence_mark_chat_activity((display or login or "").strip())
+    ch = (channel or TWITCH_CHANNEL or "").strip().lstrip("#").lower() or (TWITCH_CHANNEL or "").strip().lower()
     try:
-        _twitch_msg_queue.put_nowait({"login": login, "display": display, "text": text.strip()})
+        _twitch_msg_queue.put_nowait({"login": login, "display": display, "text": text.strip(), "channel": ch})
     except queue.Full:
         pass
 
@@ -15651,17 +16336,214 @@ def _twitch_is_priority_text(text: str) -> bool:
     return _likely_command(t)
 
 
+_TWITCH_LOGIN_RE = re.compile(r"^[a-z0-9_]{4,25}$")
+
+
+def _twitch_normalize_login(s: str) -> str:
+    return (s or "").strip().lstrip("#").lower()
+
+
+def _twitch_privileged_irc_sender(login: str) -> bool:
+    lg = _twitch_normalize_login(login)
+    if not lg:
+        return False
+    if lg == (TWITCH_BROADCASTER_LOGIN or "").strip().lower():
+        return True
+    if lg == (TWITCH_CHANNEL or "").strip().lower():
+        return True
+    return False
+
+
+def _twitch_send_target_allowed(target: str) -> bool:
+    t = _twitch_normalize_login(target)
+    if not t or not _TWITCH_LOGIN_RE.match(t):
+        return False
+    home = (TWITCH_CHANNEL or "").strip().lower()
+    if t == home:
+        return True
+    if TWITCH_ALLOWED_CHAT_TARGETS:
+        return t in TWITCH_ALLOWED_CHAT_TARGETS
+    return True
+
+
+def _twitch_outbound_channel_for_send() -> str | None:
+    if TWITCH_OUTBOUND_ONLY_HOME:
+        return None
+    with _twitch_outbound_channel_lock:
+        return _twitch_outbound_channel_override
+
+
+def _twitch_set_outbound_channel(login: str | None) -> None:
+    global _twitch_outbound_channel_override
+    with _twitch_outbound_channel_lock:
+        _twitch_outbound_channel_override = (_twitch_normalize_login(login) if login else None) or None
+
+
+def _twitch_extra_send_cooldown_ok(channel_lc: str) -> bool:
+    ch = _twitch_normalize_login(channel_lc)
+    if ch not in TWITCH_EXTRA_IRC_CHANNELS:
+        return True
+    cd = float(TWITCH_EXTRA_IRC_REPLY_COOLDOWN_SEC or 0.0)
+    if cd <= 0.0:
+        return True
+    now = time.monotonic()
+    with _twitch_extra_send_lock:
+        last = float(_twitch_extra_last_send_mono.get(ch, 0.0))
+        return (now - last) >= cd
+
+
+def _twitch_extra_send_cooldown_remaining_sec(channel_lc: str) -> float:
+    ch = _twitch_normalize_login(channel_lc)
+    if ch not in TWITCH_EXTRA_IRC_CHANNELS:
+        return 0.0
+    cd = float(TWITCH_EXTRA_IRC_REPLY_COOLDOWN_SEC or 0.0)
+    if cd <= 0.0:
+        return 0.0
+    now = time.monotonic()
+    with _twitch_extra_send_lock:
+        last = float(_twitch_extra_last_send_mono.get(ch, 0.0))
+    return max(0.0, cd - (now - last))
+
+
+def _twitch_extra_mark_sent(channel_lc: str) -> None:
+    ch = _twitch_normalize_login(channel_lc)
+    if ch not in TWITCH_EXTRA_IRC_CHANNELS:
+        return
+    with _twitch_extra_send_lock:
+        _twitch_extra_last_send_mono[ch] = time.monotonic()
+
+
+def _twitch_redirect_manage_allowed(*, twitch_login: str | None = None, discord_uid: int | None = None) -> bool:
+    if discord_uid is not None and _is_privileged(int(discord_uid)):
+        return True
+    return _twitch_privileged_irc_sender(twitch_login or "")
+
+
+def _twitch_exec_chat_redirect(
+    arg: str,
+    *,
+    twitch_login: str | None = None,
+    discord_uid: int | None = None,
+) -> str:
+    if not _twitch_redirect_manage_allowed(twitch_login=twitch_login, discord_uid=discord_uid):
+        return "❌ Only the broadcaster (this channel's streamer) or the linked Discord admin can change Twitch redirect."
+    parts = (arg or "").strip().split(None, 1)
+    target_raw = parts[0].strip() if parts else ""
+    home_lc = (TWITCH_CHANNEL or "").strip().lower()
+    if not target_raw:
+        if TWITCH_OUTBOUND_ONLY_HOME:
+            return (
+                f"Luna only posts Twitch replies to **#{TWITCH_CHANNEL}** "
+                f"(**TWITCH_OUTBOUND_ONLY_HOME** is on)."
+            )
+        cur = _twitch_outbound_channel_for_send()
+        if cur:
+            return f"Luna's Twitch **replies** are posting to **#{cur}**. Default home IRC channel is still **#{TWITCH_CHANNEL}** (read/join unchanged). Send **!twitch_chat_redirect default** to reset sends."
+        return f"Luna's Twitch replies post to **#{TWITCH_CHANNEL}** (default). Use **!twitch_chat_redirect <channel>** to send replies elsewhere."
+    tl = target_raw.lower()
+    if tl in ("default", "off", "reset", "main", "home", home_lc):
+        _twitch_set_outbound_channel(None)
+        return f"✅ Twitch reply sends reset to **#{TWITCH_CHANNEL}**."
+    if TWITCH_OUTBOUND_ONLY_HOME:
+        return (
+            f"❌ Luna only posts Twitch replies to **#{TWITCH_CHANNEL}** "
+            f"(**TWITCH_OUTBOUND_ONLY_HOME** is on). Cross-channel redirect is disabled."
+        )
+    if not _twitch_send_target_allowed(tl):
+        return (
+            f"❌ **#{tl}** is not allowed. Add it to **TWITCH_ALLOWED_CHAT_TARGETS** in `.env` (comma-separated logins), "
+            "then restart Luna."
+        )
+    _twitch_set_outbound_channel(tl)
+    return (
+        f"✅ Luna's **generated Twitch replies** will post to **#{_twitch_normalize_login(tl)}** until you send "
+        f"**!twitch_chat_redirect default**. (IRC still listens on **#{TWITCH_CHANNEL}**.)"
+    )
+
+
+def _twitch_exec_say(
+    arg: str,
+    *,
+    twitch_login: str | None = None,
+    discord_uid: int | None = None,
+) -> str:
+    if not _twitch_redirect_manage_allowed(twitch_login=twitch_login, discord_uid=discord_uid):
+        return "❌ Only the broadcaster or linked Discord admin can use !twitch_say."
+    parts = (arg or "").strip().split(None, 1)
+    if len(parts) < 2:
+        return "Usage: **!twitch_say <channel_login> <message>**"
+    chan, body = parts[0].strip(), parts[1].strip()
+    c = _twitch_normalize_login(chan)
+    home_lc = (TWITCH_CHANNEL or "").strip().lower()
+    if TWITCH_OUTBOUND_ONLY_HOME and c != home_lc:
+        if c not in TWITCH_EXTRA_IRC_CHANNELS:
+            return (
+                f"❌ Cross-channel Twitch sends are off — Luna only chats in **#{TWITCH_CHANNEL}** "
+                f"(**TWITCH_OUTBOUND_ONLY_HOME**). Extra IRC channels listed in **TWITCH_EXTRA_IRC_CHANNELS** are allowed."
+            )
+        if TWITCH_EXTRA_IRC_REPLY_COOLDOWN_SEC > 0 and not _twitch_extra_send_cooldown_ok(c):
+            rem = _twitch_extra_send_cooldown_remaining_sec(c)
+            return f"⏳ Cooldown: wait **~{max(1, int(rem + 0.5))}s** before another send to **#{c}**."
+    elif TWITCH_EXTRA_IRC_REPLY_COOLDOWN_SEC > 0 and c in TWITCH_EXTRA_IRC_CHANNELS and not _twitch_extra_send_cooldown_ok(c):
+        rem = _twitch_extra_send_cooldown_remaining_sec(c)
+        return f"⏳ Cooldown: wait **~{max(1, int(rem + 0.5))}s** before another send to **#{c}**."
+    if not _twitch_send_target_allowed(c):
+        return (
+            f"❌ **#{c}** is not allowed. Set **TWITCH_ALLOWED_CHAT_TARGETS** (or use your home channel **#{TWITCH_CHANNEL}**)."
+        )
+    if not TWITCH_SEND_CHAT:
+        return "❌ Twitch send is disabled (**TWITCH_SEND_CHAT**)."
+    ok = send_twitch_chat_message(body[:450], channel=c)
+    if ok and c in TWITCH_EXTRA_IRC_CHANNELS:
+        _twitch_extra_mark_sent(c)
+    return f"✅ Sent to **#{c}**." if ok else "❌ Could not send (IRC not connected?)."
+
+
+def _twitch_handle_direct_commands(login: str, display: str, text: str) -> str | None:
+    """Broadcaster-only IRC shortcuts; bypass LLM. Returns reply text or None."""
+    t = (text or "").strip()
+    low = t.lower()
+    if low.startswith("!twitch_chat_redirect"):
+        rest = t[len("!twitch_chat_redirect") :].strip()
+        return _twitch_exec_chat_redirect(rest, twitch_login=login)
+    if low.startswith("!twitch_say"):
+        rest = t[len("!twitch_say") :].strip()
+        return _twitch_exec_say(rest, twitch_login=login)
+    return None
+
+
+def _twitch_push_ui_system_reply(display: str, login: str, text: str, reply: str) -> None:
+    global _twitch_event_id
+    label = (display or login or "viewer").strip() or "viewer"
+    with _twitch_lock:
+        _twitch_event_id += 1
+        eid = _twitch_event_id
+        _twitch_ui_events.append({
+            "id": eid,
+            "user": label,
+            "text": text,
+            "reply": reply,
+            "ts": time.time(),
+            "pause_cowatch_video": False,
+        })
+        while len(_twitch_ui_events) > 100:
+            _twitch_ui_events.pop(0)
+
+
 def _twitch_build_batch_turn(batch: list[dict]) -> tuple[str, str, str]:
     """Return (msg_for_model, ui_user_label, ui_text_label)."""
     if not batch:
         return "", "", ""
+    home_lc = (TWITCH_CHANNEL or "").strip().lower()
+    ch0 = _twitch_queue_channel_key(batch[0])
+    room_tag = f" — #{ch0}" if ch0 != home_lc else ""
     if len(batch) == 1:
         one = batch[0]
         login = (one.get("login") or "").strip().lower()
         display = (one.get("display") or "").strip()
         text = (one.get("text") or "").strip()
         label = display or login or "viewer"
-        return f"[Twitch chat] {label}: {text}", label, text
+        return f"[Twitch chat{room_tag}] {label}: {text}", label, text
     lines: list[str] = []
     names: list[str] = []
     for it in batch:
@@ -15676,7 +16558,7 @@ def _twitch_build_batch_turn(batch: list[dict]) -> tuple[str, str, str]:
     label_preview = ", ".join(unique_names[:3]) + ("…" if len(unique_names) > 3 else "")
     ui_text = f"{len(batch)} msgs ({label_preview})"
     msg = (
-        "[Twitch chat batch]\n"
+        f"[Twitch chat batch{room_tag}]\n"
         "Respond to the recent viewer messages together with one concise, natural reply.\n"
         "If one line is a direct command, prioritize it first.\n\n"
         + "\n".join(lines)
@@ -15692,21 +16574,40 @@ def _twitch_process_turn(scope: str, batch: list[dict]) -> None:
     if not msg:
         return
     login0 = ((batch[0].get("login") or "").strip().lower() if batch else "")
+    display0 = ((batch[0].get("display") or "").strip() if batch else "")
+    home_lc = (TWITCH_CHANNEL or "").strip().lower()
+    src_ch = _twitch_queue_channel_key(batch[0])
+    is_aux_irc = src_ch in TWITCH_EXTRA_IRC_CHANNELS
+    if is_aux_irc and TWITCH_EXTRA_IRC_REPLY_COOLDOWN_SEC > 0 and not _twitch_extra_send_cooldown_ok(src_ch):
+        return
     try:
         out = _execute_chat_turn(
-            scope, msg, {"twitch_login": login0}, chat_source="twitch",
+            scope,
+            msg,
+            {
+                "twitch_login": login0,
+                "twitch_display": display0,
+                "twitch_source_channel": src_ch,
+                "twitch_skip_tts": bool(is_aux_irc),
+            },
+            chat_source="twitch",
         )
         reply = out.get("reply") or ""
         if out.get("need_feedback") and not reply:
             reply = out.get("message") or "Check the web UI to continue."
         public = _strip_luna_tags_for_twitch(reply) if reply else ""
+        # Auxiliary IRC channels always get on-chat text; stream "voice-only" mode skips IRC post on home only.
         skip_chat = bool(
-            TWITCH_VOICE_ONLY_IN_STREAM_MODE
+            (not is_aux_irc)
+            and TWITCH_VOICE_ONLY_IN_STREAM_MODE
             and TWITCH_TTS
             and _stream_mode_should_apply(msg)
         )
         if TWITCH_SEND_CHAT and public and not skip_chat:
-            send_twitch_chat_message(public)
+            send_chan = src_ch if src_ch != home_lc else _twitch_outbound_channel_for_send()
+            sent_ok = send_twitch_chat_message(public, channel=send_chan)
+            if sent_ok and is_aux_irc:
+                _twitch_extra_mark_sent(src_ch)
         reply_show = public if public else reply
         pause_cowatch = bool(
             _yt_watch_cowatch_active()
@@ -15749,16 +16650,26 @@ def _twitch_worker_loop() -> None:
         except queue.Empty:
             continue
         login = (item.get("login") or "").strip().lower()
+        display = (item.get("display") or "").strip()
         text = (item.get("text") or "").strip()
         if not text:
             continue
         if TWITCH_BOT_USERNAME and login == TWITCH_BOT_USERNAME.lower():
             continue
+        ich = _twitch_queue_channel_key(item)
+        if ich in TWITCH_EXTRA_IRC_CHANNELS and TWITCH_EXTRA_IRC_REPLY_TO_LOGINS is not None:
+            if login not in TWITCH_EXTRA_IRC_REPLY_TO_LOGINS:
+                continue
+        early = _twitch_handle_direct_commands(login, display, text)
+        if early is not None:
+            _twitch_push_ui_system_reply(display, login, text, early)
+            continue
+        ch0 = ich
         # Priority lane: commands/direct asks go immediately.
         if (not _TWITCH_CHAT_BATCHING) or _twitch_is_priority_text(text):
             _twitch_process_turn(scope, [item])
             continue
-        # Batch lane: briefly collect chatter burst into one reply.
+        # Batch lane: briefly collect chatter burst into one reply (never mix IRC rooms).
         batch = [item]
         if TWITCH_CHAT_BATCH_WINDOW_SEC > 0 and TWITCH_CHAT_BATCH_MAX_ITEMS > 1:
             deadline = time.time() + TWITCH_CHAT_BATCH_WINDOW_SEC
@@ -15774,6 +16685,7 @@ def _twitch_worker_loop() -> None:
                     continue
                 if TWITCH_BOT_USERNAME and n_login == TWITCH_BOT_USERNAME.lower():
                     continue
+                n_ch = _twitch_queue_channel_key(nxt)
                 # If a priority message appears during batch window, flush current batch first,
                 # then handle that priority message immediately.
                 if _twitch_is_priority_text(n_text):
@@ -15781,11 +16693,19 @@ def _twitch_worker_loop() -> None:
                     batch = []
                     _twitch_process_turn(scope, [nxt])
                     break
+                if n_ch != ch0:
+                    _twitch_process_turn(scope, batch)
+                    batch = [nxt]
+                    ch0 = n_ch
+                    deadline = time.time() + TWITCH_CHAT_BATCH_WINDOW_SEC
+                    continue
                 batch.append(nxt)
         if batch:
             _twitch_process_turn(scope, batch)
 
 def _start_twitch_ingest() -> None:
+    if TWITCH_OUTBOUND_ONLY_HOME:
+        _twitch_set_outbound_channel(None)
     if not TWITCH_CHAT_ENABLED or not TWITCH_OAUTH_TOKEN or not TWITCH_CHANNEL:
         return
     if not run_twitch_irc_reader:
@@ -15795,12 +16715,14 @@ def _start_twitch_ingest() -> None:
     threading.Thread(target=_twitch_auto_ack_loop, daemon=True).start()
 
     def _irc() -> None:
+        extras = sorted(TWITCH_EXTRA_IRC_CHANNELS)
         run_twitch_irc_reader(
             TWITCH_CHANNEL,
             TWITCH_BOT_USERNAME,
             TWITCH_OAUTH_TOKEN,
             _twitch_enqueue_privmsg,
             _twitch_stop_event,
+            extra_join_channels=extras,
             log=lambda m: print(m, flush=True),
         )
 
@@ -15811,10 +16733,23 @@ def _start_twitch_ingest() -> None:
         and _stream_mode_should_apply("[Twitch chat] _: example")
     )
     _chat_post = bool(TWITCH_SEND_CHAT and not _vo_twitch)
+    _extras_s = ", ".join(f"#{x}" for x in sorted(TWITCH_EXTRA_IRC_CHANNELS))
+    _extra_note = ""
+    if _extras_s:
+        _extra_note = " Also joined: " + _extras_s + " (chat replies there, no TTS"
+        if TWITCH_EXTRA_IRC_REPLY_TO_LOGINS is None:
+            _extra_note += "; replies from everyone)."
+        else:
+            _extra_note += "; replies only from: " + ", ".join(sorted(TWITCH_EXTRA_IRC_REPLY_TO_LOGINS)) + ")."
+        if TWITCH_EXTRA_IRC_REPLY_COOLDOWN_SEC > 0:
+            _extra_note += f" Min **{TWITCH_EXTRA_IRC_REPLY_COOLDOWN_SEC:g}s** between sends per extra channel (auto + **!twitch_say**)."
     print(
         f"[Twitch] IRC #{TWITCH_CHANNEL} as {TWITCH_BOT_USERNAME} — post replies to chat: "
         f"{'on' if _chat_post else 'off'}, TTS: {'on' if TWITCH_TTS else 'off'}"
-        f"{'; voice-only for Twitch lines (set TWITCH_VOICE_ONLY_IN_STREAM_MODE=0 to post text)' if _vo_twitch else ''}.",
+        f"{'; voice-only for Twitch lines (set TWITCH_VOICE_ONLY_IN_STREAM_MODE=0 to post text)' if _vo_twitch else ''}. "
+        f"{'(Outbound locked to home channel — TWITCH_OUTBOUND_ONLY_HOME.) ' if TWITCH_OUTBOUND_ONLY_HOME else ''}"
+        f"{'' if TWITCH_OUTBOUND_ONLY_HOME else '(Redirect: !twitch_chat_redirect <channel> from Twitch broadcaster or Discord admin.)'}"
+        f"{_extra_note}",
         flush=True,
     )
 
@@ -16196,7 +17131,7 @@ def api_studio_watch_target():
 
 @web.route("/api/chat", methods=["POST"])
 def api_chat():
-    global _last_user_activity
+    global _last_user_activity, _camera_last_result, _last_web_vision_context
     _last_user_activity = time.time()
     ip = request.remote_addr or "unknown"
     if not _rate_ok(ip):
@@ -16219,16 +17154,37 @@ def api_chat():
                 img_bytes = base64.b64decode(b64s, validate=False)
                 if img_bytes:
                     kind = str(media_state.get("type") or "camera").strip().lower()
-                    vp = (
-                        "Describe this current shared frame concisely for Luna chat context. "
-                        "Focus on visible people, actions, objects, and on-screen text. "
-                        "Do not guess hidden details."
+                    if kind == "screen":
+                        vp = (
+                            "You are reading ONE desktop screen-capture frame for a live assistant. Prioritize identifying exactly WHAT app/game is on screen.\n"
+                            "Return this exact structure:\n"
+                            "IDENTITY: <exact app/game/site name OR UNCERTAIN: option A | option B>\n"
+                            "TYPE: <game / browser / IDE / chat app / video / other>\n"
+                            "EVIDENCE: <2-5 short bullet-like clauses with quoted visible text + HUD/UI positions>\n"
+                            "SCENE: <1-3 short sentences about current action/context>\n"
+                            "CONFIDENCE: <0.00-1.00>\n"
+                            "Rules: Wrong IDs are worse than uncertainty. Only name a title if visible text/logo/HUD strongly supports it. "
+                            "For similar games, explicitly compare cues (camera perspective, minimap/crosshair, ability bar geometry). "
+                            "Do not invent off-screen details."
+                        )
+                    else:
+                        vp = (
+                            "You are reading ONE camera frame for a live assistant.\n"
+                            "Describe only what is visible: people, pose, clothing colors, background, readable text/signs. "
+                            "Do not invent identity or off-camera context. If faces are unclear, avoid naming individuals. "
+                            "Output 3–7 short sentences, no preamble."
+                        )
+                    # Keep live chat responsive: vision is best-effort and must not stall voice replies.
+                    vs = _vision_describe_image(
+                        img_bytes,
+                        prompt=vp,
+                        timeout=max(8, min(120, int(OLLAMA_VISION_TIMEOUT))),
+                        wait_for_lock=False,
                     )
-                    vs = _vision_describe_image(img_bytes, prompt=vp, timeout=min(30, max(8, int(OLLAMA_VISION_TIMEOUT))), wait_for_lock=False)
                     if vs:
                         vs = str(vs).strip()
                         if vs:
-                            vs = vs[:1400]
+                            vs = vs[:2400]
                             ps = data.get("page_state") if isinstance(data.get("page_state"), dict) else {}
                             ps["vision_context"] = {
                                 "active": True,
@@ -16239,6 +17195,46 @@ def api_chat():
                             data["suppress_lol_context"] = True
                             data["page_state"] = ps
                             data["vision_context"] = ps["vision_context"]
+                            # Keep /api/camera/status + camera_see aligned with what VRM sent on this chat turn.
+                            with _camera_lock:
+                                _camera_last_result = {
+                                    "vision_summary": vs,
+                                    "summary": vs,
+                                    "face_count": 0,
+                                    "objects": [],
+                                }
+                                _last_web_vision_context = {
+                                    "summary": vs,
+                                    "source": kind or "camera",
+                                    "ts": time.time(),
+                                }
+    except Exception:
+        pass
+    # If this turn did not get a fresh frame (transient capture failure) but media is still active, reuse recent vision.
+    try:
+        ms0 = data.get("media_state") if isinstance(data.get("media_state"), dict) else {}
+        vc0 = data.get("vision_context") if isinstance(data.get("vision_context"), dict) else {}
+        if bool(ms0.get("active")) and not (
+            vc0.get("active") and str(vc0.get("summary") or "").strip()
+        ):
+            with _camera_lock:
+                snap = _last_web_vision_context
+            if isinstance(snap, dict) and str(snap.get("summary") or "").strip():
+                age = time.time() - float(snap.get("ts") or 0.0)
+                if age >= 0.0 and age <= float(LUNA_VISION_CONTEXT_TTL_SEC):
+                    src = str(snap.get("source") or "camera").strip().lower() or "camera"
+                    summary = str(snap["summary"]).strip()
+                    note = (
+                        f"\n\n_(Same analyzed snapshot as ~{int(age)}s ago; {src} still marked active.)_"
+                        if age > 2.5
+                        else ""
+                    )
+                    data["vision_context"] = {
+                        "active": True,
+                        "source": src,
+                        "summary": summary + note,
+                        "from_cache": True,
+                    }
     except Exception:
         pass
     # Optional avatar self-state from VRM frontend so Luna can reason about her own live body motion.
@@ -16251,7 +17247,25 @@ def api_chat():
     except Exception:
         pass
     msg = (data.get("message") or "").strip()
+    user_msg_lc = msg.lower()
     if not msg: return jsonify({"error": "No message"}), 400
+    # Always expose current media mode (camera/screen) so chat can acknowledge it
+    # even when a fresh vision summary is not available yet.
+    try:
+        ms = data.get("media_state") if isinstance(data.get("media_state"), dict) else {}
+        if ms and bool(ms.get("active")):
+            mtype = str(ms.get("type") or "camera").strip().lower() or "camera"
+            msg = (
+                f"[Live media mode]\n"
+                f"active=true; source={mtype}\n"
+                f"[Rule]\n"
+                f"A live {mtype} feed is selected. When [Live vision context] appears below, use it as shared grounding for this turn "
+                f"(no need for vision-themed questions). If vision text is absent, say the feed is on but the latest frame "
+                f"was not decoded yet.\n"
+                f"[User message]\n{msg}"
+            )
+    except Exception:
+        pass
     # If a fresh vision summary exists (camera/screen share), inject it directly into the
     # user turn text so the active chat model cannot miss visual context.
     try:
@@ -16260,11 +17274,72 @@ def api_chat():
             src = str(vc.get("source") or "camera").strip().lower() or "camera"
             vsum = str(vc.get("summary") or "").strip()
             if vsum:
+                wants_direct_vision_answer = any(
+                    k in user_msg_lc
+                    for k in (
+                        "what do you see",
+                        "what are you seeing",
+                        "what can you see",
+                        "what can u see",
+                        "what do u see",
+                        "what's on screen",
+                        "whats on screen",
+                        "what is on screen",
+                        "what's on my screen",
+                        "whats on my screen",
+                        "what is on my screen",
+                        "what am i showing",
+                        "what do i have open",
+                        "what app is this",
+                        "what is this app",
+                        "what website is this",
+                        "identify this",
+                    )
+                )
+                ambient_vision_rule = (
+                    "Ambient vision: You have the user's latest camera/screen snapshot below. "
+                    "Whenever their message touches what's visible—apps, UI text, errors, games, browser tabs, homework on screen—"
+                    "ground your reply in those facts first. They should not need to ask 'what do you see'; infer when it helps. "
+                    "For abstract chat clearly unrelated to their display, respond normally without forcing visual detail."
+                )
+                wants_gameplay_feedback = any(
+                    k in user_msg_lc
+                    for k in (
+                        "my gameplay",
+                        "how is my gameplay",
+                        "how's my gameplay",
+                        "how am i playing",
+                        "am i playing good",
+                        "am i playing well",
+                        "how am i doing",
+                        "what do you think of my gameplay",
+                        "rate my gameplay",
+                        "tips for my gameplay",
+                    )
+                )
+                direct_vision_rule = ambient_vision_rule + (
+                    " Here they explicitly asked for identification—lead with concrete visible facts (names, text, UI) before commentary."
+                    if wants_direct_vision_answer
+                    else ""
+                )
+                gameplay_feedback_rule = (
+                    "For gameplay feedback requests, evaluate performance using only visible evidence: positioning, cooldown/ability use, "
+                    "objective timing, map awareness cues, scoreboard/KDA/CS if visible, and current risk. "
+                    "Give 1-2 strengths, 1-2 concrete fixes, and one immediate next action. "
+                    "If key HUD info is not visible, say what is missing before judging."
+                    if wants_gameplay_feedback
+                    else ""
+                )
                 msg = (
                     f"[Live vision context — {src}]\n"
-                    f"{vsum[:1400]}\n"
+                    f"{vsum[:2400]}\n"
                     f"[Interpretation rule]\n"
-                    f"Prioritize this live frame context over unrelated telemetry. If uncertain, say what is unclear.\n"
+                    f"Treat the vision block as ground truth for what is on screen. If it says UNCERTAIN between games/apps, "
+                    f"do not override it with a single confident guess—reflect the uncertainty. "
+                    f"Use the IDENTITY and CONFIDENCE fields when the user cares what is on screen. "
+                    f"{direct_vision_rule} "
+                    f"{gameplay_feedback_rule} "
+                    f"Prioritize this over unrelated telemetry. If something is still unclear, say so.\n"
                     f"[User message]\n{msg}"
                 )
     except Exception:
@@ -16296,10 +17371,11 @@ def api_chat():
                 f"intent_levels(expressivity={max(0.0, min(1.0, ex)):.2f}, gesture={max(0.0, min(1.0, ge)):.2f}, head={max(0.0, min(1.0, he)):.2f})"
             )
             msg = (
-                f"[Live VRM self-state]\n"
+                f"[Live VRM self-state — internal telemetry, never for the user]\n"
                 f"{summary}\n"
                 f"[Behavior rule]\n"
-                f"Be aware of this current avatar state and adapt your next expression/body style smoothly; avoid abrupt jumps.\n"
+                f"Use this state only to choose tone and bracket tags. "
+                f"Do not repeat, quote, paraphrase, or output this telemetry or any line like \"speaking=\" / \"body_mode=\" / \"intent_levels(\" in your reply.\n"
                 f"[User message]\n{msg}"
             )
     except Exception:
@@ -16775,11 +17851,50 @@ def api_translate_voice():
             pass
 
 
-def _handle_bang(msg: str, scope: str) -> str:
+def _handle_bang(msg: str, scope: str, meta: dict | None = None) -> str:
+    meta = meta if isinstance(meta, dict) else {}
+    da_raw = meta.get("discord_author_id")
+    discord_uid = int(da_raw) if da_raw is not None and str(da_raw).strip().isdigit() else None
+    tw_login_meta = meta.get("twitch_login")
+    tw_login_m = str(tw_login_meta).strip().lower() if tw_login_meta else None
     parts = msg.split(None, 1)
     cmd = parts[0].lower()
     args = (parts[1] if len(parts) > 1 else "").strip()
+    use_scope = scope or LINKED_SCOPE or "web"
     if cmd in ("!help","!commands","!files"): return HELP_TEXT
+    if cmd == "!rank":
+        actor_key, _rest = _relationship_parse_target_arg(args, use_scope)
+        row = _relationship_get(actor_key)
+        if not row:
+            return f"No rank yet for **{actor_key}**. Talk with Luna first."
+        pts = int(row.get("points", 0) or 0)
+        rank = row.get("rank") or _rel_rank_for_points(pts)
+        return f"🏅 **{actor_key}** is **{rank}** with **{pts}** points."
+    if cmd == "!bond":
+        if args.lower() in ("top", "leaderboard", "lb"):
+            return _relationship_top_text(use_scope)
+        actor_key, _rest = _relationship_parse_target_arg(args, use_scope)
+        row = _relationship_get(actor_key)
+        return _relationship_format_summary(actor_key, row, include_notes=True)
+    if cmd == "!notes":
+        actor_key, _rest = _relationship_parse_target_arg(args, use_scope)
+        row = _relationship_get(actor_key)
+        if not row:
+            return f"No notes yet for **{actor_key}**."
+        notes = row.get("notes")
+        if not isinstance(notes, list) or not notes:
+            return f"No notes yet for **{actor_key}**."
+        return "🗒️ **Notes**\n" + "\n".join(f"- {str(n)[:140]}" for n in notes[-12:])
+    if cmd == "!note":
+        low_args = args.lower().strip()
+        if not low_args.startswith("add "):
+            return "Usage: !note add [user] <text>"
+        body = args[4:].strip()
+        actor_key, remainder = _relationship_parse_target_arg(body, use_scope)
+        if actor_key == use_scope and remainder == body:
+            remainder = body
+        ok, m = _relationship_add_note(actor_key, remainder)
+        return f"✅ {m}" if ok else f"❌ {m}"
     if cmd in ("!twitch_title", "!title"):
         if not args:
             return "Usage: !twitch_title <new stream title>"
@@ -16801,6 +17916,10 @@ def _handle_bang(msg: str, scope: str) -> str:
             q, opts = _twitch_poll_idea_from_topic(args)
         ok, r = _twitch_create_poll(q, opts, duration=duration)
         return f"✅ {r}" if ok else f"❌ {r}"
+    if cmd == "!twitch_chat_redirect":
+        return _twitch_exec_chat_redirect(args, twitch_login=tw_login_m, discord_uid=discord_uid)
+    if cmd == "!twitch_say":
+        return _twitch_exec_say(args, twitch_login=tw_login_m, discord_uid=discord_uid)
     if cmd == "!news":
         ok, r = _fetch_news(); return r if ok else f"❌ {r}"
     if cmd == "!search":
@@ -16855,9 +17974,8 @@ def _handle_bang(msg: str, scope: str) -> str:
         ok, r = _summarize_input(args)
         return f"✅ {r}" if ok else f"❌ {r}"
     if cmd == "!digest":
-        return _daily_digest(scope or LINKED_SCOPE or "web")
+        return _daily_digest(use_scope)
     if cmd == "!calendar":
-        use_scope = scope or LINKED_SCOPE or "web"
         if not args:
             return _calendar_list(use_scope, mode="upcoming")
         low_args = args.lower().strip()
@@ -16877,14 +17995,14 @@ def _handle_bang(msg: str, scope: str) -> str:
         return "Usage: !calendar add YYYY-MM-DD HH:MM title | !calendar list | !calendar today | !calendar week | !calendar delete <n>"
     if cmd == "!todo":
         if not args:
-            return _todo_list_text(scope or LINKED_SCOPE or "web")
+            return _todo_list_text(use_scope)
         low_args = args.lower().strip()
         if low_args.startswith("add "):
-            return _todo_add(scope or LINKED_SCOPE or "web", args[4:].strip())
+            return _todo_add(use_scope, args[4:].strip())
         if low_args.startswith("done "):
-            return _todo_done(scope or LINKED_SCOPE or "web", args[5:].strip())
+            return _todo_done(use_scope, args[5:].strip())
         if low_args in ("list", "ls"):
-            return _todo_list_text(scope or LINKED_SCOPE or "web")
+            return _todo_list_text(use_scope)
         return "Usage: !todo add <task> | !todo list | !todo done <number>"
     if cmd in ("!suno_ready", "!suno_logged_in"):
         return f"✅ {_mark_suno_logged_in()}"
@@ -17096,6 +18214,20 @@ async def on_ready():
     bot.loop.create_task(_clipboard_monitor_loop())
     bot.loop.create_task(_knowledge_embedding_loop())
     bot.loop.create_task(_wake_word_loop())
+    if _PUBLISH_ANNOUNCE_CONFIGURED:
+        bot.loop.create_task(_publish_announce_loop())
+    elif LUNA_PUBLISH_ANNOUNCE_ENABLED and _poll_publish_announce is None:
+        print("[Publish announce] luna_publish_announce.py missing — install module next to bot_main.", flush=True)
+    elif LUNA_PUBLISH_ANNOUNCE_ENABLED and not _PUBLISH_ANNOUNCE_DISCORD_CHANNEL_IDS:
+        print(
+            "[Publish announce] Set LUNA_PUBLISH_ANNOUNCE_DISCORD_CHANNEL_IDS (comma-separated numeric IDs), "
+            "or legacy LUNA_PUBLISH_ANNOUNCE_DISCORD_CHANNEL_ID.",
+            flush=True,
+        )
+    elif LUNA_PUBLISH_ANNOUNCE_ENABLED and not (
+        _PUBLISH_ANNOUNCE_YOUTUBE_IDS or _PUBLISH_ANNOUNCE_YOUTUBE_RSS or _PUBLISH_ANNOUNCE_TWITCH_LOGINS
+    ):
+        print("[Publish announce] Add LUNA_PUBLISH_ANNOUNCE_YOUTUBE_CHANNEL_IDS, *_RSS_URLS, and/or *_TWITCH_LOGINS.", flush=True)
     _lol_observer_run = getattr(_lol_spectator, "observer_should_run", None)
     if _lol_observer_run is None:
         _lol_observer_run = getattr(_lol_spectator, "is_enabled", lambda: False)
@@ -17287,6 +18419,35 @@ async def on_message(message: discord.Message):
         _schedule_discord_file_tts(message, HELP_TEXT)
         return
 
+    tluna = text.strip()
+    low_tluna = tluna.lower()
+    if low_tluna.startswith("!twitch_chat_redirect"):
+        if not _is_privileged(message.author.id):
+            await message.reply(f"{mention} Only the linked Discord admin can change Twitch redirect.")
+            await bot.process_commands(message)
+            return
+        rest = tluna[len("!twitch_chat_redirect") :].strip()
+        reply = await asyncio.to_thread(_twitch_exec_chat_redirect, rest, discord_uid=message.author.id)
+        await asyncio.to_thread(append_exchange, scope, text, reply)
+        await message.reply(f"{mention} {reply}")
+        _schedule_discord_vc_tts_reply(message, reply)
+        _schedule_discord_file_tts(message, reply)
+        await bot.process_commands(message)
+        return
+    if low_tluna.startswith("!twitch_say"):
+        if not _is_privileged(message.author.id):
+            await message.reply(f"{mention} Only the linked Discord admin can send Twitch chat via Luna.")
+            await bot.process_commands(message)
+            return
+        rest = tluna[len("!twitch_say") :].strip()
+        reply = await asyncio.to_thread(_twitch_exec_say, rest, discord_uid=message.author.id)
+        await asyncio.to_thread(append_exchange, scope, text, reply)
+        await message.reply(f"{mention} {reply}")
+        _schedule_discord_vc_tts_reply(message, reply)
+        _schedule_discord_file_tts(message, reply)
+        await bot.process_commands(message)
+        return
+
     _cf = _chat_fast_enabled()
 
     # Shadow
@@ -17382,7 +18543,14 @@ async def on_message(message: discord.Message):
                 compact=_cf,
             )
         )
-        if not reply or reply.startswith("Ollama offline"): reply = COMMAND_ONLY
+        if not reply:
+            reply = COMMAND_ONLY
+        elif reply.startswith("Ollama offline"):
+            low_reply = reply.lower()
+            if "too many requests" in low_reply or "429" in low_reply:
+                reply = "I'm getting rate-limited for a moment. Give me a few seconds and try again."
+            else:
+                reply = COMMAND_ONLY
     except Exception: reply = COMMAND_ONLY
 
     await asyncio.to_thread(append_exchange, scope, text, reply)
