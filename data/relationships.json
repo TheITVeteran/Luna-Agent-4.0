@@ -3,15 +3,14 @@
   "users": {
     "discord:user:1414944231222411378": {
       "scope": "discord:user:1414944231222411378",
-      "points": 476,
-      "rank": "Inner Circle",
-      "interactions": 148,
+      "points": 517,
+      "rank": "Day One",
+      "interactions": 162,
       "familiarity": 1.0,
       "trust": 1.0,
       "affinity": 1.0,
       "friction": 0.0,
       "notes": [
-        "test again your screen sharing ability",
         "asking her",
         "talking about now",
         "sharing my other",
@@ -22,27 +21,28 @@
         "feeling quite confused",
         "trying to find a model for you so we can play a League of Legends and you can be able to see the game",
         "gonna go to bed Alright, I'm gonna go to bed now",
-        "you"
+        "you",
+        "just I'm just shot"
       ],
       "known_names": [],
-      "last_seen_ts": 1777676495.335851,
-      "last_reply": "Wait, let me clarify. You’re saying you’re running a VRM experiment and I shouldn’t be aware of the internal telemetry data—it’s purely for your own analysis. Got it. \n\nOkay."
+      "last_seen_ts": 1777709570.0200374,
+      "last_reply": "Alright, on this good server and also... good server and also"
     },
     "twitch:user:streamelements": {
       "scope": "discord:user:1414944231222411378",
-      "points": 3,
+      "points": 9,
       "rank": "Stranger",
-      "interactions": 1,
-      "familiarity": 0.07,
-      "trust": 0.060000000000000005,
-      "affinity": 0.060000000000000005,
+      "interactions": 3,
+      "familiarity": 0.11000000000000001,
+      "trust": 0.08,
+      "affinity": 0.08,
       "friction": 0.0,
       "notes": [],
       "known_names": [
         "StreamElements"
       ],
-      "last_seen_ts": 1777487842.6536896,
-      "last_reply": "I'm Luna. Chat with me normally, or say Shadow, for actions. Use !help for the list."
+      "last_seen_ts": 1777708778.3011405,
+      "last_reply": "Good morning! Here's your briefing: Weather: paphos, pafos, cy: Sunny +21°C 73% ↗7km/h Calendar: No events scheduled today. Top news: US to cut troop levels in Germany by 5,000 amid Trump spat with Merz · Trump tells Congress ceasefire mean"
     },
     "twitch:user:solonaras": {
       "scope": "discord:user:1414944231222411378",

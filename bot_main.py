@@ -251,6 +251,7 @@ LUNA_STREAM_TAKEOVER_STREAMER_IDLE = _env("LUNA_STREAM_TAKEOVER_STREAMER_IDLE", 
     "1", "true", "yes", "on",
 )
 TWITCH_OAUTH_SCOPES = [s for s in (_env("TWITCH_OAUTH_SCOPES", "channel:manage:broadcast channel:manage:polls channel:read:subscriptions moderator:read:followers") or "").split() if s.strip()]
+# Optional explicit Helix token; if empty, Luna uses saved Twitch OAuth and/or client_credentials (same client id/secret).
 TWITCH_APP_TOKEN = _env("TWITCH_APP_TOKEN", "").strip()
 TWITCH_LIVE_CHECK_CHANNEL = (_env("TWITCH_LIVE_CHECK_CHANNEL", TWITCH_CHANNEL) or TWITCH_CHANNEL).strip().lstrip("#").lower()
 TWITCH_AUTO_ACK_FOLLOWS = _env("TWITCH_AUTO_ACK_FOLLOWS", "1").strip().lower() not in ("0", "false", "no", "off")
@@ -296,21 +297,37 @@ LUNA_PUBLISH_ANNOUNCE_POLL_SEC = max(30.0, min(3600.0, LUNA_PUBLISH_ANNOUNCE_POL
 _PUBLISH_ANNOUNCE_YOUTUBE_IDS = [
     x.strip() for x in (_env("LUNA_PUBLISH_ANNOUNCE_YOUTUBE_CHANNEL_IDS", "") or "").split(",") if x.strip()
 ]
-_PUBLISH_ANNOUNCE_YOUTUBE_RSS = [
+# Optional extra Atom URLs; **YOUTUBE_RSS_URL** is merged so playlist feeds can surface uploads before channel RSS updates.
+_pa_yt_rss_explicit = [
     x.strip() for x in (_env("LUNA_PUBLISH_ANNOUNCE_YOUTUBE_RSS_URLS", "") or "").split(",") if x.strip()
 ]
+_yt_rss_share = (_YOUTUBE_RSS_URL or "").strip()
+_PUBLISH_ANNOUNCE_YOUTUBE_RSS = list(dict.fromkeys(_pa_yt_rss_explicit + ([_yt_rss_share] if _yt_rss_share else [])))
 _PUBLISH_ANNOUNCE_TWITCH_LOGINS = [
     x.strip().lstrip("#").lower()
     for x in (_env("LUNA_PUBLISH_ANNOUNCE_TWITCH_LOGINS", "") or "").split(",")
     if x.strip()
 ]
 _PUBLISH_ANNOUNCE_STATE_PATH = os.path.join(_DATA, "publish_announce_state.json")
+LUNA_PUBLISH_ANNOUNCE_TWITCH_LIVE_FACEBOOK = _env("LUNA_PUBLISH_ANNOUNCE_TWITCH_LIVE_FACEBOOK", "0").strip().lower() in (
+    "1", "true", "yes", "on",
+)
+LUNA_PUBLISH_ANNOUNCE_FB_MESSAGE_TEMPLATE = _env("LUNA_PUBLISH_ANNOUNCE_FB_MESSAGE_TEMPLATE", "").strip()
+_fb_for_raw = (_env("LUNA_PUBLISH_ANNOUNCE_FB_FOR_TWITCH_LOGINS", "") or "").strip()
+if _fb_for_raw:
+    _PUBLISH_ANNOUNCE_FB_TWITCH_LOGINS: frozenset[str] = frozenset(
+        x.strip().lstrip("#").lower() for x in _fb_for_raw.split(",") if x.strip()
+    )
+else:
+    _ibl_fb = (TWITCH_BROADCASTER_LOGIN or TWITCH_CHANNEL or "").strip().lstrip("#").lower()
+    _PUBLISH_ANNOUNCE_FB_TWITCH_LOGINS = frozenset({_ibl_fb}) if _ibl_fb else frozenset()
 _PUBLISH_ANNOUNCE_CONFIGURED = bool(
     LUNA_PUBLISH_ANNOUNCE_ENABLED
     and _PUBLISH_ANNOUNCE_DISCORD_CHANNEL_IDS
     and (_PUBLISH_ANNOUNCE_YOUTUBE_IDS or _PUBLISH_ANNOUNCE_YOUTUBE_RSS or _PUBLISH_ANNOUNCE_TWITCH_LOGINS)
     and _poll_publish_announce is not None
 )
+_last_fb_twitch_stream: dict[str, str] = {}
 OBS_WS_URL = _env("OBS_WS_URL", "ws://127.0.0.1:4455").strip()
 OBS_WS_PASSWORD = _env("OBS_WS_PASSWORD", "").strip()
 # Map Luna [SIGH]/[LAUGH]/… tags to short spoken bits for Edge TTS; strip other bracket tags from speech.
@@ -1098,6 +1115,8 @@ _last_user_activity: float = 0.0
 _last_streamer_luna_at: float = time.time()
 # Cached Twitch live check (Helix) for takeover context
 _twitch_live_cache: dict = {"ts": 0.0, "live": False}
+# Cached app access token from client_credentials (when TWITCH_APP_TOKEN is unset)
+_twitch_app_cred_cache: dict[str, object] = {"token": "", "exp": 0.0}
 # Seconds of user silence before LoL commentary TTS plays (set LUNA_LOL_COMMENTARY_QUIET_SEC to override)
 _LOL_COMMENTARY_USER_QUIET_SEC: float = max(30.0, float(_env("LUNA_LOL_COMMENTARY_QUIET_SEC", "90") or "90"))
 # Old standalone LoL observer-commentary loop (JSON-only) is off by default now.
@@ -1560,23 +1579,19 @@ def _obs_ws_get_status() -> tuple[dict[str, bool] | None, str]:
 
 
 def _twitch_live_now() -> tuple[bool, str]:
-    """Return (is_live, error). Uses Twitch Helix if client id + app token are configured."""
-    cid = (TWITCH_CLIENT_ID or "").strip()
-    token = (TWITCH_APP_TOKEN or "").strip()
+    """Return (is_live, error). Uses Helix via _twitch_helix_read_auth (app token, saved OAuth, or client_credentials)."""
     user = (TWITCH_LIVE_CHECK_CHANNEL or TWITCH_CHANNEL or "").strip().lstrip("#").lower()
-    if not (cid and token and user):
+    auth = _twitch_helix_read_auth()
+    if not auth or not user:
         return False, "missing_twitch_helix_credentials"
-    if token.lower().startswith("oauth:"):
-        token = token.split(":", 1)[1].strip()
-    if not token.lower().startswith("bearer "):
-        token = "Bearer " + token
+    cid, authz = auth
     try:
         q = urllib.parse.urlencode({"user_login": user})
         req = urllib.request.Request(
             "https://api.twitch.tv/helix/streams?" + q,
             headers={
                 "Client-Id": cid,
-                "Authorization": token,
+                "Authorization": authz,
             },
             method="GET",
         )
@@ -1822,6 +1837,65 @@ def _twitch_broadcaster_access_token() -> tuple[bool, str]:
     if not at:
         return False, "Refresh returned empty access token."
     return True, at
+
+
+def _twitch_app_access_token_from_client_credentials() -> str:
+    """Short-lived app access token for Helix reads (no user). Cached until near expiry."""
+    cid = (TWITCH_CLIENT_ID or "").strip()
+    sec = (TWITCH_CLIENT_SECRET or "").strip()
+    if not cid or not sec:
+        return ""
+    now = time.time()
+    tok = str(_twitch_app_cred_cache.get("token") or "")
+    exp = float(_twitch_app_cred_cache.get("exp") or 0)
+    if tok and exp > now + 120:
+        return tok
+    body = urllib.parse.urlencode(
+        {"client_id": cid, "client_secret": sec, "grant_type": "client_credentials"}
+    ).encode("utf-8")
+    req = urllib.request.Request(
+        "https://id.twitch.tv/oauth2/token",
+        data=body,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            data = json.loads(r.read() or b"{}")
+    except Exception:
+        return ""
+    at = str((data or {}).get("access_token") or "").strip()
+    ei = int((data or {}).get("expires_in") or 0)
+    if not at:
+        return ""
+    _twitch_app_cred_cache["token"] = at
+    _twitch_app_cred_cache["exp"] = now + max(300.0, float(ei) - 90.0)
+    return at
+
+
+def _twitch_helix_read_auth() -> tuple[str, str] | None:
+    """
+    (Client-Id, Authorization header value) for public Helix GETs (e.g. /streams).
+    Order: TWITCH_APP_TOKEN if set, else saved broadcaster OAuth (twitch_oauth.json),
+    else client_credentials using TWITCH_CLIENT_ID + TWITCH_CLIENT_SECRET.
+    """
+    cid = (TWITCH_CLIENT_ID or "").strip()
+    if not cid:
+        return None
+    env_tok = (TWITCH_APP_TOKEN or "").strip()
+    if env_tok:
+        if env_tok.lower().startswith("oauth:"):
+            env_tok = env_tok.split(":", 1)[1].strip()
+        if not env_tok.lower().startswith("bearer "):
+            env_tok = "Bearer " + env_tok
+        return cid, env_tok
+    ok_bt, user_tok = _twitch_broadcaster_access_token()
+    if ok_bt and (user_tok or "").strip():
+        return cid, "Bearer " + (user_tok or "").strip()
+    cred_tok = _twitch_app_access_token_from_client_credentials()
+    if cred_tok:
+        return cid, "Bearer " + cred_tok
+    return None
 
 
 def _twitch_broadcaster_info() -> dict:
@@ -6323,7 +6397,7 @@ async def _publish_announce_loop():
         return
     await bot.wait_until_ready()
     cids = _PUBLISH_ANNOUNCE_DISCORD_CHANNEL_IDS
-    tw_ok = bool(TWITCH_CLIENT_ID and TWITCH_APP_TOKEN)
+    tw_ok = bool(_twitch_helix_read_auth())
     print(
         f"[Publish announce] ON — Discord channel ids {', '.join(str(x) for x in cids)}, "
         f"every {LUNA_PUBLISH_ANNOUNCE_POLL_SEC:.0f}s "
@@ -6333,22 +6407,29 @@ async def _publish_announce_loop():
     )
     if _PUBLISH_ANNOUNCE_TWITCH_LOGINS and not tw_ok:
         print(
-            "[Publish announce] Twitch logins configured but TWITCH_CLIENT_ID/TWITCH_APP_TOKEN missing — "
-            "live alerts skipped (YouTube still works).",
+            "[Publish announce] Twitch live needs TWITCH_CLIENT_ID plus one of: TWITCH_APP_TOKEN, "
+            "authorized Twitch OAuth (data/twitch_oauth.json), or TWITCH_CLIENT_SECRET — live alerts skipped.",
             flush=True,
         )
+    if LUNA_PUBLISH_ANNOUNCE_TWITCH_LIVE_FACEBOOK:
+        _fb_l = ", ".join(sorted(_PUBLISH_ANNOUNCE_FB_TWITCH_LOGINS)) or "(none — set TWITCH_BROADCASTER_LOGIN or LUNA_PUBLISH_ANNOUNCE_FB_FOR_TWITCH_LOGINS)"
+        print(f"[Publish announce] Twitch go-live → Facebook: ON for **{_fb_l}**.", flush=True)
     while True:
         try:
-            msgs = await asyncio.to_thread(
-                _poll_publish_announce,
-                state_path=_PUBLISH_ANNOUNCE_STATE_PATH,
-                youtube_channel_ids=_PUBLISH_ANNOUNCE_YOUTUBE_IDS,
-                youtube_rss_urls=_PUBLISH_ANNOUNCE_YOUTUBE_RSS,
-                twitch_logins=_PUBLISH_ANNOUNCE_TWITCH_LOGINS,
-                twitch_client_id=TWITCH_CLIENT_ID,
-                twitch_app_token=TWITCH_APP_TOKEN,
-                skip_twitch=not tw_ok,
-            )
+
+            def _publish_announce_poll_sync():
+                auth = _twitch_helix_read_auth()
+                return _poll_publish_announce(
+                    state_path=_PUBLISH_ANNOUNCE_STATE_PATH,
+                    youtube_channel_ids=_PUBLISH_ANNOUNCE_YOUTUBE_IDS,
+                    youtube_rss_urls=_PUBLISH_ANNOUNCE_YOUTUBE_RSS,
+                    twitch_logins=_PUBLISH_ANNOUNCE_TWITCH_LOGINS,
+                    twitch_client_id=(auth[0] if auth else ""),
+                    twitch_app_token=(auth[1] if auth else ""),
+                    skip_twitch=not bool(auth),
+                )
+
+            msgs, twitch_live = await asyncio.to_thread(_publish_announce_poll_sync)
             if msgs:
                 for cid in cids:
                     ch = bot.get_channel(cid)
@@ -6370,6 +6451,24 @@ async def _publish_announce_loop():
                             await ch.send(body)
                         except Exception as e:
                             print(f"[Publish announce] send failed ({cid}): {e}", flush=True)
+            if LUNA_PUBLISH_ANNOUNCE_TWITCH_LIVE_FACEBOOK and twitch_live:
+                for ev in twitch_live:
+                    lg = str(ev.get("login") or "").strip().lower()
+                    if not lg or lg not in _PUBLISH_ANNOUNCE_FB_TWITCH_LOGINS:
+                        continue
+                    st_at = str(ev.get("started_at") or "").strip()
+                    if st_at and _last_fb_twitch_stream.get(lg) == st_at:
+                        continue
+                    fb_body = _format_twitch_live_fb_message(ev)
+                    ok_fb, r_fb = await asyncio.to_thread(_fb_post_plain_status_to_timeline, fb_body)
+                    if ok_fb:
+                        if st_at:
+                            _last_fb_twitch_stream[lg] = st_at
+                        else:
+                            _last_fb_twitch_stream[lg] = str(time.time())
+                        print(f"[Publish announce] Facebook go-live post ok ({lg}): {r_fb}", flush=True)
+                    else:
+                        print(f"[Publish announce] Facebook go-live post failed ({lg}): {r_fb}", flush=True)
         except Exception as e:
             print(f"[Publish announce] loop error: {e}", flush=True)
         await asyncio.sleep(LUNA_PUBLISH_ANNOUNCE_POLL_SEC)
@@ -6754,18 +6853,41 @@ def _fmt_sec(s: int) -> str:
     return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
 
 def _yt_extract_id(url: str) -> str:
-    u = (url or "").strip()
+    u = (url or "").strip().rstrip(").,;!?]>")
     try:
         p = urllib.parse.urlparse(u)
         host = p.netloc.lower()
         path = p.path.strip("/")
-        if "youtu.be" in host: return path.split("/")[0]
+        if "youtu.be" in host:
+            return (path.split("/")[0] if path else "").split("?")[0]
         if "youtube.com" in host:
-            if path == "watch": return urllib.parse.parse_qs(p.query).get("v", [""])[0]
+            if path == "watch":
+                return (urllib.parse.parse_qs(p.query).get("v", [""])[0] or "").split("&")[0]
+            if path.startswith("watch/"):
+                return path.split("/", 1)[1].split("?")[0].split("/")[0]
             for prefix in ("shorts/", "live/", "embed/"):
-                if path.startswith(prefix): return path.split("/", 1)[1].split("/")[0]
-    except Exception: pass
+                if path.startswith(prefix):
+                    return path.split("/", 1)[1].split("/")[0]
+    except Exception:
+        pass
     return ""
+
+
+def _yt_url_from_freeform_arg(s: str) -> str:
+    """First YouTube watch/shorts/live URL from Discord/UI text (handles <https://...> and trailing junk)."""
+    t = (s or "").strip()
+    for ch in "<>[]{}":
+        t = t.replace(ch, " ")
+    t = " ".join(t.split())
+    m = re.search(
+        r"(https?://(?:www\.)?(?:youtube\.com/(?:watch(?:\?[^\s#]+|/[\w-]{6,})|shorts/[\w-]+|live/[\w-]+)|youtu\.be/[\w-]+))",
+        t,
+        re.I,
+    )
+    if m:
+        return m.group(1).rstrip(").,;!?]")
+    m2 = re.search(r"(https?://[^\s]+)", t)
+    return (m2.group(1).rstrip(").,;!?]") if m2 else "").strip()
 
 def _get_podcast_tracks() -> tuple[bool, list[dict] | str]:
     """Scan CUSTOM_PODCAST_DIR for audio files; return list of track dicts for the queue."""
@@ -8929,120 +9051,133 @@ def _build_fb_msg(title: str, url: str) -> str:
         f'Sharing one of my songs: "{title}" — hope you enjoy it 🎧\n{url}',
     ])
 
-def _run_fb_share() -> tuple[bool, str]:
-    ok, song = _get_next_channel_song_for_share()
-    if not ok: return False, str(song)
-    if not _fb_lock.acquire(blocking=False): return False, "Facebook share already running."
-    pw = None
-    context = None
-    handed_off = False
+
+def _fb_compose_status_on_page(page, message: str) -> tuple[bool, str]:
+    """Open Facebook create-post dialog on current page, type ``message``, click through Next/Post. Caller handles login/PIN and browser lifecycle."""
+    msg = (message or "").strip()
+    if not msg:
+        return False, "Empty Facebook post body."
+    if len(msg) > 900:
+        msg = msg[:897] + "…"
+    page.wait_for_timeout(2000)
+    composer_opened = False
+    for sel in [
+        "div[aria-label*='mind']",
+        "div[aria-label*='Create a post']",
+        "div[role='button']:has-text('What')",
+        "span:has-text(\"What's on your mind\")",
+        "[data-pagelet*='FeedComposer'] div[role='button']",
+    ]:
+        try:
+            btn = page.locator(sel).first
+            if btn.count() and btn.is_visible():
+                btn.click()
+                page.wait_for_timeout(2000)
+                composer_opened = True
+                break
+        except Exception:
+            continue
+    if not composer_opened:
+        return False, "Could not open Facebook composer."
+    tb = None
+    for sel in ["div[role='dialog'] div[role='textbox'][contenteditable='true']"]:
+        loc = page.locator(sel).first
+        if loc.count() and loc.is_visible():
+            tb = loc
+            break
+    if not tb:
+        return False, "Facebook post text box not found."
+    tb.click(force=True)
+    page.keyboard.press("Control+A")
+    page.keyboard.press("Backspace")
+    page.keyboard.type(msg, delay=24)
+    page.wait_for_timeout(1500)
+    next_clicked = False
+    for nsel in ["button:has-text('Next')", "div[role='button']:has-text('Next')", "[aria-label*='Next']"]:
+        try:
+            nbtn = page.locator(nsel).first
+            if nbtn.count() and nbtn.is_visible():
+                nbtn.click(force=True)
+                page.wait_for_timeout(2000)
+                next_clicked = True
+                break
+        except Exception:
+            continue
+    if not next_clicked:
+        return False, "Could not click Next on Create post."
+    post_settings_visible = False
+    for dsel in ["[aria-label*='Post settings']", "[role='dialog']:has-text('Post settings')", "div[role='dialog']:has-text('Post audience')"]:
+        try:
+            page.wait_for_selector(dsel, state="visible", timeout=8000)
+            post_settings_visible = True
+            break
+        except Exception:
+            continue
+    if not post_settings_visible:
+        page.wait_for_timeout(3000)
+    page.wait_for_timeout(1000)
+    for dsel in ["[aria-label*='Post settings']", "[role='dialog']:has-text('Post settings')"]:
+        try:
+            d = page.locator(dsel).last
+            if d.count() and d.is_visible():
+                pub = d.locator("text=Public").first
+                if pub.count() and pub.is_visible():
+                    pub.click(force=True)
+                    page.wait_for_timeout(600)
+                break
+        except Exception:
+            continue
+    page.wait_for_timeout(800)
     try:
-        from playwright.sync_api import sync_playwright
-        os.makedirs(FB_PROFILE_DIR, exist_ok=True)
-        pw = sync_playwright().start()
-        context = _launch_social_browser_with_retry(FB_PROFILE_DIR, pw, attempts=4)
-        page = _acquire_live_page(context)
-        page.goto(FACEBOOK_PROFILE, wait_until="domcontentloaded", timeout=90000)
-        page.wait_for_timeout(1000)
-        if "login" in page.url.lower():
-            _clear_ready(FB_PROFILE_DIR)
-            handed_off = True
-            _keep_browser_until_closed(pw, context)
-            return False, "Facebook needs login. I left the browser open — log in, then **close the browser** and try again."
-        if _fb_needs_pin(page):
-            handed_off = True
-            _keep_browser_until_closed(pw, context)
-            return False, (
-                "Facebook is asking for a **PIN or verification code**. "
-                "I left the browser open — enter the code, then **close the browser** and try again."
-            )
-        _mark_ready(FB_PROFILE_DIR)
-        page.wait_for_timeout(2000)
-        composer_opened = False
-        for sel in [
-            "div[aria-label*='mind']",
-            "div[aria-label*='Create a post']",
-            "div[role='button']:has-text('What')",
-            "span:has-text(\"What's on your mind\")",
-            "[data-pagelet*='FeedComposer'] div[role='button']",
+        page.locator("[aria-label*='Post settings'] [aria-label='Post'], [role='dialog'] [aria-label='Post']").first.wait_for(
+            state="visible", timeout=6000
+        )
+    except Exception:
+        pass
+    try:
+        page.locator("[aria-label*='Post settings'] button:has-text('Post')").or_(
+            page.locator("[role='dialog'] button:has-text('Post')")
+        ).first.wait_for(state="visible", timeout=3000)
+    except Exception:
+        pass
+    page.wait_for_timeout(500)
+
+    def _try_post_click() -> bool:
+        dialog = None
+        for dsel in [
+            "[aria-label*='Post settings']",
+            "[role='dialog']:has-text('Post settings')",
+            "div[role='dialog']:has-text('Post audience')",
+            "div[role='dialog']",
         ]:
             try:
-                btn = page.locator(sel).first
-                if btn.count() and btn.is_visible():
-                    btn.click(); page.wait_for_timeout(2000); composer_opened = True; break
-            except Exception: continue
-        if not composer_opened:
-            handed_off = True
-            _keep_browser_until_closed(pw, context)
-            return False, "Could not open Facebook composer. I left the browser open — log in if needed, then close and try again."
-        tb = None
-        for sel in ["div[role='dialog'] div[role='textbox'][contenteditable='true']"]:
-            loc = page.locator(sel).first
-            if loc.count() and loc.is_visible(): tb = loc; break
-        if not tb: return False, "Facebook post text box not found."
-        tb.click(force=True)
-        page.keyboard.press("Control+A"); page.keyboard.press("Backspace")
-        page.keyboard.type(_build_fb_msg(song["title"], song["url"]), delay=24)
-        page.wait_for_timeout(1500)
-        next_clicked = False
-        for nsel in ["button:has-text('Next')", "div[role='button']:has-text('Next')", "[aria-label*='Next']"]:
-            try:
-                nbtn = page.locator(nsel).first
-                if nbtn.count() and nbtn.is_visible():
-                    nbtn.click(force=True); page.wait_for_timeout(2000); next_clicked = True; break
-            except Exception: continue
-        if not next_clicked: return False, "Could not click Next on Create post."
-        post_settings_visible = False
-        for dsel in ["[aria-label*='Post settings']", "[role='dialog']:has-text('Post settings')", "div[role='dialog']:has-text('Post audience')"]:
-            try:
-                page.wait_for_selector(dsel, state="visible", timeout=8000)
-                post_settings_visible = True
-                break
-            except Exception: continue
-        if not post_settings_visible:
-            page.wait_for_timeout(3000)
-        page.wait_for_timeout(1000)
-        for dsel in ["[aria-label*='Post settings']", "[role='dialog']:has-text('Post settings')"]:
-            try:
-                d = page.locator(dsel).last
-                if d.count() and d.is_visible():
-                    pub = d.locator("text=Public").first
-                    if pub.count() and pub.is_visible():
-                        pub.click(force=True); page.wait_for_timeout(600)
+                loc = page.locator(dsel).last
+                if loc.count() and loc.is_visible():
+                    dialog = loc
                     break
-            except Exception: continue
-        page.wait_for_timeout(800)
+            except Exception:
+                continue
+        if not dialog or not dialog.count() or not dialog.is_visible():
+            return False
         try:
-            page.locator("[aria-label*='Post settings'] [aria-label='Post'], [role='dialog'] [aria-label='Post']").first.wait_for(state="visible", timeout=6000)
-        except Exception: pass
+            post_btn = dialog.locator('[aria-label="Post"]')
+            if post_btn.count() and post_btn.first.is_visible():
+                post_btn.first.click(force=True)
+                return True
+        except Exception:
+            pass
         try:
-            page.locator("[aria-label*='Post settings'] button:has-text('Post')").or_(page.locator("[role='dialog'] button:has-text('Post')")).first.wait_for(state="visible", timeout=3000)
-        except Exception: pass
-        page.wait_for_timeout(500)
-
-        def _try_post_click() -> bool:
-            dialog = None
-            for dsel in ["[aria-label*='Post settings']", "[role='dialog']:has-text('Post settings')", "div[role='dialog']:has-text('Post audience')", "div[role='dialog']"]:
-                try:
-                    loc = page.locator(dsel).last
-                    if loc.count() and loc.is_visible():
-                        dialog = loc
-                        break
-                except Exception: continue
-            if not dialog or not dialog.count() or not dialog.is_visible():
-                return False
-            try:
-                post_btn = dialog.locator('[aria-label="Post"]')
-                if post_btn.count() and post_btn.first.is_visible():
-                    post_btn.first.click(force=True); return True
-            except Exception: pass
-            try:
-                post_btn = page.locator('[role="dialog"] [aria-label="Post"], [aria-label*="Post settings"] [aria-label="Post"]')
-                if post_btn.count() and post_btn.first.is_visible():
-                    post_btn.first.click(force=True); return True
-            except Exception: pass
-            try:
-                clicked = page.evaluate("""() => {
+            post_btn = page.locator(
+                '[role="dialog"] [aria-label="Post"], [aria-label*="Post settings"] [aria-label="Post"]'
+            )
+            if post_btn.count() and post_btn.first.is_visible():
+                post_btn.first.click(force=True)
+                return True
+        except Exception:
+            pass
+        try:
+            clicked = page.evaluate(
+                """() => {
                     function parseRgb(str) {
                         const num = str.match(/[\\d.]+/g);
                         if (num && num.length >= 3) return [+num[0], +num[1], +num[2]];
@@ -9075,51 +9210,68 @@ def _run_fb_share() -> tuple[bool, str]:
                         }
                     }
                     return false;
-                }""")
-                if clicked: return True
-            except Exception: pass
-            try:
-                post_btn = dialog.get_by_role("button", name=re.compile(r"^Post$", re.I))
-                if post_btn.count():
-                    post_btn.first.wait_for(state="visible", timeout=2000)
-                    post_btn.first.click(force=True); return True
-            except Exception: pass
-            try:
-                buttons = dialog.locator("button")
-                n = buttons.count()
-                if n >= 2:
-                    right_btn = buttons.nth(n - 1)
-                    right_btn.wait_for(state="visible", timeout=2000)
-                    t = (right_btn.text_content() or "").strip()
-                    if t == "Post":
-                        right_btn.click(force=True); return True
-                    right_btn.click(force=True); return True
-                if n == 1:
-                    b = buttons.first
-                    if (b.text_content() or "").strip() == "Post":
-                        b.wait_for(state="visible", timeout=2000); b.click(force=True); return True
-            except Exception: pass
-            try:
-                post_btn = dialog.locator("button:has-text('Post')")
-                if post_btn.count():
-                    post_btn.first.wait_for(state="visible", timeout=2000)
-                    post_btn.first.click(force=True); return True
-            except Exception: pass
-            try:
-                for i in range(dialog.locator("button").count()):
-                    btn = dialog.locator("button").nth(i)
-                    if (btn.text_content() or "").strip() == "Post" and btn.is_visible():
-                        btn.click(force=True); return True
-            except Exception: pass
-            try:
-                box = dialog.bounding_box()
-                if box:
-                    x = box["x"] + box["width"] - 55
-                    y = box["y"] + box["height"] - 32
-                    page.mouse.click(x, y); return True
-            except Exception: pass
-            try:
-                clicked = page.evaluate("""() => {
+                }"""
+            )
+            if clicked:
+                return True
+        except Exception:
+            pass
+        try:
+            post_btn = dialog.get_by_role("button", name=re.compile(r"^Post$", re.I))
+            if post_btn.count():
+                post_btn.first.wait_for(state="visible", timeout=2000)
+                post_btn.first.click(force=True)
+                return True
+        except Exception:
+            pass
+        try:
+            buttons = dialog.locator("button")
+            n = buttons.count()
+            if n >= 2:
+                right_btn = buttons.nth(n - 1)
+                right_btn.wait_for(state="visible", timeout=2000)
+                t = (right_btn.text_content() or "").strip()
+                if t == "Post":
+                    right_btn.click(force=True)
+                    return True
+                right_btn.click(force=True)
+                return True
+            if n == 1:
+                b = buttons.first
+                if (b.text_content() or "").strip() == "Post":
+                    b.wait_for(state="visible", timeout=2000)
+                    b.click(force=True)
+                    return True
+        except Exception:
+            pass
+        try:
+            post_btn = dialog.locator("button:has-text('Post')")
+            if post_btn.count():
+                post_btn.first.wait_for(state="visible", timeout=2000)
+                post_btn.first.click(force=True)
+                return True
+        except Exception:
+            pass
+        try:
+            for i in range(dialog.locator("button").count()):
+                btn = dialog.locator("button").nth(i)
+                if (btn.text_content() or "").strip() == "Post" and btn.is_visible():
+                    btn.click(force=True)
+                    return True
+        except Exception:
+            pass
+        try:
+            box = dialog.bounding_box()
+            if box:
+                x = box["x"] + box["width"] - 55
+                y = box["y"] + box["height"] - 32
+                page.mouse.click(x, y)
+                return True
+        except Exception:
+            pass
+        try:
+            clicked = page.evaluate(
+                """() => {
                     const dialogs = document.querySelectorAll('[role="dialog"], [aria-label*="Post settings"]');
                     for (const d of dialogs) {
                         const btns = d.querySelectorAll('button');
@@ -9130,17 +9282,60 @@ def _run_fb_share() -> tuple[bool, str]:
                         }
                     }
                     return false;
-                }""")
-                if clicked: return True
-            except Exception: pass
-            return False
+                }"""
+            )
+            if clicked:
+                return True
+        except Exception:
+            pass
+        return False
 
-        posted = False
-        for attempt in range(6):
-            page.wait_for_timeout(600 if attempt else 400)
-            if _try_post_click(): posted = True; break
-        if not posted: return False, "Typed post but couldn't click the Post button (tried multiple strategies)."
-        page.wait_for_timeout(2000)
+    posted = False
+    for attempt in range(6):
+        page.wait_for_timeout(600 if attempt else 400)
+        if _try_post_click():
+            posted = True
+            break
+    if not posted:
+        return False, "Typed post but couldn't click the Post button (tried multiple strategies)."
+    page.wait_for_timeout(2000)
+    return True, ""
+
+
+def _run_fb_share() -> tuple[bool, str]:
+    ok, song = _get_next_channel_song_for_share()
+    if not ok: return False, str(song)
+    if not _fb_lock.acquire(blocking=False): return False, "Facebook share already running."
+    pw = None
+    context = None
+    handed_off = False
+    try:
+        from playwright.sync_api import sync_playwright
+        os.makedirs(FB_PROFILE_DIR, exist_ok=True)
+        pw = sync_playwright().start()
+        context = _launch_social_browser_with_retry(FB_PROFILE_DIR, pw, attempts=4)
+        page = _acquire_live_page(context)
+        page.goto(FACEBOOK_PROFILE, wait_until="domcontentloaded", timeout=90000)
+        page.wait_for_timeout(1000)
+        if "login" in page.url.lower():
+            _clear_ready(FB_PROFILE_DIR)
+            handed_off = True
+            _keep_browser_until_closed(pw, context)
+            return False, "Facebook needs login. I left the browser open — log in, then **close the browser** and try again."
+        if _fb_needs_pin(page):
+            handed_off = True
+            _keep_browser_until_closed(pw, context)
+            return False, (
+                "Facebook is asking for a **PIN or verification code**. "
+                "I left the browser open — enter the code, then **close the browser** and try again."
+            )
+        _mark_ready(FB_PROFILE_DIR)
+        ok_post, err_post = _fb_compose_status_on_page(page, _build_fb_msg(song["title"], song["url"]))
+        if not ok_post:
+            if err_post == "Could not open Facebook composer.":
+                handed_off = True
+                _keep_browser_until_closed(pw, context)
+            return False, err_post
         _record_shared_song(song["url"])
         return True, f'Shared to Facebook: "{song["title"]}"'
     except Exception as e:
@@ -9156,9 +9351,87 @@ def _run_fb_share() -> tuple[bool, str]:
         try: _fb_lock.release()
         except Exception: pass
 
+
+def _format_twitch_live_fb_message(ev: dict) -> str:
+    """Build Facebook body for a Twitch go-live event (``ev`` from publish announce)."""
+    disp = str(ev.get("display_name") or ev.get("login") or "Stream").strip()
+    ttl = str(ev.get("title") or "Live now").strip()
+    url = str(ev.get("url") or "").strip()
+    login = str(ev.get("login") or "").strip()
+    tpl = LUNA_PUBLISH_ANNOUNCE_FB_MESSAGE_TEMPLATE
+    if tpl:
+        return (
+            tpl.replace("{display_name}", disp)
+            .replace("{title}", ttl)
+            .replace("{url}", url)
+            .replace("{login}", login)[:900]
+        )
+    return f"I'm live on Twitch — come hang out!\n\n{disp}\n{ttl}\n{url}"
+
+
+def _fb_post_plain_status_to_timeline(body: str) -> tuple[bool, str]:
+    """Post arbitrary timeline text (same Playwright flow as !share_facebook, without song rotation)."""
+    if not _fb_lock.acquire(blocking=False):
+        return False, "Facebook action already running."
+    pw = None
+    context = None
+    handed_off = False
+    try:
+        from playwright.sync_api import sync_playwright
+
+        os.makedirs(FB_PROFILE_DIR, exist_ok=True)
+        pw = sync_playwright().start()
+        context = _launch_social_browser_with_retry(FB_PROFILE_DIR, pw, attempts=4)
+        page = _acquire_live_page(context)
+        page.goto(FACEBOOK_PROFILE, wait_until="domcontentloaded", timeout=90000)
+        page.wait_for_timeout(1000)
+        if "login" in page.url.lower():
+            _clear_ready(FB_PROFILE_DIR)
+            handed_off = True
+            _keep_browser_until_closed(pw, context)
+            return False, "Facebook needs login. I left the browser open — log in, then **close the browser** and try again."
+        if _fb_needs_pin(page):
+            handed_off = True
+            _keep_browser_until_closed(pw, context)
+            return False, (
+                "Facebook is asking for a **PIN or verification code**. "
+                "I left the browser open — enter the code, then **close the browser** and try again."
+            )
+        _mark_ready(FB_PROFILE_DIR)
+        ok_post, err_post = _fb_compose_status_on_page(page, body)
+        if not ok_post:
+            if err_post == "Could not open Facebook composer.":
+                handed_off = True
+                _keep_browser_until_closed(pw, context)
+            return False, err_post
+        return True, "Posted to Facebook."
+    except ImportError:
+        return False, "Playwright not installed."
+    except Exception as e:
+        return False, f"Facebook error: {e}"
+    finally:
+        if not handed_off:
+            if context:
+                try:
+                    context.close()
+                except Exception:
+                    pass
+            if pw:
+                try:
+                    pw.stop()
+                except Exception:
+                    pass
+        try:
+            _fb_lock.release()
+        except Exception:
+            pass
+
+
 def _yt_comment(video_url: str) -> tuple[bool, str]:
+    video_url = _yt_url_from_freeform_arg(video_url) or (video_url or "").strip()
     vid = _yt_extract_id(video_url)
-    if not vid: return False, "Invalid YouTube URL."
+    if not vid:
+        return False, "Invalid YouTube URL."
     if not _yt_lock.acquire(blocking=False): return False, "YouTube comment already running."
     try:
         from playwright.sync_api import sync_playwright
@@ -9199,11 +9472,15 @@ def _yt_comment(video_url: str) -> tuple[bool, str]:
         if transcript:
             comment = ollama_chat(
                 f"Write one short YouTube comment as a real viewer who watched the video. Use ONLY what was said in the transcript. Be genuine and specific (reference something from the video). 1-2 sentences, max 200 characters. Return only the comment, no quotes.\n\nVideo title: {title}\n\nTranscript (excerpt):\n{transcript}",
-                model=OLLAMA_MODEL)
+                model=OLLAMA_CHAT,
+                compact=True,
+            )
         else:
             comment = ollama_chat(
                 f"Write one YouTube comment (1-2 sentences, warm, human, max 200 chars). Video: {title}\nContext: {desc}\nReturn only the comment.",
-                model=OLLAMA_MODEL)
+                model=OLLAMA_CHAT,
+                compact=True,
+            )
         comment = re.sub(r"\s+", " ", comment).strip().strip('"\'')[:220]
         if not comment: comment = "Great content, keep it up!"
         os.makedirs(YT_PROFILE_DIR, exist_ok=True)
@@ -9223,27 +9500,50 @@ def _yt_comment(video_url: str) -> tuple[bool, str]:
                     return False, "YouTube browser failed to start. Close any Chrome window and try again."
                 page = context.pages[0] if context.pages else context.new_page()
                 page.goto(f"https://www.youtube.com/watch?v={vid}", wait_until="domcontentloaded", timeout=90000)
-                page.wait_for_timeout(2000)
-                # Check the page: are we logged in (like Suno)? Logged-in has avatar, Subscriptions, or comment box; login page has accounts.google.com or prominent Sign in.
+                page.wait_for_timeout(2500)
+                # Logged-in: visible avatar/subscriptions, or visible comment placeholder (do not assume logged in on slow loads).
                 logged_in = False
                 try:
                     if "accounts.google.com" in page.url:
                         logged_in = False
                     else:
-                        for sel in ("#avatar-btn", "a[href*='/feed/subscriptions']", "ytd-masthead #avatar-button", "ytd-comment-simplebox-renderer"):
-                            if page.locator(sel).first.count():
+                        for sel in (
+                            "#avatar-btn",
+                            "a[href*='/feed/subscriptions']",
+                            "ytd-masthead #avatar-button",
+                        ):
+                            loc = page.locator(sel).first
+                            if loc.count():
                                 try:
-                                    if page.locator(sel).first.is_visible():
+                                    if loc.is_visible():
                                         logged_in = True
                                         break
                                 except Exception:
                                     pass
                         if not logged_in:
-                            # Prominent Sign in in header = not logged in
-                            if page.locator("ytd-masthead a[href*='accounts.google']").first.count() and page.locator("ytd-masthead a[href*='accounts.google']").first.is_visible():
-                                logged_in = False
-                            else:
-                                logged_in = True
+                            for sel in (
+                                "ytd-comment-simplebox-renderer #simplebox-placeholder",
+                                "ytd-comment-simplebox-renderer #placeholder-area",
+                                "ytd-comment-simplebox-renderer #focused-placeholder-area",
+                            ):
+                                loc = page.locator(sel).first
+                                if loc.count():
+                                    try:
+                                        if loc.is_visible():
+                                            logged_in = True
+                                            break
+                                    except Exception:
+                                        pass
+                        if not logged_in:
+                            signin = page.locator(
+                                "ytd-masthead a[href*='accounts.google'], "
+                                "ytd-button-renderer a[href*='accounts.google.com/ServiceLogin']"
+                            ).first
+                            try:
+                                if signin.count() and signin.is_visible():
+                                    logged_in = False
+                            except Exception:
+                                pass
                 except Exception:
                     pass
                 if not logged_in:
@@ -9254,19 +9554,34 @@ def _yt_comment(video_url: str) -> tuple[bool, str]:
                     _bootstrap_window(YT_PROFILE_DIR, _youtube_login_bootstrap_url(), "_yt_boot")
                     return False, _youtube_needs_login_message()
                 _mark_ready(YT_PROFILE_DIR)
-                # Scroll to comments
-                found = False
-                for _ in range(18):
-                    try:
-                        box = page.locator("ytd-comment-simplebox-renderer #simplebox-placeholder").first
-                        if box.count() and box.is_visible(): found=True; break
-                    except Exception: pass
+                # Scroll to comments — YouTube A/B tests placeholder ids.
+                entry_sel = None
+                for _ in range(22):
+                    for sel in (
+                        "ytd-comment-simplebox-renderer #simplebox-placeholder",
+                        "ytd-comment-simplebox-renderer #placeholder-area",
+                        "ytd-comment-simplebox-renderer #focused-placeholder-area",
+                    ):
+                        try:
+                            box = page.locator(sel).first
+                            if box.count() and box.is_visible():
+                                entry_sel = sel
+                                break
+                        except Exception:
+                            pass
+                    if entry_sel:
+                        break
                     page.mouse.wheel(0, 1200)
-                    page.wait_for_timeout(300)
-                if not found: return False, "Comment box not found."
-                page.locator("ytd-comment-simplebox-renderer #simplebox-placeholder").first.click(force=True)
+                    page.wait_for_timeout(350)
+                if not entry_sel:
+                    return False, "Comment box not found (scrolled comments — check login or try again)."
+                page.locator(entry_sel).first.click(force=True)
                 page.wait_for_timeout(500)
                 editor = page.locator("#contenteditable-root[contenteditable='true']").first
+                try:
+                    editor.wait_for(state="visible", timeout=8000)
+                except Exception:
+                    pass
                 editor.click(force=True)
                 page.keyboard.press("Control+A"); page.keyboard.press("Backspace")
                 page.keyboard.type(comment, delay=14)
@@ -9276,9 +9591,11 @@ def _yt_comment(video_url: str) -> tuple[bool, str]:
                 sub = None
                 for sel in (
                     'button[aria-label="Comment"]',
+                    'yt-button-shape button[aria-label="Comment"]',
                     '[aria-label="Comment"]',
                     "ytd-commentbox #submit-button button",
                     "ytd-button-renderer#submit-button button",
+                    "#submit-button button",
                 ):
                     try:
                         loc = page.locator(sel).first
@@ -9296,6 +9613,15 @@ def _yt_comment(video_url: str) -> tuple[bool, str]:
                     except Exception:
                         pass
                 if sub is None:
+                    try:
+                        editor = page.locator("#contenteditable-root[contenteditable='true']").first
+                        if editor.count():
+                            editor.click(force=True)
+                            page.keyboard.press("Control+Enter")
+                            page.wait_for_timeout(2500)
+                            return True, f'Comment posted on: "{title}"'
+                    except Exception:
+                        pass
                     return False, "Could not find the Comment button to submit."
                 try:
                     sub.scroll_into_view_if_needed(timeout=3000)
@@ -9323,6 +9649,7 @@ def _yt_comment(video_url: str) -> tuple[bool, str]:
 
 def _yt_react(video_url: str) -> tuple[bool, str]:
     """Generate Luna reaction to a YouTube video (reads title/desc, prefers transcript)."""
+    video_url = _yt_url_from_freeform_arg(video_url) or (video_url or "").strip()
     vid = _yt_extract_id(video_url)
     if not vid:
         return False, "Invalid YouTube URL."
@@ -9380,7 +9707,7 @@ def _yt_react(video_url: str) -> tuple[bool, str]:
             "If details are limited, be honest and react to what is known. No hashtags. No markdown.\n\n"
             f"Title: {title}\nDescription: {desc}"
         )
-    out = (ollama_chat(prompt, model=OLLAMA_MODEL) or "").strip()
+    out = (ollama_chat(prompt, model=OLLAMA_CHAT, compact=True) or "").strip()
     out = " ".join(out.split())[:520]
     if not out:
         return False, "Could not generate a reaction."
@@ -10000,8 +10327,10 @@ def _x_react(post_url: str) -> tuple[bool, str]:
 
 def _yt_like_one(video_url: str) -> tuple[bool, str]:
     """Like exactly one video via Playwright + YT_PROFILE_DIR (same account as !yt_comment)."""
+    video_url = _yt_url_from_freeform_arg(video_url) or (video_url or "").strip()
     vid = _yt_extract_id(video_url)
-    if not vid: return False, "Invalid YouTube URL."
+    if not vid:
+        return False, "Invalid YouTube URL."
     if not _yt_lock.acquire(blocking=False): return False, "YouTube action already running."
     watch = f"https://www.youtube.com/watch?v={vid}"
     try:
@@ -18023,25 +18352,33 @@ def _handle_bang(msg: str, scope: str, meta: dict | None = None) -> str:
         return _distrokid_plan_text(args)
     if cmd in ("!yt_comment","!youtube_comment"):
         if not args: return "Usage: !yt_comment <url>"
-        url = (re.search(r"https?://[^\s]+", args) or type("",(), {"group": lambda s,x: args})()).group(0)
+        url = _yt_url_from_freeform_arg(args)
+        if not url or not _yt_extract_id(url):
+            return "Usage: !yt_comment <YouTube video URL> (paste the full watch, shorts, or youtu.be link)."
         ok, r = _yt_comment(url)
         if not ok: _record_failure("yt_comment", r, {"video_url": url})
         return f"✅ {r}" if ok else f"❌ {r}"
     if cmd in ("!yt_like", "!youtube_like"):
         if not args: return "Usage: !yt_like <url>"
-        url = (re.search(r"https?://[^\s]+", args) or type("",(), {"group": lambda s,x: args})()).group(0)
+        url = _yt_url_from_freeform_arg(args)
+        if not url or not _yt_extract_id(url):
+            return "Usage: !yt_like <YouTube video URL> (paste the full link)."
         ok, r = _yt_like_one(url)
         if not ok: _record_failure("yt_like", r, {"video_url": url})
         return f"✅ {r}" if ok else f"❌ {r}"
     if cmd in ("!yt_react", "!youtube_react"):
         if not args: return "Usage: !yt_react <url>"
-        url = (re.search(r"https?://[^\s]+", args) or type("",(), {"group": lambda s,x: args})()).group(0)
+        url = _yt_url_from_freeform_arg(args)
+        if not url or not _yt_extract_id(url):
+            return "Usage: !yt_react <YouTube video URL> (paste the full link)."
         ok, r = _yt_react(url)
         if not ok: _record_failure("yt_react", r, {"video_url": url})
         return f"✅ {r}" if ok else f"❌ {r}"
     if cmd in ("!yt_watch_react", "!youtube_watch_react"):
         if not args: return "Usage: !yt_watch_react <url>"
-        url = (re.search(r"https?://[^\s]+", args) or type("",(), {"group": lambda s,x: args})()).group(0)
+        url = _yt_url_from_freeform_arg(args)
+        if not url or not _yt_extract_id(url):
+            return "Usage: !yt_watch_react <YouTube video URL> (paste the full link)."
         ok, r = _yt_watch_react_start(url, scope or LINKED_SCOPE or "web")
         if not ok:
             _record_failure("yt_watch_react", r, {"video_url": url})
@@ -19055,8 +19392,11 @@ async def cmd_share_fb(ctx):
 async def cmd_yt(ctx, *, video_url: str = ""):
     if not _is_privileged(ctx.author.id): await ctx.reply("Linked user/admin only."); return
     if not video_url: await ctx.reply("Usage: !yt_comment <url>"); return
+    url = _yt_url_from_freeform_arg(video_url.strip()) or video_url.strip()
+    if not _yt_extract_id(url):
+        await ctx.reply("Could not parse a YouTube URL. Paste the full watch, Shorts, or youtu.be link."); return
     await ctx.reply("Posting comment...")
-    ok, r = await asyncio.to_thread(_yt_comment, video_url.strip())
+    ok, r = await asyncio.to_thread(_yt_comment, url)
     if not ok: _record_failure("yt_comment", r, {"video_url": video_url})
     await ctx.reply(f"{'✅' if ok else '❌'} {r}")
 

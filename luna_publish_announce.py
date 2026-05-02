@@ -1,6 +1,7 @@
 """
 Poll YouTube Atom feeds and Twitch Helix live status; emit short Discord-ready strings when
-there is a new upload or a channel goes live.
+there is a new upload or a channel goes live. Twitch go-live metadata is returned for optional
+Facebook posts (see ``LUNA_PUBLISH_ANNOUNCE_TWITCH_LIVE_FACEBOOK`` in bot_main).
 
 Configure via bot_main env (`LUNA_PUBLISH_ANNOUNCE_*`). One or more Discord text channels via
 `LUNA_PUBLISH_ANNOUNCE_DISCORD_CHANNEL_IDS` (comma-separated). State file avoids duplicate announcements.
@@ -62,7 +63,10 @@ def _parse_atom_latest(xml_text: str) -> tuple[str, str, str] | None:
 
 def _fetch_text(url: str, timeout: float = 20.0) -> str | None:
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "LunaPublishAnnounce/1.0"})
+        req = urllib.request.Request(
+            url,
+            headers={"User-Agent": "Mozilla/5.0 (compatible; LunaPublishAnnounce/1.0)"},
+        )
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return (r.read() or b"").decode("utf-8", errors="replace")
     except Exception:
@@ -113,9 +117,12 @@ def poll_publish_announce(
     twitch_client_id: str,
     twitch_app_token: str,
     skip_twitch: bool = False,
-) -> list[str]:
+) -> tuple[list[str], list[dict[str, str]]]:
     """
-    Single poll tick. Updates state file. Returns 0..n Discord message bodies (markdown-ish plain).
+    Single poll tick. Updates state file.
+
+    Returns a tuple ``(discord_messages, twitch_go_live)`` where ``twitch_go_live`` is one dict per
+    channel that **just** transitioned offline→live, with keys: login, display_name, title, url, started_at.
     """
     ids = [x.strip() for x in youtube_channel_ids if x.strip()]
     rss_extra = [x.strip() for x in youtube_rss_urls if x.strip()]
@@ -134,6 +141,7 @@ def poll_publish_announce(
         feeds.append((key, url))
 
     messages: list[str] = []
+    twitch_go_live: list[dict[str, str]] = []
 
     with _state_lock:
         state = _load_json(
@@ -144,6 +152,10 @@ def poll_publish_announce(
         tw_state = state["twitch"] if isinstance(state.get("twitch"), dict) else {}
         state["youtube"] = yt_state
         state["twitch"] = tw_state
+        ann_ids = state.get("yt_announced_ids")
+        if not isinstance(ann_ids, list):
+            ann_ids = []
+        ann_set = {str(x).strip() for x in ann_ids if str(x).strip()}
 
         for key, feed_url in feeds:
             xml = _fetch_text(feed_url)
@@ -160,10 +172,16 @@ def poll_publish_announce(
                 continue
             if vid != prev_vid:
                 yt_state[key] = {"video_id": vid}
+                if vid in ann_set:
+                    continue
                 hint = key.replace("yt_channel:", "") if key.startswith("yt_channel:") else "RSS feed"
                 messages.append(
                     f"📺 **New YouTube video** ({hint})\n**{title[:240]}**\n{link}"
                 )
+                ann_ids.append(vid)
+                ann_set.add(vid)
+
+        state["yt_announced_ids"] = ann_ids[-80:]
 
         if not skip_twitch:
             for login in twitch_l:
@@ -179,8 +197,18 @@ def poll_publish_announce(
                     disp = str(row.get("user_name") or login).strip() or login
                     ttl = str(row.get("title") or "Live").strip() or "Live"
                     url = f"https://www.twitch.tv/{urllib.parse.quote(login)}"
+                    started = str(row.get("started_at") or "")
                     messages.append(f"🔴 **{disp}** is **live** on Twitch!\n**{ttl[:240]}**\n{url}")
+                    twitch_go_live.append(
+                        {
+                            "login": login,
+                            "display_name": disp,
+                            "title": ttl,
+                            "url": url,
+                            "started_at": started,
+                        }
+                    )
 
         _save_json(state_path, state)
 
-    return messages
+    return messages, twitch_go_live
