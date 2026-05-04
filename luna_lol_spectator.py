@@ -476,6 +476,53 @@ def get_live_context(max_chars: int = 1500) -> str:
     )
 
 
+def lol_vision_alignment_hint() -> str:
+    """Short instructions for vision models when screen-sharing League: prioritize local player + allied HUD."""
+    with _latest_lock:
+        snap = dict(_latest_snapshot) if isinstance(_latest_snapshot, dict) else None
+    if not snap:
+        return ""
+    active = snap.get("activeSummoner")
+    champ = ""
+    if isinstance(active, dict):
+        champ = str(active.get("champion") or "").strip()
+        if champ in ("?", ""):
+            champ = ""
+    teams = snap.get("teams")
+    ally_tid = None
+    if isinstance(teams, dict) and champ:
+        ch_low = champ.lower()
+        for tid in ("100", "200"):
+            arr = teams.get(tid)
+            if not isinstance(arr, list):
+                continue
+            for p in arr:
+                if not isinstance(p, dict):
+                    continue
+                pc = str(p.get("champion") or "").strip().lower()
+                if pc == ch_low:
+                    ally_tid = tid
+                    break
+            if ally_tid:
+                break
+    side_human = ""
+    if ally_tid == "100":
+        side_human = "blue side (team id 100)"
+    elif ally_tid == "200":
+        side_human = "red side (team id 200)"
+    lines = [
+        "League of Legends: a Live Client snapshot for this PC exists — treat the image as in-game UI unless obviously not.",
+        "Prioritize describing elements tied to **the local player's champion and allied teammates** "
+        "(their HP/resource bar, cooldown row, portrait strip, ally-centric scoreboard columns, pings on allies). "
+        "Deprioritize enemy-only framing unless the USER QUESTION asks about opponents.",
+    ]
+    if champ:
+        lines.insert(1, f"The local player is on **{champ}** (from Live Client).")
+    if side_human:
+        lines.insert(2 if champ else 1, f"They are **{side_human}** — when a scoreboard is visible, allied rows usually match this side.")
+    return "\n".join(lines)
+
+
 def get_spectator_status() -> dict[str, Any]:
     """Snapshot for hub UI: live client and/or Riot cloud, in-game flag, errors."""
     with _ui_lock:

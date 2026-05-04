@@ -253,6 +253,7 @@
     aspect-ratio: 16 / 9;
     display: block;
     background: #000;
+    object-fit: contain;
   }
   .media-preview-bar {
     display: flex;
@@ -976,6 +977,8 @@ function setVoiceTurnState(nextState, statusText = "") {
 
 let externalMediaStream = null;
 let externalMediaKind = "";
+/** Hidden element: some browsers lag or report 0×0 on the styled preview `<video>` for display capture. */
+let externalMediaCaptureVideo = null;
 /** Mobile website mic adaptation: start raw, switch to assisted if analyzer sees low input repeatedly. */
 let mobileMicMode = "raw";
 let mobileMicLowCount = 0;
@@ -4415,7 +4418,8 @@ async function sendFromChatBubble() {
   const raw = String(chatBubbleInput?.value || "").trim();
   const hasImage = !!(chatBubbleVisionFrame && chatBubbleVisionFrame.b64);
   if (!raw && !hasImage) return;
-  if (raw) appendChatBubbleMessage("user", raw + (hasImage ? "\n[Image attached]" : ""));
+  const visionNote = hasImage ? "\n[Image attached]" : externalMediaKind ? "\n[Live vision]" : "";
+  if (raw) appendChatBubbleMessage("user", raw + visionNote);
   else appendChatBubbleMessage("user", "[Image attached]");
   if (chatBubbleInput) chatBubbleInput.value = "";
   if (chatBubbleSend) chatBubbleSend.disabled = true;
@@ -4462,6 +4466,21 @@ function refreshMediaChoiceAvailability() {
   }
 }
 
+function ensureExternalMediaCaptureVideo() {
+  if (externalMediaCaptureVideo) return externalMediaCaptureVideo;
+  const v = document.createElement("video");
+  v.muted = true;
+  v.playsInline = true;
+  v.setAttribute("playsinline", "");
+  v.setAttribute("muted", "");
+  v.autoplay = true;
+  v.style.cssText =
+    "position:fixed;width:4px;height:4px;left:-10000px;top:0;opacity:0;pointer-events:none;z-index:-1;";
+  document.body.appendChild(v);
+  externalMediaCaptureVideo = v;
+  return v;
+}
+
 function stopExternalMediaPreview() {
   if (externalMediaStream) {
     try {
@@ -4472,6 +4491,14 @@ function stopExternalMediaPreview() {
     externalMediaStream = null;
   }
   if (mediaPreviewVideo) mediaPreviewVideo.srcObject = null;
+  if (externalMediaCaptureVideo) {
+    try {
+      externalMediaCaptureVideo.pause();
+      externalMediaCaptureVideo.srcObject = null;
+    } catch {
+      /* */
+    }
+  }
   mediaPreview?.classList.remove("open");
   externalMediaKind = "";
 }
@@ -4486,16 +4513,38 @@ async function startExternalMediaPreview(kind) {
     stopExternalMediaPreview();
     let stream = null;
     if (kind === "camera") {
-      stream = await md.getUserMedia({ video: { facingMode: "user" }, audio: false });
+      stream = await md.getUserMedia({
+        video: {
+          facingMode: "user",
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
+          frameRate: { ideal: 15, max: 30 },
+        },
+        audio: false,
+      });
     } else {
       if (!md.getDisplayMedia) {
         setSpeakSttStatus("Screen share is unavailable on this device/browser.");
         return;
       }
-      stream = await md.getDisplayMedia({ video: true, audio: false });
+      stream = await md.getDisplayMedia({
+        video: {
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
+          frameRate: { ideal: 15, max: 30 },
+        },
+        audio: false,
+      });
     }
     externalMediaStream = stream;
     externalMediaKind = kind;
+    const capVid = ensureExternalMediaCaptureVideo();
+    capVid.srcObject = stream;
+    try {
+      await capVid.play();
+    } catch {
+      /* priming decode for snapshot path */
+    }
     if (mediaPreviewVideo) mediaPreviewVideo.srcObject = stream;
     try {
       await mediaPreviewVideo?.play();
@@ -5219,6 +5268,10 @@ async function waitMediaPreviewFrameReady(video, timeoutMs = 5000) {
       });
     });
   }
+  const pollDeadline = Date.now() + Math.min(2000, Math.max(0, timeoutMs));
+  while ((video.videoWidth <= 0 || video.videoHeight <= 0) && Date.now() < pollDeadline) {
+    await new Promise((r) => setTimeout(r, 45));
+  }
   return video.videoWidth > 0 && video.videoHeight > 0;
 }
 
@@ -5231,36 +5284,49 @@ async function fetchLunaChatReply(message, opts) {
     if (opts && opts.visionFrame && typeof opts.visionFrame.b64 === "string" && opts.visionFrame.b64) {
       visionFrame = opts.visionFrame;
       mediaType = String(opts.mediaType || "upload").trim().toLowerCase() || "upload";
-    } else if (externalMediaKind && mediaPreviewVideo && mediaPreviewVideo.srcObject) {
+    } else if (externalMediaKind && externalMediaStream) {
       try {
-        const v = mediaPreviewVideo;
-        await waitMediaPreviewFrameReady(v, 5000);
-        const vw = Number(v.videoWidth || 0);
-        const vh = Number(v.videoHeight || 0);
-        if (vw > 0 && vh > 0) {
-          const maxW = 768;
-          const scale = Math.min(1, maxW / vw);
-          const w = Math.max(64, Math.round(vw * scale));
-          const h = Math.max(64, Math.round(vh * scale));
-          const cv = document.createElement("canvas");
-          cv.width = w;
-          cv.height = h;
-          const cx = cv.getContext("2d");
-          if (cx) {
-            if (externalMediaKind === "camera" && mirrorVisionForCamera) {
-              cx.translate(w, 0);
-              cx.scale(-1, 1);
-            }
-            cx.drawImage(v, 0, 0, w, h);
-            const durl = cv.toDataURL("image/jpeg", 0.68);
-            const b64 = String(durl.split(",", 2)[1] || "");
-            if (b64) {
-              visionFrame = { mime: "image/jpeg", b64 };
-              mediaType = externalMediaKind;
-            }
-          }
+        const v =
+          externalMediaCaptureVideo && externalMediaCaptureVideo.srcObject === externalMediaStream
+            ? externalMediaCaptureVideo
+            : mediaPreviewVideo && mediaPreviewVideo.srcObject === externalMediaStream
+              ? mediaPreviewVideo
+              : null;
+        if (!v) {
+          console.warn("[VRM] vision_frame skipped: video element not bound to screen/camera stream.");
         } else {
-          console.warn("[VRM] vision_frame skipped: video dimensions still 0×0 after wait (screen/camera not ready).");
+          await waitMediaPreviewFrameReady(v, 5000);
+          const vw = Number(v.videoWidth || 0);
+          const vh = Number(v.videoHeight || 0);
+          if (vw > 0 && vh > 0) {
+            const sx = 0;
+            const sy = 0;
+            const sw = vw;
+            const sh = vh;
+            const maxW = externalMediaKind === "screen" ? 960 : 768;
+            const scale = Math.min(1, maxW / sw);
+            const w = Math.max(64, Math.round(sw * scale));
+            const h = Math.max(64, Math.round(sh * scale));
+            const cv = document.createElement("canvas");
+            cv.width = w;
+            cv.height = h;
+            const cx = cv.getContext("2d");
+            if (cx) {
+              if (externalMediaKind === "camera" && mirrorVisionForCamera) {
+                cx.translate(w, 0);
+                cx.scale(-1, 1);
+              }
+              cx.drawImage(v, sx, sy, sw, sh, 0, 0, w, h);
+              const durl = cv.toDataURL("image/jpeg", externalMediaKind === "screen" ? 0.78 : 0.68);
+              const b64 = String(durl.split(",", 2)[1] || "");
+              if (b64) {
+                visionFrame = { mime: "image/jpeg", b64 };
+                mediaType = externalMediaKind;
+              }
+            }
+          } else {
+            console.warn("[VRM] vision_frame skipped: video dimensions still 0×0 after wait (screen/camera not ready).");
+          }
         }
       } catch (e) {
         console.warn("[VRM] vision_frame capture failed:", e);
@@ -5282,14 +5348,24 @@ async function fetchLunaChatReply(message, opts) {
         "[THINKING] Let me reason through that with you.",
       ],
     };
-    const mediaState = visionFrame
-      ? {
-          active: true,
-          type: mediaType || externalMediaKind || "upload",
-          mobile_device: !!IS_MOBILE_DEVICE,
-          website_embed: !!WEBSITE_EMBED_PTT_MODE,
-        }
-      : { active: false, type: "none", mobile_device: !!IS_MOBILE_DEVICE, website_embed: !!WEBSITE_EMBED_PTT_MODE };
+    // Keep active=true whenever camera/screen stream is running—even if JPEG capture failed—so /api/chat injects the correct source (screen vs camera).
+    const mediaOn = !!(externalMediaKind && externalMediaStream);
+    const mediaState =
+      visionFrame || mediaOn
+        ? {
+            active: true,
+            type: visionFrame
+              ? mediaType || externalMediaKind || "upload"
+              : String(externalMediaKind || "camera").trim().toLowerCase() || "camera",
+            mobile_device: !!IS_MOBILE_DEVICE,
+            website_embed: !!WEBSITE_EMBED_PTT_MODE,
+          }
+        : {
+            active: false,
+            type: "none",
+            mobile_device: !!IS_MOBILE_DEVICE,
+            website_embed: !!WEBSITE_EMBED_PTT_MODE,
+          };
     const vrmState = buildVrmSelfState();
     const res = await fetch(API_CHAT, {
       method: "POST",

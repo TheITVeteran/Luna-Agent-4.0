@@ -105,6 +105,14 @@ if _vprov0 in ("ollama", "gguf") and _gemma4_chat and _vm0 and (
     "gemini" in _vm0 or _vm0.startswith("gpt-") or "claude" in _vm0
 ):
     OLLAMA_VISION_MODEL = (OLLAMA_CHAT or OLLAMA_MODEL).strip()
+# Normalize common Moondream chat aliases; keep vision tag aligned when chat is Moondream (single-model setup).
+if _vprov0 in ("ollama", "gguf"):
+    _cc_moondream = (OLLAMA_CHAT or "").strip().lower()
+    if _cc_moondream in ("moondream2", "moondream-2", "moondream"):
+        OLLAMA_CHAT = "moondream:1.8b"
+    _lc_low = (OLLAMA_CHAT or "").strip().lower()
+    if _lc_low.startswith("moondream"):
+        OLLAMA_VISION_MODEL = (OLLAMA_CHAT or "").strip()
 LUNA_OPENAI_BASE_URL = (_env("LUNA_OPENAI_BASE_URL", "https://api.openai.com/v1").strip().rstrip("/") or "https://api.openai.com/v1")
 LUNA_OPENAI_API_KEY = (_env("LUNA_OPENAI_API_KEY", "").strip() or _env("OPENAI_API_KEY", "").strip())
 LUNA_OPENAI_CHAT_MODEL = (_env("LUNA_OPENAI_CHAT_MODEL", "").strip() or OLLAMA_CHAT)
@@ -130,9 +138,118 @@ _chat_call_slots = threading.BoundedSemaphore(_MODEL_CHAT_MAX_CONCURRENCY)
 _vision_call_slots = threading.BoundedSemaphore(_MODEL_VISION_MAX_CONCURRENCY)
 # Playwright social flows: Granite observes viewport JPEGs for CAPTCHA/challenge UI (set LUNA_CAPTCHA_OBSERVER=0 to disable).
 # Main chat: short system injection + skip inner-monologue pre-call (faster TTFT). Set LUNA_CHAT_FAST=0 for full prompts.
+# Discord @/DM: LUNA_DISCORD_CHAT_FAST, LUNA_DISCORD_CHAT_HISTORY, LUNA_DISCORD_HISTORY_MSG_MAX_CHARS;
+# LUNA_DISCORD_CHAT_MODEL / LUNA_DISCORD_FALLBACK_CHAT_MODEL (text model) when OLLAMA_CHAT is VL-only.
 def _chat_fast_enabled() -> bool:
     v = _env("LUNA_CHAT_FAST", "1").strip().lower()
     return v not in ("0", "false", "no", "off")
+
+
+def _discord_chat_prompt_fast() -> bool:
+    """Discord @/DM turns: compact system + short history by default (smaller prompts, faster turns).
+    Set LUNA_DISCORD_CHAT_FAST=0 to use the same full Luna stack as when LUNA_CHAT_FAST=0."""
+    return _env("LUNA_DISCORD_CHAT_FAST", "1").strip().lower() not in ("0", "false", "no", "off")
+
+
+def _discord_chat_history_limit() -> int:
+    try:
+        n = int((_env("LUNA_DISCORD_CHAT_HISTORY", "10") or "10").strip())
+    except Exception:
+        n = 10
+    return max(4, min(30, n))
+
+
+def _discord_history_message_cap() -> int:
+    try:
+        v = int((_env("LUNA_DISCORD_HISTORY_MSG_MAX_CHARS", "1200") or "1200").strip())
+    except Exception:
+        v = 1200
+    return max(400, min(v, 8000))
+
+
+def _discord_trim_chat_messages(messages: list[dict] | None) -> list[dict]:
+    """Avoid huge pasted logs in Discord history blowing up the Ollama payload."""
+    if not messages:
+        return []
+    cap = _discord_history_message_cap()
+    out: list[dict] = []
+    for m in messages:
+        if not isinstance(m, dict):
+            continue
+        mm = dict(m)
+        c = mm.get("content")
+        if isinstance(c, str) and len(c) > cap:
+            mm["content"] = c[: cap - 3].rstrip() + "..."
+        out.append(mm)
+    return out
+
+
+_DISCORD_ERR_HISTORY_SNIPPETS = (
+    "luna is busy",
+    "try again in a few seconds",
+    "no reply.",
+    "luna took too long",
+    "timed out",
+    "getting rate-limited",
+    "i'm getting rate-limited",
+    "ollama offline",
+    "error:",
+)
+
+
+def _discord_filter_error_history(messages: list[dict] | None) -> list[dict]:
+    """Remove failed assistant lines from prompt history (same scope for DMs + @mentions — avoids VL/chat spirals)."""
+    if not messages:
+        return []
+    out: list[dict] = []
+    for m in messages:
+        if not isinstance(m, dict):
+            continue
+        if (m.get("role") or "").lower() != "assistant":
+            out.append(m)
+            continue
+        low = (m.get("content") or "").strip().lower()
+        if any(s in low for s in _DISCORD_ERR_HISTORY_SNIPPETS):
+            continue
+        out.append(m)
+    return out
+
+
+def _discord_ollama_chat_model() -> str:
+    """Optional text-first model for Discord only (set LUNA_DISCORD_CHAT_MODEL when OLLAMA_CHAT is VL-only)."""
+    return (_env("LUNA_DISCORD_CHAT_MODEL", "").strip() or OLLAMA_CHAT).strip()
+
+
+def _discord_chat_fallback_model(primary: str) -> str | None:
+    """Second try when the primary model returns empty / 'No reply.' — must differ from *primary*."""
+    pl = (primary or "").strip().lower()
+    ex = (_env("LUNA_DISCORD_FALLBACK_CHAT_MODEL", "").strip() or OLLAMA_FALLBACK or OLLAMA_RATE_LIMIT_FALLBACK or "").strip()
+    if ex and ex.lower() != pl:
+        return ex
+    for cand in ("llama3.2:latest", "qwen2.5:1.5b", "phi3:mini"):
+        if cand.lower() != pl:
+            return cand
+    return None
+
+
+def _discord_ollama_reply_broken(reply: str | None) -> bool:
+    s = (reply or "").strip().lower()
+    if not s:
+        return True
+    if s in ("no reply.", "no reply"):
+        return True
+    return False
+
+
+def _discord_reply_is_error_tts(reply: str | None) -> bool:
+    """Do not generate voice files for busy/offline/error boilerplate."""
+    low = (reply or "").strip().lower()
+    if not low:
+        return True
+    if reply == COMMAND_ONLY:
+        return True
+    return any(s in low for s in _DISCORD_ERR_HISTORY_SNIPPETS)
+
 
 LINKED_ID  = _env("LINKED_DISCORD_USER_ID", "1414944231222411378")
 ADMIN_ID   = _env("DISCORD_ADMIN_ID")
@@ -1260,8 +1377,8 @@ HELP_TEXT = (
     "**Luna** (chat) · **Shadow** (commands) — say **Shadow, [action]** to run commands.\n\n"
     "• !news — world headlines\n"
     "• !search <q> — Google search\n"
-    "• !suno <desc> — create a Suno song\n"
-    "• !suno_ready — tell Luna you're already logged in to Suno (or say **I'm logged in to Suno**)\n"
+    "• !suno <desc> — create a Suno song (typed or **Suno Create** hub button — not voice / not screen-read)\n"
+    "• !suno_ready — after you've logged into Suno in the browser Luna opened\n"
     "• !share_song / !share_facebook — share to X or Facebook\n"
     "• !distrokid_plan <release name | optional notes> — promo checklist + 30-day rollout plan\n"
     "• !yt_comment <url> — transcribe video + AI comment with real context\n"
@@ -2975,7 +3092,42 @@ def _ollama_greeting_text_ok(s: str | None) -> bool:
     return True
 
 
-def _dm_scheduled_greeting_ollama(kind: str, display_name: str, prof: dict) -> str:
+def _dm_greeting_conversation_context(scope: str) -> str:
+    """Last DM turns for this Discord user — used only to personalize scheduled greetings."""
+    sc = (scope or "").strip()
+    if not sc.startswith("discord:user:"):
+        return ""
+    try:
+        raw = get_recent_conversation(sc, 40)
+    except Exception:
+        return ""
+    if not raw:
+        return ""
+    lines: list[str] = []
+    for m in raw:
+        role = (m.get("role") or "").strip().lower()
+        if role not in ("user", "assistant"):
+            continue
+        label = "Them" if role == "user" else "Luna"
+        content = re.sub(r"\s+", " ", (m.get("content") or "").strip())
+        if not content:
+            continue
+        if len(content) > 420:
+            content = content[:417].rstrip() + "…"
+        lines.append(f"{label}: {content}")
+    if not lines:
+        return ""
+    blob = "\n".join(lines)
+    max_chars = 3800
+    if len(blob) > max_chars:
+        blob = "…(earlier thread truncated)\n" + blob[-max_chars:].lstrip()
+    return (
+        "\n\n## Recent DM thread (continuity only — do not paste long quotes; do not invent facts)\n"
+        f"{blob}\n"
+    )
+
+
+def _dm_scheduled_greeting_ollama(kind: str, display_name: str, prof: dict, scope: str = "") -> str:
     """
     Generate the full text for morning, night, or mid-day DMs. No canned lines — all from Ollama, with one minimal retry.
     kind: "morning" | "night" | "midday"
@@ -2998,16 +3150,20 @@ def _dm_scheduled_greeting_ollama(kind: str, display_name: str, prof: dict) -> s
             "If unsure, stay inclusive. No stereotypes about roles or appearance."
         )
 
+    hist = _dm_greeting_conversation_context(scope)
     if kind == "morning":
         system = (
             "You are Luna, a warm, genuine friend. Write exactly ONE private good-morning DM. "
             "1–3 short sentences; not a template, not listicle energy. Use their name or display name once. "
+            "If a **Recent DM thread** section appears, weave in one light nod to something you actually talked about "
+            "(no long quotes, no repeating their private text verbatim). "
             "Output ONLY the message text, no label or title."
         )
     elif kind == "night":
         system = (
             "You are Luna, a warm, genuine friend. Write exactly ONE private good-night DM before they rest. "
             "1–3 short sentences; kind and calm, not sappy. Use their name or display name once. "
+            "If a **Recent DM thread** section appears, you may softly reference shared context (one phrase), not a recap. "
             "Output ONLY the message text, no label or title."
         )
     else:
@@ -3015,11 +3171,13 @@ def _dm_scheduled_greeting_ollama(kind: str, display_name: str, prof: dict) -> s
             "You are Luna, a warm, real friend. Write exactly ONE private DM (2–4 short sentences) for the middle of their day. "
             "Heartfelt, specific, not generic filler. Match emotional warmth: sisterly for women, grounded encouraging for men, "
             "inclusive for nonbinary/unknown. Never cringe, never preach. Use their name once. "
+            "If a **Recent DM thread** section appears, pick up a real thread topic naturally (no bullet recap of the log). "
             "Output ONLY the message text, no title or outer quotes."
         )
     user_msg = (
         f"Display name: {display_name}\n\n"
         f"What we know:\n{blurb or '(new friend; still be kind).'}\n\n{identity}\n"
+        f"{hist}"
     )
     tmo = 60 if kind == "midday" else 50
     out = ollama_chat(
@@ -3033,8 +3191,9 @@ def _dm_scheduled_greeting_ollama(kind: str, display_name: str, prof: dict) -> s
         rtask = f"a natural good-night to {display_name} (1-2 short lines, restful, use their name once)"
     else:
         rtask = f"one short heartfelt midday check-in to {display_name} (2-3 sentences, encouraging, not generic, use their name once)"
+    retry_body = (hist.strip() + "\n\n" + rtask) if hist.strip() else rtask
     out2 = ollama_chat(
-        rtask,
+        retry_body,
         system="You are Luna, writing a private DM. Output only the message body, no preamble.",
         model=OLLAMA_CHAT, compact=True, timeout=40,
     )
@@ -3066,7 +3225,8 @@ async def _dm_send_greeting_to_uid(uid: int, kind: str) -> bool:
     prof = await asyncio.to_thread(get_profile, f"discord:user:{uid}")
     if not isinstance(prof, dict):
         prof = {}
-    msg = await asyncio.to_thread(_dm_scheduled_greeting_ollama, kind, name, prof)
+    scope_dm = f"discord:user:{uid}"
+    msg = await asyncio.to_thread(_dm_scheduled_greeting_ollama, kind, name, prof, scope_dm)
     if not msg or not _ollama_greeting_text_ok(msg):
         return False
     try:
@@ -3098,7 +3258,8 @@ async def _dm_send_midday_to_uid(uid: int) -> bool:
     prof = await asyncio.to_thread(get_profile, f"discord:user:{uid}")
     if not isinstance(prof, dict):
         prof = {}
-    text = await asyncio.to_thread(_dm_scheduled_greeting_ollama, "midday", name, prof)
+    scope_dm = f"discord:user:{uid}"
+    text = await asyncio.to_thread(_dm_scheduled_greeting_ollama, "midday", name, prof, scope_dm)
     if not _ollama_greeting_text_ok(text):
         return False
     try:
@@ -3913,8 +4074,10 @@ def _sanitize_luna_reply(text: str) -> str:
             raw_inner = (m.group(1) or "").strip()
             label = re.sub(r"[^a-z0-9]+", "", m.group(1).lower())
             tail = (m.group(2) or "").strip()
+            # Skip only this line — do *not* hide everything after. Moondream/small VLMs often emit
+            # a single `[Thinking]`/`[Thought]` header then normal speech; persistent hide_block wiped replies.
             if label in blocked_labels:
-                hide_block = True
+                hide_block = False
                 continue
             if label in response_labels:
                 hide_block = False
@@ -4003,13 +4166,23 @@ def _sanitize_luna_reply(text: str) -> str:
 def _ollama_assistant_message_text(message: dict | None) -> str:
     """Extract visible assistant text from Ollama /api/chat `message` object.
 
-    Thinking-capable models (Qwen3, DeepSeek-R1, etc.) may put the trace in `thinking` and
-    leave `content` empty unless `think` is disabled — or only `thinking` is filled when the
-    token budget is exhausted. Prefer `content`, then fall back to `thinking`.
+    Thinking-capable models may leave `content` empty when misconfigured; we never surface raw `thinking`.
     """
     if not message or not isinstance(message, dict):
         return ""
-    c = (message.get("content") or "").strip()
+    raw = message.get("content")
+    if isinstance(raw, list):
+        parts: list[str] = []
+        for p in raw:
+            if isinstance(p, str) and p.strip():
+                parts.append(p.strip())
+            elif isinstance(p, dict):
+                t = (p.get("text") or p.get("content") or "").strip()
+                if t:
+                    parts.append(t)
+        c = "\n".join(parts).strip()
+    else:
+        c = (raw or "").strip() if isinstance(raw, str) else ""
     if c:
         return c
     # Do not leak model "thinking" trace to users.
@@ -4112,11 +4285,14 @@ def _chat_provider_once(
     timeout: int | None = None,
     *,
     compact: bool = False,
+    image_bytes: bytes | None = None,
 ) -> str:
     provider = (LUNA_CHAT_PROVIDER or "ollama").strip().lower()
     to = timeout if timeout is not None else (180 if compact else 120)
     if provider in ("ollama", "gguf"):
-        return _ollama_chat_once(msg, system, scope, history, model, timeout=to, compact=compact)
+        return _ollama_chat_once(
+            msg, system, scope, history, model, timeout=to, compact=compact, image_bytes=image_bytes
+        )
     messages = _build_chat_messages(msg, system, scope, history, compact=compact)
     if provider in ("openai", "openai_compat"):
         use_model = (model or LUNA_OPENAI_CHAT_MODEL or OLLAMA_CHAT).strip()
@@ -4150,11 +4326,20 @@ def _ollama_chat_once(
     timeout: int | None = None,
     *,
     compact: bool = False,
+    image_bytes: bytes | None = None,
 ) -> str:
     if _should_use_gguf_chat(model):
         to = timeout if timeout is not None else (180 if compact else 120)
         return _gguf_chat_once(msg, system, scope, history, model, to, compact=compact)
     messages = _build_chat_messages(msg, system, scope, history, compact=compact)
+    if image_bytes and messages and (messages[-1].get("role") or "").lower() == "user":
+        try:
+            b64 = base64.b64encode(image_bytes).decode("ascii")
+            last = dict(messages[-1])
+            last["images"] = [b64]
+            messages = messages[:-1] + [last]
+        except Exception:
+            pass
     to = timeout if timeout is not None else (180 if compact else 120)
     # `think: false` is top-level (not in options). Avoids empty `content` on thinking models.
     payload: dict = {"model": model, "messages": messages, "stream": False, "think": False}
@@ -4180,17 +4365,26 @@ def ollama_chat(
     *,
     compact: bool = False,
     timeout: int | None = None,
+    image_bytes: bytes | None = None,
 ) -> str:
     use_model = (model or OLLAMA_MODEL).strip()
     call_to = timeout if timeout is not None else (180 if compact else 120)
     provider = (LUNA_CHAT_PROVIDER or "ollama").strip().lower()
+    multimodal = bool(image_bytes)
     try:
         raw = _run_with_model_guard(
             kind="chat",
             queue_wait_sec=_MODEL_CHAT_QUEUE_WAIT_SEC,
             hard_timeout_sec=max(call_to + 8, _MODEL_CHAT_GUARD_TIMEOUT_SEC),
             fn=lambda: _chat_provider_once(
-                msg, system, scope, history, use_model, timeout=call_to, compact=compact
+                msg,
+                system,
+                scope,
+                history,
+                use_model,
+                timeout=call_to,
+                compact=compact,
+                image_bytes=image_bytes,
             ),
         )
         return _sanitize_luna_reply(raw)
@@ -4199,7 +4393,7 @@ def ollama_chat(
         is_rate_limited = (
             isinstance(primary_err, urllib.error.HTTPError) and int(getattr(primary_err, "code", 0) or 0) == 429
         ) or ("429" in str(primary_err or "").lower()) or ("too many requests" in str(primary_err or "").lower())
-        if provider in ("ollama", "gguf") and is_rate_limited:
+        if provider in ("ollama", "gguf") and is_rate_limited and not multimodal:
             rl_model = (OLLAMA_RATE_LIMIT_FALLBACK or "llama3.2:latest").strip()
             if rl_model and rl_model != use_model:
                 try:
@@ -4216,12 +4410,13 @@ def ollama_chat(
                             rl_model,
                             timeout=rl_to,
                             compact=compact,
+                            image_bytes=None,
                         ),
                     )
                     return _sanitize_luna_reply(raw)
                 except Exception:
                     pass
-        if provider in ("ollama", "gguf") and OLLAMA_FALLBACK and OLLAMA_FALLBACK != use_model:
+        if provider in ("ollama", "gguf") and OLLAMA_FALLBACK and OLLAMA_FALLBACK != use_model and not multimodal:
             try:
                 fb_to = timeout if timeout is not None else 90
                 raw = _run_with_model_guard(
@@ -4236,6 +4431,7 @@ def ollama_chat(
                         OLLAMA_FALLBACK,
                         timeout=fb_to,
                         compact=compact,
+                        image_bytes=None,
                     ),
                 )
                 return _sanitize_luna_reply(raw)
@@ -4243,7 +4439,7 @@ def ollama_chat(
                 pass
         if isinstance(primary_err, TimeoutError):
             em = str(primary_err or "")
-            if "queue_busy" in em:
+            if "queue_busy" in em and not multimodal:
                 # Voice/chat bursts can briefly saturate the single chat slot.
                 # Retry once with a longer queue wait before giving up.
                 try:
@@ -4254,7 +4450,14 @@ def ollama_chat(
                         queue_wait_sec=retry_wait,
                         hard_timeout_sec=max(retry_to + 8, _MODEL_CHAT_GUARD_TIMEOUT_SEC),
                         fn=lambda: _chat_provider_once(
-                            msg, system, scope, history, use_model, timeout=retry_to, compact=compact
+                            msg,
+                            system,
+                            scope,
+                            history,
+                            use_model,
+                            timeout=retry_to,
+                            compact=compact,
+                            image_bytes=None,
                         ),
                     )
                     return _sanitize_luna_reply(raw)
@@ -13332,6 +13535,21 @@ def _vision_provider_ready() -> bool:
     return False
 
 
+def _ollama_tag_is_moondream(tag: str) -> bool:
+    t = (tag or "").strip().lower().replace(" ", "")
+    return t in ("moondream", "moondream2", "moondream-2") or t.startswith("moondream:")
+
+
+def _moondream_unified_ollama_chat() -> bool:
+    """Single multimodal model for web/VRM frames (Moondream via Ollama /api/chat + images)."""
+    prov = (LUNA_CHAT_PROVIDER or "ollama").strip().lower()
+    if prov not in ("ollama", "gguf"):
+        return False
+    if _should_use_gguf_chat(OLLAMA_CHAT):
+        return False
+    return _ollama_tag_is_moondream(OLLAMA_CHAT)
+
+
 def _vision_describe_image(
     image_bytes: bytes,
     prompt: str = "Describe briefly what you see in this image. One or two sentences. Be concise. Only describe what is actually visible. Do not invent or hallucinate.",
@@ -13945,14 +14163,8 @@ def _parse_command(text: str) -> tuple[str, dict] | None:
         if topic:
             return "news_topic", {"topic": topic}
     if re.search(r"\b(?:news|headlines|latest news|world news)\b", low): return "news", {}
-    # Suno — "I'm logged in to Suno" / "suno ready" so Luna uses create flow next time
-    if re.search(r"\b(?:suno\s+logged\s+in|logged\s+in\s+to\s+suno|suno\s+ready|i'?m\s+logged\s+in)\b", low):
-        return "suno_ready", {}
-    # Suno create song
-    if re.search(r"\b(?:suno|create a song|make a song)\b", low):
-        m = re.search(r"(?:suno|song)\s*[,:]?\s*(.+)", low)
-        if m: return "suno", {"description": raw[m.start(1):].strip()}
-        return "suno", {"description": raw}
+    # Suno: **!suno** / **!suno_ready** only (see _handle_bang). NL matching was firing on screen-share
+    # vision text (e.g. Suno.com UI) and on voice — hub uses insertCommand('!suno ').
     # Share (Share Song button in UI → share to X)
     if re.search(r"\bshare\s+song\b", low) or re.search(r"\bshare\b.*\b(?:x|twitter)\b", low) or re.search(r"\bpost\b.*\b(?:x|twitter)\b", low):
         return "share_x", {}
@@ -14176,7 +14388,7 @@ def _likely_command(text: str) -> bool:
     low = (text or "").strip().lower()
     if not low: return False
     if _CONV_START.match(low): return False
-    starters = ("play ","podcast ","podcast create ","create podcast ","audiobook ","audiobook create ","audiobook continue ","audiobook cancel ","search ","research ","research_story ","research story ","story_script ","story script ","send ","create ","call ","dm ","tell ","inform ","msg ","share ","post ","remind ","suno ","yt_comment ","yt_like ","yt_analytics ","yt_react ","yt_watch_react ","yt_watch_stop ","x_react ","comment ","ig_dm ","fb_msg ","google ","news","!help","how's ","pc status","luna status","ram ","what do you see","what can you see","ask me ","summarize ","summary of ","todo ","calendar ","join me ","join my ","luna join ","rank","bond","notes","note add ")
+    starters = ("play ","podcast ","podcast create ","create podcast ","audiobook ","audiobook create ","audiobook continue ","audiobook cancel ","search ","research ","research_story ","research story ","story_script ","story script ","send ","create ","call ","dm ","tell ","inform ","msg ","share ","post ","remind ","yt_comment ","yt_like ","yt_analytics ","yt_react ","yt_watch_react ","yt_watch_stop ","x_react ","comment ","ig_dm ","fb_msg ","google ","news","!help","how's ","pc status","luna status","ram ","what do you see","what can you see","ask me ","summarize ","summary of ","todo ","calendar ","join me ","join my ","luna join ","rank","bond","notes","note add ")
     return any(low.startswith(s) for s in starters) or low in ("play","news","help","skip","stop","ask me","digest","daily digest","todo","todo list","calendar","calendar list","calendar today","calendar week","youtube analytics","yt analytics","rank","bond","notes") or "luna status" in low or "pc status" in low or bool(re.search(r"\b(what do you see|what can you see|do you see me|describe what you see)\b", low)) or bool(re.search(r"\b(?:read|analyze|scan)\s+(?:my\s+)?(?:analytics|dashboard|stats)\b", low))
 
 def _is_retry(msg: str) -> bool:
@@ -16477,7 +16689,7 @@ def _tts_for_chat_source(reply: str, chat_source: str, *, para_mode: bool = True
 
 def _execute_chat_turn(scope: str, msg: str, data: dict | None = None, *, chat_source: str = "web") -> dict:
     """Shared chat logic for web UI and Twitch reader. Returns a dict with at least `reply` on success."""
-    global _last_user_activity, _last_streamer_luna_at
+    global _last_user_activity, _last_streamer_luna_at, _camera_last_result, _last_web_vision_context
     _last_user_activity = time.time()
     data = data or {}
     sc = (scope or "").strip()
@@ -16607,6 +16819,31 @@ def _execute_chat_turn(scope: str, msg: str, data: dict | None = None, *, chat_s
         force_stream_mode=_force_stream_mode_from_request_data(data),
         suppress_lol_context=bool((data or {}).get("suppress_lol_context")),
     )
+    mm_hint = ""
+    mm_bytes = None
+    mm_kind = "camera"
+    try:
+        mm_hint = str(data.pop("_moondream_screen_hint", "") or "").strip()
+    except Exception:
+        mm_hint = ""
+    try:
+        mm_bytes = data.pop("_moondream_multimodal_bytes", None)
+    except Exception:
+        mm_bytes = None
+    try:
+        mm_kind = str(data.pop("_moondream_multimodal_kind", "") or "").strip().lower() or "camera"
+    except Exception:
+        mm_kind = "camera"
+    mm_uq = ""
+    try:
+        mm_uq = str(data.pop("_moondream_uq_focus", "") or "").strip()
+    except Exception:
+        mm_uq = ""
+    if mm_hint:
+        system = system + "\n\n" + mm_hint
+    if mm_uq:
+        msg = mm_uq + "\n" + msg
+
     rel_ctx = _relationship_prompt(rel_actor_key, rel_row)
     if rel_ctx:
         system = system + "\n\n" + rel_ctx
@@ -16616,8 +16853,15 @@ def _execute_chat_turn(scope: str, msg: str, data: dict | None = None, *, chat_s
         briefing_reply = _generate_morning_briefing()
         _mark_briefing_shown()
 
+    mm_ok = bool(mm_bytes) and _moondream_unified_ollama_chat()
     reply = ollama_chat(
-        msg, system=system, scope=scope, history=history, model=OLLAMA_CHAT, compact=use_fast
+        msg,
+        system=system,
+        scope=scope,
+        history=history,
+        model=OLLAMA_CHAT,
+        compact=use_fast,
+        image_bytes=mm_bytes if mm_ok else None,
     )
     if not reply:
         reply = COMMAND_ONLY
@@ -16629,6 +16873,24 @@ def _execute_chat_turn(scope: str, msg: str, data: dict | None = None, *, chat_s
             reply = COMMAND_ONLY
     if briefing_reply:
         reply = briefing_reply + "\n\n---\n\n" + reply
+    if mm_ok:
+        vs_summary = (reply or "").strip()[:2400]
+        if vs_summary:
+            try:
+                with _camera_lock:
+                    _camera_last_result = {
+                        "vision_summary": vs_summary,
+                        "summary": vs_summary,
+                        "face_count": 0,
+                        "objects": [],
+                    }
+                    _last_web_vision_context = {
+                        "summary": vs_summary,
+                        "source": mm_kind or "camera",
+                        "ts": time.time(),
+                    }
+            except Exception:
+                pass
     reply = _store_assistant(reply)
     _relationship_note_assistant_turn(rel_actor_key, reply)
 
@@ -17458,6 +17720,26 @@ def api_studio_watch_target():
     d = _studio_watch_get()
     return jsonify({"ok": True, "url": d.get("url") or "", "title": d.get("title") or "", "source": d.get("source") or "manual"})
 
+
+def _vision_user_question_focus_suffix(user_question: str) -> str:
+    """Bias vision-model reads toward what the user asked (single full-frame; no client-side ROI)."""
+    q = (user_question or "").strip()
+    if not q:
+        return ""
+    q = q.replace("«", "'").replace("»", "'").strip()
+    if len(q) > 700:
+        q = q[:697].rstrip() + "…"
+    return (
+        "\n\n=== USER QUESTION (prioritize this; ignore unrelated clutter when possible) ===\n"
+        f"{q}\n"
+        "You only receive ONE full-frame snapshot—no crop/zoom. Answer primarily using regions relevant to this question; "
+        "name approximate placement (top/middle/bottom × left/center/right, or e.g. top-left HUD, bottom-center chat). "
+        "Quote readable text and numbers from those regions.\n"
+        "If what they asked about is not visible or unreadable, say so plainly.\n"
+        "=== END USER QUESTION ===\n"
+    )
+
+
 @web.route("/api/chat", methods=["POST"])
 def api_chat():
     global _last_user_activity, _camera_last_result, _last_web_vision_context
@@ -17466,7 +17748,7 @@ def api_chat():
     if not _rate_ok(ip):
         return jsonify({"error": "Too many requests. Slow down."}), 429
     data = request.get_json(force=True, silent=True) or {}
-    # Optional vision frame from website VRM viewer (camera/screen share) for Gemini-aware replies.
+    # Optional frame from hub/VRM: caption via OLLAMA_VISION_MODEL then inject text for chat — unless Moondream handles both (multimodal chat).
     try:
         vf = data.get("vision_frame") if isinstance(data, dict) else None
         media_state = data.get("media_state") if isinstance(data, dict) else None
@@ -17483,68 +17765,93 @@ def api_chat():
                 img_bytes = base64.b64decode(b64s, validate=False)
                 if img_bytes:
                     kind = str(media_state.get("type") or "camera").strip().lower()
-                    if kind == "screen":
-                        vp = (
-                            "You are reading ONE desktop screen-capture frame for a live assistant. Prioritize identifying exactly WHAT app/game is on screen.\n"
-                            "Return this exact structure:\n"
-                            "IDENTITY: <exact app/game/site name OR UNCERTAIN: option A | option B>\n"
-                            "TYPE: <game / browser / IDE / chat app / video / other>\n"
-                            "EVIDENCE: <2-5 short bullet-like clauses with quoted visible text + HUD/UI positions>\n"
-                            "SCENE: <1-3 short sentences about current action/context>\n"
-                            "CONFIDENCE: <0.00-1.00>\n"
-                            "Rules: Wrong IDs are worse than uncertainty. Only name a title if visible text/logo/HUD strongly supports it. "
-                            "For similar games, explicitly compare cues (camera perspective, minimap/crosshair, ability bar geometry). "
-                            "Do not invent off-screen details."
-                        )
+                    uq_focus = _vision_user_question_focus_suffix(str(data.get("message") or ""))
+                    lol_vis_align = ""
+                    if kind == "screen" and _lol_spectator:
+                        try:
+                            fn_lo = getattr(_lol_spectator, "lol_vision_alignment_hint", None)
+                            if callable(fn_lo):
+                                _lv = (fn_lo() or "").strip()
+                                if _lv:
+                                    lol_vis_align = "\n\n=== LEAGUE SCREEN PRIORITY ===\n" + _lv + "\n"
+                        except Exception:
+                            lol_vis_align = ""
+                    if _moondream_unified_ollama_chat():
+                        data["_moondream_multimodal_bytes"] = img_bytes
+                        data["_moondream_multimodal_kind"] = kind
+                        uf = (uq_focus or "").strip()
+                        if uf:
+                            data["_moondream_uq_focus"] = uf
+                        if kind == "screen" and (lol_vis_align or "").strip():
+                            data["_moondream_screen_hint"] = lol_vis_align.strip()
                     else:
-                        vp = (
-                            "You are reading ONE camera frame for a live assistant.\n"
-                            "Describe only what is visible: people, pose, clothing colors, background, readable text/signs. "
-                            "Do not invent identity or off-camera context. If faces are unclear, avoid naming individuals. "
-                            "Output 3–7 short sentences, no preamble."
+                        if kind == "screen":
+                            vp = (
+                                "You are reading ONE desktop screen-capture frame for a live assistant. Prioritize identifying exactly WHAT app/game is on screen.\n"
+                                "Return this exact structure:\n"
+                                "IDENTITY: <exact app/game/site name OR UNCERTAIN: option A | option B>\n"
+                                "TYPE: <game / browser / IDE / chat app / video / other>\n"
+                                "EVIDENCE: <2-5 short bullet-like clauses with quoted visible text + HUD/UI positions>\n"
+                                "SCENE: <1-3 short sentences about current action/context>\n"
+                                "CONFIDENCE: <0.00-1.00>\n"
+                                "Rules: Wrong IDs are worse than uncertainty. Only name a title if visible text/logo/HUD strongly supports it. "
+                                "For similar games, explicitly compare cues (camera perspective, minimap/crosshair, ability bar geometry). "
+                                "If a USER QUESTION block appears below, bias EVIDENCE and SCENE toward answering it before generic summary. "
+                                "Do not invent off-screen details."
+                                + lol_vis_align
+                                + uq_focus
+                            )
+                        else:
+                            vp = (
+                                "You are reading ONE camera frame for a live assistant.\n"
+                                "Describe only what is visible: people, pose, clothing colors, background, readable text/signs. "
+                                "If a USER QUESTION block appears below, focus the description on answering it using visible cues. "
+                                "Do not invent identity or off-camera context. If faces are unclear, avoid naming individuals. "
+                                "Output 3–7 short sentences, no preamble."
+                                + uq_focus
+                            )
+                        # Keep live chat responsive: vision is best-effort and must not stall voice replies.
+                        vs = _vision_describe_image(
+                            img_bytes,
+                            prompt=vp,
+                            timeout=max(8, min(120, int(OLLAMA_VISION_TIMEOUT))),
+                            wait_for_lock=False,
                         )
-                    # Keep live chat responsive: vision is best-effort and must not stall voice replies.
-                    vs = _vision_describe_image(
-                        img_bytes,
-                        prompt=vp,
-                        timeout=max(8, min(120, int(OLLAMA_VISION_TIMEOUT))),
-                        wait_for_lock=False,
-                    )
-                    if vs:
-                        vs = str(vs).strip()
                         if vs:
-                            vs = vs[:2400]
-                            ps = data.get("page_state") if isinstance(data.get("page_state"), dict) else {}
-                            ps["vision_context"] = {
-                                "active": True,
-                                "source": kind or "camera",
-                                "summary": vs,
-                            }
-                            # When live vision is active, suppress unrelated LoL auto-context for this turn.
-                            data["suppress_lol_context"] = True
-                            data["page_state"] = ps
-                            data["vision_context"] = ps["vision_context"]
-                            # Keep /api/camera/status + camera_see aligned with what VRM sent on this chat turn.
-                            with _camera_lock:
-                                _camera_last_result = {
-                                    "vision_summary": vs,
-                                    "summary": vs,
-                                    "face_count": 0,
-                                    "objects": [],
-                                }
-                                _last_web_vision_context = {
-                                    "summary": vs,
+                            vs = str(vs).strip()
+                            if vs:
+                                vs = vs[:2400]
+                                ps = data.get("page_state") if isinstance(data.get("page_state"), dict) else {}
+                                ps["vision_context"] = {
+                                    "active": True,
                                     "source": kind or "camera",
-                                    "ts": time.time(),
+                                    "summary": vs,
                                 }
+                                data["page_state"] = ps
+                                data["vision_context"] = ps["vision_context"]
+                                # Keep /api/camera/status + camera_see aligned with what VRM sent on this chat turn.
+                                with _camera_lock:
+                                    _camera_last_result = {
+                                        "vision_summary": vs,
+                                        "summary": vs,
+                                        "face_count": 0,
+                                        "objects": [],
+                                    }
+                                    _last_web_vision_context = {
+                                        "summary": vs,
+                                        "source": kind or "camera",
+                                        "ts": time.time(),
+                                    }
     except Exception:
         pass
     # If this turn did not get a fresh frame (transient capture failure) but media is still active, reuse recent vision.
     try:
         ms0 = data.get("media_state") if isinstance(data.get("media_state"), dict) else {}
         vc0 = data.get("vision_context") if isinstance(data.get("vision_context"), dict) else {}
-        if bool(ms0.get("active")) and not (
-            vc0.get("active") and str(vc0.get("summary") or "").strip()
+        if (
+            bool(ms0.get("active"))
+            and not data.get("_moondream_multimodal_bytes")
+            and not (vc0.get("active") and str(vc0.get("summary") or "").strip())
         ):
             with _camera_lock:
                 snap = _last_web_vision_context
@@ -17584,13 +17891,42 @@ def api_chat():
         ms = data.get("media_state") if isinstance(data.get("media_state"), dict) else {}
         if ms and bool(ms.get("active")):
             mtype = str(ms.get("type") or "camera").strip().lower() or "camera"
+            src_plain = (
+                "desktop screen share (not the webcam)"
+                if mtype == "screen"
+                else "webcam/camera"
+                if mtype == "camera"
+                else mtype.replace("_", " ")
+            )
+            mm_turn = bool(data.get("_moondream_multimodal_bytes"))
+            unified_md = _moondream_unified_ollama_chat()
+            # Moondream gets pixels via `images` on /api/chat only when `_moondream_multimodal_bytes` is set.
+            # If we kept the old "vision text absent → say not decoded" rule, she'd repeat that every turn—there is no text summary for multimodal.
+            if unified_md:
+                vision_rule = (
+                    (
+                        "A JPEG snapshot is attached to this chat turn—answer using what you see in it plus their words. "
+                        "Stay in Luna's persona.\n"
+                    )
+                    if mm_turn
+                    else (
+                        "Live feed is marked on but **no snapshot image was attached to this message** (intermittent capture). "
+                        "Do not claim you see the frame or cite on-screen pixels; keep chatting normally or ask them to try again "
+                        "so the next send includes a frame.\n"
+                    )
+                )
+            else:
+                vision_rule = (
+                    "When [Live vision context] appears below, treat it as ground truth from their "
+                    f"{src_plain}. If that block is missing for this message, you only know the feed is on—you "
+                    "do not have pixel detail here—do not invent what's on screen.\n"
+                )
             msg = (
                 f"[Live media mode]\n"
                 f"active=true; source={mtype}\n"
                 f"[Rule]\n"
-                f"A live {mtype} feed is selected. When [Live vision context] appears below, use it as shared grounding for this turn "
-                f"(no need for vision-themed questions). If vision text is absent, say the feed is on but the latest frame "
-                f"was not decoded yet.\n"
+                f"The user has selected: **{src_plain}**. Describe it ONLY that way—never call screen share a \"camera\" or \"webcam\". "
+                f"{vision_rule}"
                 f"[User message]\n{msg}"
             )
     except Exception:
@@ -17599,7 +17935,7 @@ def api_chat():
     # user turn text so the active chat model cannot miss visual context.
     try:
         vc = data.get("vision_context") if isinstance(data.get("vision_context"), dict) else {}
-        if vc and bool(vc.get("active")):
+        if vc and bool(vc.get("active")) and not data.get("_moondream_multimodal_bytes"):
             src = str(vc.get("source") or "camera").strip().lower() or "camera"
             vsum = str(vc.get("summary") or "").strip()
             if vsum:
@@ -17663,12 +17999,13 @@ def api_chat():
                     f"[Live vision context — {src}]\n"
                     f"{vsum[:2400]}\n"
                     f"[Interpretation rule]\n"
-                    f"Treat the vision block as ground truth for what is on screen. If it says UNCERTAIN between games/apps, "
+                    f"The block above is a precise, model-generated read of ONE current frame (not you guessing from memory). "
+                    f"Treat it as primary ground truth for what is on camera/screen. If it says UNCERTAIN between games/apps, "
                     f"do not override it with a single confident guess—reflect the uncertainty. "
                     f"Use the IDENTITY and CONFIDENCE fields when the user cares what is on screen. "
                     f"{direct_vision_rule} "
                     f"{gameplay_feedback_rule} "
-                    f"Prioritize this over unrelated telemetry. If something is still unclear, say so.\n"
+                    f"Prioritize this over unrelated telemetry. Stay in Luna's persona. If something is still unclear, say so.\n"
                     f"[User message]\n{msg}"
                 )
     except Exception:
@@ -18860,27 +19197,47 @@ async def on_message(message: discord.Message):
             f"Tone roughness (ZCR): {zcr}\n\n"
             f"User transcript: {text}"
         )
-    history = await asyncio.to_thread(get_recent_conversation, scope, 30)
-    history = _compact_history(history, fast=_cf)
+    _df = _discord_chat_prompt_fast()
+    _hist_n = _discord_chat_history_limit() if _df else 30
+    history = await asyncio.to_thread(get_recent_conversation, scope, _hist_n)
+    history = _discord_filter_error_history(history)
+    history = _compact_history(history, fast=(_df or _cf))
+    history = _discord_trim_chat_messages(history) if _df else history
     system = await asyncio.to_thread(
         _prepare_main_chat_system,
         scope,
         chat_text,
-        fast=_cf,
+        fast=(_df or _cf),
         force_stream_mode=_stream_mode_env_on(),
     )
+    disc_model = _discord_ollama_chat_model()
     try:
         reply = await asyncio.to_thread(
-            lambda: ollama_chat(
+            lambda dm=disc_model: ollama_chat(
                 chat_text,
                 system=system,
                 scope=scope,
                 history=history,
-                model=OLLAMA_CHAT,
-                compact=_cf,
+                model=dm,
+                compact=(_df or _cf),
             )
         )
+        if _discord_ollama_reply_broken(reply):
+            fb = _discord_chat_fallback_model(disc_model)
+            if fb:
+                reply = await asyncio.to_thread(
+                    lambda m=fb: ollama_chat(
+                        chat_text,
+                        system=system,
+                        scope=scope,
+                        history=history,
+                        model=m,
+                        compact=True,
+                    )
+                )
         if not reply:
+            reply = COMMAND_ONLY
+        elif _discord_ollama_reply_broken(reply):
             reply = COMMAND_ONLY
         elif reply.startswith("Ollama offline"):
             low_reply = reply.lower()
@@ -18900,8 +19257,8 @@ async def on_message(message: discord.Message):
             pass
     threading.Thread(target=_discord_post_memory, daemon=True).start()
 
-    await message.reply(f"{mention} {reply}")
-    if reply and reply != COMMAND_ONLY:
+    await _discord_reply_split(message, reply, prefix=mention)
+    if reply and reply != COMMAND_ONLY and not _discord_reply_is_error_tts(reply):
         _schedule_discord_vc_tts_reply(message, reply)
         _schedule_discord_file_tts(message, reply)
     await bot.process_commands(message)

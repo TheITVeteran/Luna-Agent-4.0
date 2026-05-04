@@ -3028,10 +3028,26 @@ async function sendMessage() {
   inputEl.placeholder = defaultPlaceholder;
   inputEl.style.height = 'auto';
 
+  let liveVisionFrame = null;
+  let liveVisionMediaState = null;
+  if (!hasImage && cameraStream && visionSource) {
+    liveVisionFrame = await captureLiveVisionFrameForChat(
+      visionSource === 'screen' ? 960 : 768,
+      visionSource === 'screen' ? 0.78 : 0.72
+    );
+    liveVisionMediaState = {
+      active: true,
+      type: visionSource === 'screen' ? 'screen' : 'camera',
+      mobile_device: false,
+      website_embed: false
+    };
+  }
+
   const isShadow = /^shadow[,\s]/i.test(msg);
   document.getElementById('stat-mode').textContent = isShadow ? 'SHADOW' : 'LUNA';
 
-  if (msg) appendMsg('user', msg + (hasImage ? '\n[Image attached]' : ''));
+  const visionUserSuffix = hasImage ? '\n[Image attached]' : (liveVisionMediaState ? '\n[Live vision]' : '');
+  if (msg) appendMsg('user', msg + visionUserSuffix);
   else appendMsg('user', '[Image attached]');
   showThinking();
 
@@ -3042,6 +3058,11 @@ async function sendMessage() {
     if (hasImage) {
       body.vision_frame = pendingChatVisionFrame;
       body.media_state = { active: true, type: 'upload', mobile_device: false, website_embed: false };
+    } else if (liveVisionMediaState) {
+      body.media_state = liveVisionMediaState;
+      if (liveVisionFrame && liveVisionFrame.b64) {
+        body.vision_frame = liveVisionFrame;
+      }
     }
     const res = await fetch('/api/chat', {
       method: 'POST',
@@ -3519,6 +3540,44 @@ function getCurrentCameraFrameBase64() {
       };
       r.readAsDataURL(blob);
     }, 'image/jpeg', 0.85);
+  });
+}
+
+/** JPEG frame + base64 payload for `/api/chat` `vision_frame` (matches manual upload shape). */
+async function captureLiveVisionFrameForChat(maxW, quality) {
+  maxW = maxW || 768;
+  if (quality == null) quality = 0.72;
+  if (!cameraStream || !visionSource || !cameraCaptureCanvas || !cameraCaptureVideo || !cameraCaptureCtx) {
+    return null;
+  }
+  let vw = cameraCaptureVideo.videoWidth;
+  let vh = cameraCaptureVideo.videoHeight;
+  const deadline = Date.now() + 800;
+  while ((!(vw > 0 && vh > 0)) && Date.now() < deadline) {
+    await new Promise(function(r) { setTimeout(r, 40); });
+    vw = cameraCaptureVideo.videoWidth;
+    vh = cameraCaptureVideo.videoHeight;
+  }
+  if (!(vw > 0 && vh > 0)) return null;
+  const scale = Math.min(1, maxW / vw);
+  const w = Math.max(64, Math.round(vw * scale));
+  const h = Math.max(64, Math.round(vh * scale));
+  cameraCaptureCanvas.width = w;
+  cameraCaptureCanvas.height = h;
+  cameraCaptureCtx.drawImage(cameraCaptureVideo, 0, 0, w, h);
+  return new Promise(function(resolve) {
+    cameraCaptureCanvas.toBlob(function(blob) {
+      if (!blob) { resolve(null); return; }
+      const r = new FileReader();
+      r.onload = function() {
+        var dataUrl = String(r.result || '');
+        var idx = dataUrl.indexOf(',');
+        var b64 = idx >= 0 ? dataUrl.slice(idx + 1).trim() : '';
+        resolve(b64 ? { mime: 'image/jpeg', b64: b64 } : null);
+      };
+      r.onerror = function() { resolve(null); };
+      r.readAsDataURL(blob);
+    }, 'image/jpeg', quality);
   });
 }
 
