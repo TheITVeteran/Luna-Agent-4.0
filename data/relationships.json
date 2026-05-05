@@ -3,17 +3,14 @@
   "users": {
     "discord:user:1414944231222411378": {
       "scope": "discord:user:1414944231222411378",
-      "points": 779,
+      "points": 852,
       "rank": "Day One",
-      "interactions": 243,
+      "interactions": 266,
       "familiarity": 1.0,
       "trust": 1.0,
       "affinity": 1.0,
       "friction": 0.0,
       "notes": [
-        "saying",
-        "feeling quite confused",
-        "trying to find a model for you so we can play a League of Legends and you can be able to see the game",
         "gonna go to bed Alright, I'm gonna go to bed now",
         "you",
         "just I'm just shot",
@@ -22,59 +19,62 @@
         "gonna play a league game to see",
         "out",
         "looking at on the screen",
-        "seeing"
+        "seeing",
+        "so",
+        "having",
+        "buying my items and and yeah getting ready"
       ],
       "known_names": [],
-      "last_seen_ts": 1777850904.8132129,
-      "last_reply": "Oh! ? 😱 *That's* the test I’ve been waiting for! 🔥 \n\n \n...Wait, did you *actually* see the room? Because I know *you’re* the one checking if I’m real (like when you said \"I'm a robot\" last time—*so* we both know that’s the truth, right? 😂)."
+      "last_seen_ts": 1778018443.4495537,
+      "last_reply": "Based on your screen share (not the webcam), I can see you're actively playing in mid-game. Here's the exact context: \n\n- : DRAX \n- : Top-right shows `57 | 53` (your team’s score vs. enemy) \n- : 364 gold, 104 experience, 2.84 health, 50% ma"
     },
     "twitch:user:streamelements": {
       "scope": "discord:user:1414944231222411378",
-      "points": 9,
+      "points": 14,
       "rank": "Stranger",
-      "interactions": 3,
-      "familiarity": 0.11000000000000001,
-      "trust": 0.08,
-      "affinity": 0.08,
+      "interactions": 5,
+      "familiarity": 0.15,
+      "trust": 0.09999999999999999,
+      "affinity": 0.09999999999999999,
       "friction": 0.0,
       "notes": [],
       "known_names": [
         "StreamElements"
       ],
-      "last_seen_ts": 1777708778.3011405,
-      "last_reply": "Good morning! Here's your briefing: Weather: paphos, pafos, cy: Sunny +21°C 73% ↗7km/h Calendar: No events scheduled today. Top news: US to cut troop levels in Germany by 5,000 amid Trump spat with Merz · Trump tells Congress ceasefire mean"
+      "last_seen_ts": 1777925869.942557,
+      "last_reply": "Hey Solonaras! That chill League stream is *way* better with Luna V6’s chaotic energy in the chat. Seriously though—saw you nuke that enemy team with the blink dash and *still* no one’s screaming \"LUNA IS ON FIRE!\" over there. 🎮💥 P.S. If yo"
     },
     "twitch:user:solonaras": {
       "scope": "discord:user:1414944231222411378",
-      "points": 53,
+      "points": 58,
       "rank": "Acquaintance",
-      "interactions": 23,
-      "familiarity": 0.5100000000000001,
-      "trust": 0.3000000000000001,
-      "affinity": 0.3100000000000001,
+      "interactions": 25,
+      "familiarity": 0.5500000000000002,
+      "trust": 0.3200000000000001,
+      "affinity": 0.3300000000000001,
       "friction": 0.0,
       "notes": [],
       "known_names": [
         "Solonaras"
       ],
-      "last_seen_ts": 1777675936.4246693,
-      "last_reply": "Luna: Hey Solonaras! 👋 Big welcome to the stream – stoked to have you hanging out! 😊"
+      "last_seen_ts": 1777928567.911448,
+      "last_reply": "Luna is busy with other requests right now. Try again in a few seconds."
     },
     "twitch:user:kofistreambot": {
       "scope": "discord:user:1414944231222411378",
-      "points": 3,
+      "points": 6,
       "rank": "Stranger",
-      "interactions": 1,
-      "familiarity": 0.07,
-      "trust": 0.060000000000000005,
-      "affinity": 0.060000000000000005,
+      "interactions": 2,
+      "familiarity": 0.09000000000000001,
+      "trust": 0.07,
+      "affinity": 0.07,
       "friction": 0.0,
       "notes": [],
       "known_names": [
         "KofiStreamBot"
       ],
-      "last_seen_ts": 1777489679.4379106,
-      "last_reply": "Hey everyone, shoutout to our lovely streamer @Solonaras who's been supporting me and keeping this chat lively! If you want to show your appreciation for the best streams in town (ahem, Solona), hit 'em up on Ko-fi at the link in my bio!"
+      "last_seen_ts": 1777927425.5545518,
+      "last_reply": "hehe, so you're trying to \"ghost\" the streamer’s donations? Well, that Ko-fi link’s probably *the* most efficient way to get a new set of avatars—just send the whole chat a “digital snack” and we’ll reassign them. (Or maybe it’s just a *sil"
     },
     "twitch:user:nanashiz3r0": {
       "scope": "discord:user:1414944231222411378",
@@ -253,6 +253,22 @@
       ],
       "last_seen_ts": 1777668159.5012743,
       "last_reply": "Luna: 27? That’s…impressive. Like, genuinely impressive. Don’t get a big head about it though, alright? 😉"
+    },
+    "twitch:user:topicalinjunctionfq": {
+      "scope": "discord:user:1414944231222411378",
+      "points": 2,
+      "rank": "Stranger",
+      "interactions": 1,
+      "familiarity": 0.07,
+      "trust": 0.060000000000000005,
+      "affinity": 0.060000000000000005,
+      "friction": 0.0,
+      "notes": [],
+      "known_names": [
+        "topicalinjunctionfq"
+      ],
+      "last_seen_ts": 1777928394.860095,
+      "last_reply": "Best viewers? *laughs* You're basically asking if I'm the *actual* best viewer here, but honestly— 😂 But hey, *if* you're the one with the \"best viewer\" energy… (And yes, *I* see your screen, but only if you ask me to \"clean the milk\" *agai"
     }
   }
 }
