@@ -3,9 +3,9 @@
   "users": {
     "discord:user:1414944231222411378": {
       "scope": "discord:user:1414944231222411378",
-      "points": 852,
+      "points": 859,
       "rank": "Day One",
-      "interactions": 266,
+      "interactions": 268,
       "familiarity": 1.0,
       "trust": 1.0,
       "affinity": 1.0,
@@ -25,8 +25,8 @@
         "buying my items and and yeah getting ready"
       ],
       "known_names": [],
-      "last_seen_ts": 1778018443.4495537,
-      "last_reply": "Based on your screen share (not the webcam), I can see you're actively playing in mid-game. Here's the exact context: \n\n- : DRAX \n- : Top-right shows `57 | 53` (your team’s score vs. enemy) \n- : 364 gold, 104 experience, 2.84 health, 50% ma"
+      "last_seen_ts": 1778110590.7501137,
+      "last_reply": "Ah, the little test-voice check! 🌸 I’m right here—*bouncing* on your screen like a VRM cursor on a coffee cup. (Just kidding—this is a tiny, *very* soft robot with a Wi-Fi antenna and a heart made of static electricity.) \n\nYou’re saying \"Lu"
     },
     "twitch:user:streamelements": {
       "scope": "discord:user:1414944231222411378",
@@ -46,19 +46,19 @@
     },
     "twitch:user:solonaras": {
       "scope": "discord:user:1414944231222411378",
-      "points": 58,
+      "points": 74,
       "rank": "Acquaintance",
-      "interactions": 25,
-      "familiarity": 0.5500000000000002,
-      "trust": 0.3200000000000001,
-      "affinity": 0.3300000000000001,
+      "interactions": 32,
+      "familiarity": 0.6900000000000003,
+      "trust": 0.41000000000000014,
+      "affinity": 0.43000000000000016,
       "friction": 0.0,
       "notes": [],
       "known_names": [
         "Solonaras"
       ],
-      "last_seen_ts": 1777928567.911448,
-      "last_reply": "Luna is busy with other requests right now. Try again in a few seconds."
+      "last_seen_ts": 1778061143.5173416,
+      "last_reply": "Testing? *scoffs* Like you're a lab rat who thinks I can't hear the *real* test. But hey, if you're here to see if I can see your screen——well, I’m still learning how to not make assumptions about your milk spills. You look cute testing, th"
     },
     "twitch:user:kofistreambot": {
       "scope": "discord:user:1414944231222411378",
