@@ -1,6 +1,6 @@
 {
-  "obtained_at": 1778160354,
-  "expires_in": 14050,
+  "obtained_at": 1778188985,
+  "expires_in": 13283,
   "scope": [
     "channel:manage:broadcast",
     "channel:manage:polls",
@@ -8,7 +8,7 @@
     "moderator:read:followers"
   ],
   "token_type": "bearer",
-  "access_token": "9slfic8mmoaj7pj9saoubzor67clu6",
+  "access_token": "i83p0vzyxbw7nki503f7q3eup5fpz7",
   "refresh_token": "90z1wz46qn184fmn398kmzkfkyfxvjwp5jn16hkxqaiunou5x4",
   "broadcaster": {
     "id": "36782091",

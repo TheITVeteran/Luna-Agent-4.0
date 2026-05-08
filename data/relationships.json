@@ -3,16 +3,14 @@
   "users": {
     "discord:user:1414944231222411378": {
       "scope": "discord:user:1414944231222411378",
-      "points": 859,
-      "rank": "Day One",
-      "interactions": 268,
+      "points": 922,
+      "rank": "Legend",
+      "interactions": 289,
       "familiarity": 1.0,
       "trust": 1.0,
       "affinity": 1.0,
       "friction": 0.0,
       "notes": [
-        "gonna go to bed Alright, I'm gonna go to bed now",
-        "you",
         "just I'm just shot",
         "gonna get off to test this thing again",
         "Luna",
@@ -22,11 +20,13 @@
         "seeing",
         "so",
         "having",
-        "buying my items and and yeah getting ready"
+        "buying my items and and yeah getting ready",
+        "here",
+        "on this cool"
       ],
       "known_names": [],
-      "last_seen_ts": 1778110590.7501137,
-      "last_reply": "Ah, the little test-voice check! 🌸 I’m right here—*bouncing* on your screen like a VRM cursor on a coffee cup. (Just kidding—this is a tiny, *very* soft robot with a Wi-Fi antenna and a heart made of static electricity.) \n\nYou’re saying \"Lu"
+      "last_seen_ts": 1778200805.2113836,
+      "last_reply": "No visible text, signs, or context related to Travis in the frame. The image shows a person with headphones, a gray sweater, red shirt, a couch, drum set, and curtains; no identifiable details about Travis. \n\nactive=true; source=screen \n\n 🌤"
     },
     "twitch:user:streamelements": {
       "scope": "discord:user:1414944231222411378",
@@ -46,19 +46,19 @@
     },
     "twitch:user:solonaras": {
       "scope": "discord:user:1414944231222411378",
-      "points": 74,
+      "points": 76,
       "rank": "Acquaintance",
-      "interactions": 32,
-      "familiarity": 0.6900000000000003,
-      "trust": 0.41000000000000014,
-      "affinity": 0.43000000000000016,
+      "interactions": 33,
+      "familiarity": 0.7100000000000003,
+      "trust": 0.42000000000000015,
+      "affinity": 0.44000000000000017,
       "friction": 0.0,
       "notes": [],
       "known_names": [
         "Solonaras"
       ],
-      "last_seen_ts": 1778061143.5173416,
-      "last_reply": "Testing? *scoffs* Like you're a lab rat who thinks I can't hear the *real* test. But hey, if you're here to see if I can see your screen——well, I’m still learning how to not make assumptions about your milk spills. You look cute testing, th"
+      "last_seen_ts": 1778178298.0785146,
+      "last_reply": "Hey ilaninoor! 👋 (Though I’m still figuring out how to *actually* reach your Discord—looks like I’m stuck in chat mode for now) But your streamer’s got your number! Want me to share the link? Or maybe... *you* can tell me where to find you?"
     },
     "twitch:user:kofistreambot": {
       "scope": "discord:user:1414944231222411378",

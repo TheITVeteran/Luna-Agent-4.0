@@ -29,7 +29,12 @@ from luna_memory import (get_memory_prompt, get_core_memories,
     clear_memories, clear_all_memories, merge_memories)
 from luna_profile import (get_profile_prompt, get_profile, set_profile_field,
     clear_profile, PROFILE_FIELDS, merge_profiles)
-from luna_conversation import get_recent_conversation, append_exchange, merge_conversations
+from luna_conversation import (
+    get_recent_conversation, append_exchange, merge_conversations,
+    get_rolling_summary, get_rolling_summary_state, set_rolling_summary,
+    clear_rolling_summary, list_rolling_summary_scopes,
+    ROLLING_SUMMARY_MAX_CHARS,
+)
 from luna_anamnesis import get_associative_memory_context
 import luna_social
 try:
@@ -182,6 +187,84 @@ def _discord_trim_chat_messages(messages: list[dict] | None) -> list[dict]:
             mm["content"] = c[: cap - 3].rstrip() + "..."
         out.append(mm)
     return out
+
+
+# ── Voice (wake-word + mic) pipeline knobs ────────────────────────────────────
+# Replaces the old fixed-5s recording with VAD-gated capture, optional speculative
+# LLM-on-stable-partial firing, and sentence-buffered streaming TTS. All default ON
+# but every layer can be turned off independently via env.
+def _voice_vad_enabled() -> bool:
+    return _env("LUNA_VOICE_VAD", "1").strip().lower() not in ("0", "false", "no", "off")
+
+
+def _voice_prefire_enabled() -> bool:
+    return _env("LUNA_VOICE_PREFIRE", "1").strip().lower() not in ("0", "false", "no", "off")
+
+
+def _voice_stream_tts_enabled() -> bool:
+    return _env("LUNA_VOICE_STREAM_TTS", "1").strip().lower() not in ("0", "false", "no", "off")
+
+
+def _voice_vad_tail_ms() -> int:
+    try:
+        v = int((_env("LUNA_VOICE_VAD_TAIL_MS", "350") or "350").strip())
+    except Exception:
+        v = 350
+    return max(120, min(2500, v))
+
+
+def _voice_vad_max_s() -> float:
+    try:
+        v = float((_env("LUNA_VOICE_VAD_MAX_S", "8") or "8").strip())
+    except Exception:
+        v = 8.0
+    return max(2.0, min(30.0, v))
+
+
+def _voice_vad_min_s() -> float:
+    try:
+        v = float((_env("LUNA_VOICE_VAD_MIN_S", "0.6") or "0.6").strip())
+    except Exception:
+        v = 0.6
+    return max(0.2, min(5.0, v))
+
+
+def _voice_partial_interval_ms() -> int:
+    try:
+        v = int((_env("LUNA_VOICE_PARTIAL_INTERVAL_MS", "900") or "900").strip())
+    except Exception:
+        v = 900
+    return max(300, min(5000, v))
+
+
+def _voice_sentence_min_chars() -> int:
+    try:
+        v = int((_env("LUNA_VOICE_SENTENCE_MIN_CHARS", "40") or "40").strip())
+    except Exception:
+        v = 40
+    return max(15, min(400, v))
+
+
+def _voice_tts_parallel() -> int:
+    try:
+        v = int((_env("LUNA_VOICE_TTS_PARALLEL", "2") or "2").strip())
+    except Exception:
+        v = 2
+    return max(1, min(6, v))
+
+
+def _voice_vad_on_threshold() -> float:
+    try:
+        return float((_env("LUNA_VOICE_VAD_ON_THRESHOLD", "350") or "350").strip())
+    except Exception:
+        return 350.0
+
+
+def _voice_vad_off_threshold() -> float:
+    try:
+        return float((_env("LUNA_VOICE_VAD_OFF_THRESHOLD", "200") or "200").strip())
+    except Exception:
+        return 200.0
 
 
 _DISCORD_ERR_HISTORY_SNIPPETS = (
@@ -430,6 +513,16 @@ LUNA_PUBLISH_ANNOUNCE_TWITCH_LIVE_FACEBOOK = _env("LUNA_PUBLISH_ANNOUNCE_TWITCH_
     "1", "true", "yes", "on",
 )
 LUNA_PUBLISH_ANNOUNCE_FB_MESSAGE_TEMPLATE = _env("LUNA_PUBLISH_ANNOUNCE_FB_MESSAGE_TEMPLATE", "").strip()
+# YouTube uploads → cross-post to X / Facebook (same Atom RSS detection as Discord announce).
+# Templates support placeholders: {title} {url} {hint}.
+LUNA_PUBLISH_ANNOUNCE_YOUTUBE_X = _env("LUNA_PUBLISH_ANNOUNCE_YOUTUBE_X", "0").strip().lower() in (
+    "1", "true", "yes", "on",
+)
+LUNA_PUBLISH_ANNOUNCE_YOUTUBE_FACEBOOK = _env("LUNA_PUBLISH_ANNOUNCE_YOUTUBE_FACEBOOK", "0").strip().lower() in (
+    "1", "true", "yes", "on",
+)
+LUNA_PUBLISH_ANNOUNCE_YT_X_TEMPLATE = _env("LUNA_PUBLISH_ANNOUNCE_YT_X_TEMPLATE", "").strip()
+LUNA_PUBLISH_ANNOUNCE_YT_FB_TEMPLATE = _env("LUNA_PUBLISH_ANNOUNCE_YT_FB_TEMPLATE", "").strip()
 _fb_for_raw = (_env("LUNA_PUBLISH_ANNOUNCE_FB_FOR_TWITCH_LOGINS", "") or "").strip()
 if _fb_for_raw:
     _PUBLISH_ANNOUNCE_FB_TWITCH_LOGINS: frozenset[str] = frozenset(
@@ -438,9 +531,16 @@ if _fb_for_raw:
 else:
     _ibl_fb = (TWITCH_BROADCASTER_LOGIN or TWITCH_CHANNEL or "").strip().lstrip("#").lower()
     _PUBLISH_ANNOUNCE_FB_TWITCH_LOGINS = frozenset({_ibl_fb}) if _ibl_fb else frozenset()
+# Loop runs if any output is configured (Discord channels, Twitch→Facebook, or YouTube→X/Facebook).
+_PUBLISH_ANNOUNCE_HAS_OUTPUT = bool(
+    _PUBLISH_ANNOUNCE_DISCORD_CHANNEL_IDS
+    or LUNA_PUBLISH_ANNOUNCE_TWITCH_LIVE_FACEBOOK
+    or LUNA_PUBLISH_ANNOUNCE_YOUTUBE_X
+    or LUNA_PUBLISH_ANNOUNCE_YOUTUBE_FACEBOOK
+)
 _PUBLISH_ANNOUNCE_CONFIGURED = bool(
     LUNA_PUBLISH_ANNOUNCE_ENABLED
-    and _PUBLISH_ANNOUNCE_DISCORD_CHANNEL_IDS
+    and _PUBLISH_ANNOUNCE_HAS_OUTPUT
     and (_PUBLISH_ANNOUNCE_YOUTUBE_IDS or _PUBLISH_ANNOUNCE_YOUTUBE_RSS or _PUBLISH_ANNOUNCE_TWITCH_LOGINS)
     and _poll_publish_announce is not None
 )
@@ -4537,20 +4637,266 @@ def _summarize(messages: list[dict]) -> str:
     except Exception:
         return ""
 
-def _compact_history(messages: list[dict] | None, *, fast: bool = False) -> list[dict]:
-    """Trim history for context window. If *fast*, never call the summarizer LLM (saves a full round-trip)."""
+
+# ── Rolling per-scope summary (long-term conversation memory) ────────────────
+# `_compact_history` only sees the last ~30 messages of a scope. Anything older
+# is invisible to the model — that's why long-term Discord users feel like Luna
+# develops amnesia. The rolling summary fixes that: a persistent per-scope
+# digest that grows incrementally as older messages roll out of the prompt
+# window. Lives in ``data/conversation_summaries.json``; updated in the same
+# background thread that already runs `_capture_memory` / `_capture_profile`.
+import hashlib as _hashlib  # noqa: E402  (deferred import keeps module-load order intact)
+
+
+def _rs_msg_hash(msg: dict) -> str:
+    """Stable per-message identity (role+content). Used to skip messages already
+    incorporated into the rolling summary — survives conversation truncation."""
+    if not isinstance(msg, dict):
+        return ""
+    role = (msg.get("role") or "").strip().lower()
+    content = (msg.get("content") or "").strip()
+    if not role or not content:
+        return ""
+    return _hashlib.sha1(f"{role}\x1f{content}".encode("utf-8", errors="replace")).hexdigest()
+
+
+def _rs_pending_messages(messages: list[dict], *, last_hash: str, keep_recent: int) -> list[dict]:
+    """Return the older messages that should be folded into the rolling summary.
+
+    Skips everything up to and including the message whose hash matches
+    `last_hash` (already summarized in a prior turn), and excludes the most
+    recent `keep_recent` messages (still raw in the prompt window).
+    """
     if not messages:
         return []
+    start_idx = 0
+    if last_hash:
+        for i, m in enumerate(messages):
+            if _rs_msg_hash(m) == last_hash:
+                start_idx = i + 1
+                break
+    if start_idx >= len(messages):
+        return []
+    end_idx = max(start_idx, len(messages) - keep_recent)
+    return list(messages[start_idx:end_idx])
+
+
+def _rs_format_messages(messages: list[dict], *, max_per_msg: int = 280) -> str:
+    """Compact User:/Luna: transcript for the merge prompt."""
+    out: list[str] = []
+    for m in messages:
+        if not isinstance(m, dict):
+            continue
+        role = (m.get("role") or "").strip().lower()
+        content = (m.get("content") or "").strip()
+        if not content:
+            continue
+        speaker = "User" if role == "user" else "Luna"
+        snippet = re.sub(r"\s+", " ", content)[:max_per_msg]
+        out.append(f"{speaker}: {snippet}")
+    return "\n".join(out)
+
+
+def _rs_merge_via_llm(prior_summary: str, new_block: str) -> str:
+    """LLM-merge the prior digest with new exchanges into one coherent summary."""
+    if not new_block.strip():
+        return prior_summary
+    prior = (prior_summary or "").strip()
+    sys_prompt = (
+        "You maintain a long-term running summary of a conversation between "
+        "Luna (the assistant) and a single user. Merge the prior summary with "
+        "the new exchanges into ONE updated summary in 6-12 sentences max. "
+        "Preserve concrete facts the user revealed about themselves (name, "
+        "preferences, projects, goals, opinions, recurring themes). Drop "
+        "small-talk and repetition. Write in third-person ('The user…' / "
+        "'Luna…'). No bullet points, no headers — flowing prose only."
+    )
+    user_prompt = (
+        f"PRIOR SUMMARY (may be empty):\n{prior or '(none)'}\n\n"
+        f"NEW EXCHANGES (oldest first):\n{new_block}\n\n"
+        f"Output the updated summary only — no preamble."
+    )
+    try:
+        out = ollama_chat(
+            user_prompt, system=sys_prompt, model=OLLAMA_SMALL, compact=True
+        )
+        out = (out or "").strip()
+        if not out:
+            return prior
+        # Hard cap at the persistence layer's max so we never spill the budget.
+        return out[:ROLLING_SUMMARY_MAX_CHARS]
+    except Exception:
+        return prior
+
+
+def _rs_keep_recent_for_summary() -> int:
+    """How many recent exchanges stay raw in the prompt; older ones get summarized."""
+    try:
+        v = int((_env("LUNA_ROLLING_SUMMARY_KEEP_RECENT", "12") or "12").strip())
+    except Exception:
+        v = 12
+    return max(4, min(40, v))
+
+
+def _rs_min_new_messages() -> int:
+    """Minimum new messages required before we trigger an LLM merge (avoids
+    burning tokens when only one or two messages have rolled past the window)."""
+    try:
+        v = int((_env("LUNA_ROLLING_SUMMARY_MIN_NEW", "4") or "4").strip())
+    except Exception:
+        v = 4
+    return max(1, min(50, v))
+
+
+def _rs_enabled() -> bool:
+    return _env("LUNA_ROLLING_SUMMARY", "1").strip().lower() not in ("0", "false", "no", "off")
+
+
+def _update_rolling_summary(scope: str) -> None:
+    """Fold messages that have rolled past `keep_recent` into the per-scope
+    rolling summary. Safe to call from any thread; cheap when nothing is
+    pending. Designed for the background memory-capture thread."""
+    if not _rs_enabled() or not scope:
+        return
+    try:
+        full = get_recent_conversation(scope, 200)
+    except Exception:
+        return
+    if not full:
+        return
+    state = get_rolling_summary_state(scope)
+    last_hash = state.get("last_user_hash") or ""
+    keep_recent = _rs_keep_recent_for_summary()
+    pending = _rs_pending_messages(full, last_hash=last_hash, keep_recent=keep_recent)
+    if len(pending) < _rs_min_new_messages():
+        return
+    new_block = _rs_format_messages(pending)
+    if not new_block.strip():
+        return
+    merged = _rs_merge_via_llm(state.get("summary") or "", new_block)
+    if not merged or merged == (state.get("summary") or ""):
+        # Even if merge produced nothing useful, advance the cursor so we don't
+        # re-attempt these same messages forever.
+        last_pinned = pending[-1]
+        try:
+            set_rolling_summary(
+                scope, state.get("summary") or "",
+                last_user_hash=_rs_msg_hash(last_pinned),
+                msgs_added=len(pending),
+            )
+        except Exception:
+            pass
+        return
+    last_pinned = pending[-1]
+    try:
+        set_rolling_summary(
+            scope, merged,
+            last_user_hash=_rs_msg_hash(last_pinned),
+            msgs_added=len(pending),
+        )
+    except Exception:
+        pass
+
+
+async def _rolling_summary_backfill_task() -> None:
+    """One-shot startup pass: seed rolling summaries for scopes that already have
+    long histories on disk so users with prior conversations don't have to wait
+    for new messages to roll past the recent window before Luna 'remembers'.
+
+    Iterates every scope with >= ``LUNA_ROLLING_SUMMARY_BACKFILL_MIN`` messages
+    that doesn't yet have a rolling summary, and runs `_update_rolling_summary`
+    with a short async sleep between scopes so we don't hammer the LLM at boot.
+    """
+    if not _rs_enabled():
+        return
+    if _env("LUNA_ROLLING_SUMMARY_BACKFILL", "1").strip().lower() in ("0", "false", "no", "off"):
+        return
+    try:
+        await bot.wait_until_ready()
+    except Exception:
+        pass
+    await asyncio.sleep(45)  # let the rest of startup settle (Whisper, OBS, Twitch, …)
+    try:
+        min_msgs = int((_env("LUNA_ROLLING_SUMMARY_BACKFILL_MIN", "20") or "20").strip())
+    except Exception:
+        min_msgs = 20
+    min_msgs = max(8, min(200, min_msgs))
+    try:
+        from luna_conversation import _load as _conv_load
+    except Exception:
+        return
+    try:
+        existing_summaries = set(list_rolling_summary_scopes())
+    except Exception:
+        existing_summaries = set()
+    try:
+        all_convos = _conv_load()
+    except Exception:
+        return
+    candidates = [
+        scope for scope, msgs in all_convos.items()
+        if isinstance(scope, str) and isinstance(msgs, list)
+        and len(msgs) >= min_msgs and scope not in existing_summaries
+    ]
+    if not candidates:
+        return
+    print(
+        f"[Rolling summary] Backfilling {len(candidates)} scope(s) with >= {min_msgs} msgs (one-shot at boot).",
+        flush=True,
+    )
+    for scope in candidates:
+        try:
+            await asyncio.to_thread(_update_rolling_summary, scope)
+        except Exception as e:
+            print(f"[Rolling summary] Backfill failed for {scope}: {e}", flush=True)
+        await asyncio.sleep(2.0)
+    print("[Rolling summary] Backfill complete.", flush=True)
+
+
+def _rolling_summary_prompt_pair(scope: str) -> list[dict]:
+    """Synthetic (user, assistant) pair injected at the head of the history so
+    the model conditions on the long-term digest. Returns [] when no summary
+    exists for the scope (fresh conversations behave exactly like before)."""
+    if not scope or not _rs_enabled():
+        return []
+    try:
+        s = get_rolling_summary(scope)
+    except Exception:
+        s = ""
+    if not s:
+        return []
+    return [
+        {"role": "user", "content": f"[Memory of earlier conversation with this user]\n{s}"},
+        {"role": "assistant", "content": "Got it — I remember our earlier conversations."},
+    ]
+
+
+def _compact_history(
+    messages: list[dict] | None,
+    *,
+    fast: bool = False,
+    scope: str | None = None,
+) -> list[dict]:
+    """Trim history for context window.
+
+    If *fast*, never call the summarizer LLM (saves a full round-trip).
+    If *scope* is provided AND a rolling summary exists for that scope, the
+    summary is prepended as a synthetic [Memory…] pair so older context stays
+    visible to the model even after it falls outside the recent window.
+    """
+    prefix = _rolling_summary_prompt_pair(scope) if scope else []
+    if not messages:
+        return prefix
     messages = list(messages)
     if len(messages) <= _COMPACT_AT:
-        return messages
+        return prefix + messages
     if fast:
-        return messages[-_KEEP_RECENT:]
+        return prefix + messages[-_KEEP_RECENT:]
     summary = _summarize(messages[:-_KEEP_RECENT])
     recent = messages[-_KEEP_RECENT:]
     if not summary:
-        return recent
-    return [
+        return prefix + recent
+    return prefix + [
         {"role": "user", "content": f"[Summary]: {summary}"},
         {"role": "assistant", "content": "Understood."},
     ] + recent
@@ -4708,23 +5054,28 @@ def _is_gemma4_family_model(model_id: str | None) -> bool:
 
 
 def _strip_emojis_for_tts(text: str) -> str:
-    """Remove emoji codepoints so engines do not speak or garble them."""
+    """Remove emoji / pictograph codepoints so engines do not speak or garble them."""
     if not text:
         return text
     out: list[str] = []
     for ch in text:
         o = ord(ch)
+        # Zero-width joiner, variation selectors, combining keycap.
         if o in (0x200D, 0xFE0F, 0x20E3):
             continue
+        # Skin-tone modifiers.
         if 0x1F3FB <= o <= 0x1F3FF:
             continue
         if (
-            0x1F300 <= o <= 0x1FAFF
-            or 0x2600 <= o <= 0x26FF
-            or 0x2700 <= o <= 0x27BF
-            or 0x1F600 <= o <= 0x1F64F
-            or 0x1F680 <= o <= 0x1F6FF
-            or 0x1F1E6 <= o <= 0x1F1FF
+            0x1F300 <= o <= 0x1FAFF      # symbols & pictographs (incl. supplemental + extended-A)
+            or 0x2600 <= o <= 0x26FF     # misc symbols (☀ ☁ ⚡ ★ ♻)
+            or 0x2700 <= o <= 0x27BF     # dingbats (✂ ✈ ✉ ✨)
+            or 0x2300 <= o <= 0x23FF     # misc tech (⌚ ⌛ ⏰ ⏱)
+            or 0x2B00 <= o <= 0x2BFF     # misc symbols & arrows (⬆ ⬇ ⭐)
+            or 0x2900 <= o <= 0x297F     # supplemental arrows-B
+            or 0x1F600 <= o <= 0x1F64F   # emoticons (😀 😁 😂)
+            or 0x1F680 <= o <= 0x1F6FF   # transport & map (🚀 🚗)
+            or 0x1F1E6 <= o <= 0x1F1FF   # regional indicators (flags)
         ):
             continue
         out.append(ch)
@@ -4733,11 +5084,38 @@ def _strip_emojis_for_tts(text: str) -> str:
     return s
 
 
+# Common ASCII text-emoticons stripped before TTS. Matched only at word boundaries
+# so prose like "ratio: 3:5" or "from a:b mapping" is not affected.
+_TEXT_EMOTICON_RE = re.compile(
+    r"(?<![A-Za-z0-9])"
+    r"(?:"
+    r"[:;=8][\-^']?[\)\(\]\[DPpOo|/\\3*]+"   # :)  :-)  :D  :-P  ;)  =)  8|  :/
+    r"|<\/?3+"                                # <3  </3
+    r"|[xX][DdPp]"                            # xD  XD  xP
+    r"|\^[_.]?\^"                             # ^_^  ^^  ^.^
+    r"|[Tt][_.][Tt]"                          # T_T  T.T
+    r"|[oO0][_.][oO0]"                        # o_o  O.O  0_0
+    r"|>[:;=][\-^']?[\)\(]"                   # >:)  >:(
+    r")"
+    r"(?![A-Za-z0-9])"
+)
+
+
+def _strip_text_emoticons_for_tts(text: str) -> str:
+    """Drop ASCII smileys / kaomoji that would otherwise be read as ‘colon paren’ etc."""
+    if not text:
+        return text
+    return _TEXT_EMOTICON_RE.sub("", text)
+
+
 def _tts_bytes(text: str) -> bytes:
     """Short TTS for Discord VC, reminders, inline replies: Edge (Ava by default) → Fish → gTTS."""
     text = (text or "").strip()[:500]
-    if _is_gemma4_family_model(OLLAMA_CHAT):
-        text = _strip_emojis_for_tts(text)
+    # Strip emojis + ASCII smileys for every engine — Edge/Fish/gTTS otherwise read
+    # them out as "smiling face" / "colon paren" depending on engine.
+    text = _strip_emojis_for_tts(text)
+    text = _strip_text_emoticons_for_tts(text)
+    text = re.sub(r"\s+", " ", text).strip()
     if not text:
         return b""
     b = _edge_tts_bytes(text)
@@ -4885,7 +5263,13 @@ def _clean_for_tts(text: str) -> str:
     text = re.sub(r"`[^`]*`", " ", text)
     text = re.sub(r"<[^>]+>", " ", text)
     text = re.sub(r"<@!?\d+>", "", text)
-    text = re.sub(r"\*\*", "", text)
+    # Drop ALL asterisk runs (markdown bold/italic). Single * was previously kept and
+    # got read literally as "asterisk" by some engines.
+    text = re.sub(r"\*+", "", text)
+    # Underscore emphasis the same way — _word_ should not be spoken with the underscores.
+    text = re.sub(r"(?<!\w)_+|_+(?!\w)", "", text)
+    text = _strip_emojis_for_tts(text)
+    text = _strip_text_emoticons_for_tts(text)
     return re.sub(r"\s+", " ", text).strip()
 
 
@@ -5073,10 +5457,23 @@ def _ensure_tts_worker_started() -> None:
         if _tts_worker_thread is not None and _tts_worker_thread.is_alive():
             return
         def _worker() -> None:
+            global _tts_stop
             while True:
                 item = _tts_turn_queue.get()
                 try:
                     if not isinstance(item, dict):
+                        continue
+                    audio_blob = item.get("audio")
+                    if isinstance(audio_blob, (bytes, bytearray)) and audio_blob:
+                        manage_vrc = bool(item.get("manage_vrchat", True))
+                        _tts_stop = False
+                        if manage_vrc:
+                            _vrchat_set_talking(True)
+                        try:
+                            _play_tts(bytes(audio_blob))
+                        finally:
+                            if manage_vrc:
+                                _vrchat_set_talking(False)
                         continue
                     text = str(item.get("text") or "").strip()
                     para_mode = bool(item.get("para_mode", True))
@@ -5117,6 +5514,368 @@ def _play_reply_tts(reply: str, *, chat_source: str | None = None, para_mode: bo
             _tts_turn_queue.put_nowait({"text": tts_text, "para_mode": bool(para_mode)})
         except queue.Full:
             pass
+
+
+# ── Streaming voice pipeline (sentence-buffered TTS, VAD recording) ───────────
+# Pattern from real-time voice agent stacks (Pipecat / LiveKit / etc.):
+#   1. Record with VAD silence-tail detection (no fixed timer).
+#   2. As LLM streams tokens, accumulate into a sentence buffer; on every sentence
+#      boundary submit a parallel TTS synth task; queue resulting audio in order.
+#   3. The existing single TTS worker plays pre-rendered chunks sequentially as they
+#      land, so the user hears Luna start speaking while later sentences are still
+#      being synthesized (and even still being generated by the LLM).
+
+_SENTENCE_BREAK_RE = re.compile(r'(?<=[.!?…])\s+|\n\n+')
+
+
+def _voice_consume_sentences(buf: str, *, min_chars: int = 40) -> tuple[str, str]:
+    """Split a streaming-text buffer into (complete_sentences, remainder).
+
+    Returns ("", buf) until the buffer holds at least `min_chars` AND a sentence
+    break is found. Once both are met, returns the head up to the last sentence
+    break and the trailing fragment as remainder.
+    """
+    if not buf or len(buf) < min_chars:
+        return "", buf or ""
+    last_idx = -1
+    for m in _SENTENCE_BREAK_RE.finditer(buf):
+        last_idx = m.end()
+    if last_idx <= 0:
+        return "", buf
+    head = buf[:last_idx].rstrip()
+    tail = buf[last_idx:]
+    if len(head) < min_chars:
+        return "", buf
+    return head, tail
+
+
+def _voice_render_tts_clean(text: str) -> str:
+    """Same cleanup chain `_play_reply_tts` uses, applied per-sentence chunk."""
+    if not text:
+        return ""
+    t = _expand_luna_expression_tags_for_tts(text)
+    return _clean_for_tts(t)
+
+
+def _voice_enqueue_audio(audio: bytes, *, manage_vrchat: bool = False) -> bool:
+    """Push pre-rendered audio bytes into the TTS worker queue (FIFO playback)."""
+    if not audio:
+        return False
+    _ensure_tts_worker_started()
+    item = {"audio": bytes(audio), "manage_vrchat": bool(manage_vrchat)}
+    try:
+        _tts_turn_queue.put_nowait(item)
+        return True
+    except queue.Full:
+        try:
+            _tts_turn_queue.get_nowait()
+            _tts_turn_queue.task_done()
+        except queue.Empty:
+            pass
+        try:
+            _tts_turn_queue.put_nowait(item)
+            return True
+        except queue.Full:
+            return False
+
+
+def _play_streaming_tts(
+    text_iter,
+    *,
+    chat_source: str | None = None,
+    stop_event: "threading.Event | None" = None,
+    audio_sink=None,
+) -> str:
+    """Sentence-buffered streaming TTS.
+
+    Consumes deltas from `text_iter` (any iterator of str chunks — typically
+    `ollama_stream(...)`), flushes complete sentences to a parallel TTS thread
+    pool, and enqueues finished audio into the existing TTS worker IN ORDER so
+    the listener hears continuous playback. Returns the full reply text.
+
+    `stop_event` (optional): if set during iteration, stops consuming the LLM
+    stream and skips queueing further audio (already-queued chunks still play).
+
+    `audio_sink` (optional): callable `(audio_bytes) -> None`. When provided,
+    each finished audio chunk is delivered to the sink instead of being queued
+    to the TTS worker, and `_tts_turn_queue.join()` is skipped. Used for the
+    speculative pre-fire path where playback must be deferred until the final
+    transcript confirms the speculative input.
+    """
+    pool = concurrent.futures.ThreadPoolExecutor(
+        max_workers=_voice_tts_parallel(),
+        thread_name_prefix="luna-tts-stream",
+    )
+    futures: list[concurrent.futures.Future] = []
+    full_parts: list[str] = []
+    pending: list[str] = []
+    sentence_min = _voice_sentence_min_chars()
+    twitch = (chat_source == "twitch")
+    vrchat_held = False
+
+    def _hold_vrchat(on: bool):
+        nonlocal vrchat_held
+        if on and not vrchat_held:
+            try:
+                _vrchat_set_talking(True)
+                vrchat_held = True
+            except Exception:
+                pass
+        elif (not on) and vrchat_held:
+            try:
+                _vrchat_set_talking(False)
+                vrchat_held = False
+            except Exception:
+                pass
+
+    def _submit(s: str) -> None:
+        s = (s or "").strip()
+        if not s:
+            return
+        if twitch:
+            try:
+                s = _strip_luna_tags_for_twitch(s)
+            except Exception:
+                pass
+        clean = _voice_render_tts_clean(s)
+        if not clean.strip():
+            return
+        futures.append(pool.submit(_tts_bytes, clean))
+
+    # Producer thread: consume LLM stream, submit synth jobs as sentences land.
+    consume_done = threading.Event()
+    consume_error: list[Exception] = []
+
+    def _consume():
+        nonlocal pending
+        try:
+            for delta in text_iter:
+                if stop_event is not None and stop_event.is_set():
+                    break
+                if not delta:
+                    continue
+                full_parts.append(delta)
+                pending.append(delta)
+                head, tail = _voice_consume_sentences("".join(pending), min_chars=sentence_min)
+                if head:
+                    pending = [tail] if tail else []
+                    _submit(head)
+            tail_text = "".join(pending).strip()
+            pending = []
+            if tail_text and (stop_event is None or not stop_event.is_set()):
+                _submit(tail_text)
+        except Exception as e:
+            consume_error.append(e)
+        finally:
+            consume_done.set()
+
+    consumer = threading.Thread(target=_consume, daemon=True, name="luna-tts-stream-consume")
+    consumer.start()
+
+    # Drainer: walk futures in order and queue finished audio while consumer runs.
+    buffered = (audio_sink is not None)
+    idx = 0
+    try:
+        while True:
+            if stop_event is not None and stop_event.is_set():
+                break
+            if idx >= len(futures):
+                if consume_done.is_set() and idx >= len(futures):
+                    break
+                time.sleep(0.04)
+                continue
+            fut = futures[idx]
+            idx += 1
+            try:
+                audio = fut.result(timeout=60)
+            except Exception:
+                audio = None
+            if not audio:
+                continue
+            if buffered:
+                try:
+                    audio_sink(audio)
+                except Exception:
+                    pass
+            else:
+                _hold_vrchat(True)
+                _voice_enqueue_audio(audio, manage_vrchat=False)
+        if not buffered:
+            # Block until the worker has actually played everything we enqueued.
+            try:
+                _tts_turn_queue.join()
+            except Exception:
+                pass
+    finally:
+        _hold_vrchat(False)
+        try:
+            pool.shutdown(wait=False, cancel_futures=True)
+        except TypeError:
+            pool.shutdown(wait=False)
+        consumer.join(timeout=2)
+
+    return "".join(full_parts)
+
+
+def _pcm_to_wav_bytes(pcm: bytes, *, sr: int = 16000, channels: int = 1, sampwidth: int = 2) -> bytes:
+    """Wrap raw 16-bit mono PCM in a WAV container (in memory)."""
+    if not pcm:
+        return b""
+    buf = io.BytesIO()
+    try:
+        with wave.open(buf, "wb") as wf:
+            wf.setnchannels(channels)
+            wf.setsampwidth(sampwidth)
+            wf.setframerate(sr)
+            wf.writeframes(pcm)
+    except Exception:
+        return b""
+    return buf.getvalue()
+
+
+def _voice_pcm_whisper(pcm: bytes, *, sr: int = 16000) -> str | None:
+    """Run Whisper (Groq-cloud preferred) on raw PCM. Returns transcript or None."""
+    if not pcm:
+        return None
+    wav = _pcm_to_wav_bytes(pcm, sr=sr)
+    if not wav:
+        return None
+    fd, path = tempfile.mkstemp(suffix=".wav")
+    try:
+        os.write(fd, wav)
+        os.close(fd)
+        fd = -1
+        return _whisper_transcribe(path)
+    except Exception:
+        return None
+    finally:
+        if fd != -1:
+            try:
+                os.close(fd)
+            except Exception:
+                pass
+        try:
+            os.unlink(path)
+        except Exception:
+            pass
+
+
+def _voice_record_vad(
+    *,
+    max_s: float,
+    tail_ms: int,
+    min_speech_s: float,
+    sr: int = 16000,
+    chunk: int = 1024,
+    on_partial_snapshot=None,
+    partial_interval_ms: int = 900,
+) -> bytes | None:
+    """Record from default mic with RMS-based VAD silence-tail end detection.
+
+    Returns raw 16-bit mono PCM bytes (sample-rate `sr`), or None if mic open
+    failed / no speech was detected. Stops when:
+      - Speech started AND trailing silence >= `tail_ms` AND total speech >= `min_speech_s`, OR
+      - Total elapsed time >= `max_s` (hard cap)
+
+    `on_partial_snapshot(pcm_bytes)` (optional): called from a daemon worker
+    thread roughly every `partial_interval_ms` ms after speech onset, with a
+    snapshot of the audio so far. Recording continues uninterrupted; the
+    callback runs in the background. Use it for speculative LLM pre-firing.
+    """
+    try:
+        import pyaudio
+    except ImportError:
+        return None
+
+    on_thr = _voice_vad_on_threshold()
+    off_thr = _voice_vad_off_threshold()
+    pa = None
+    stream = None
+    frames: list[bytes] = []
+    frames_lock = threading.Lock()
+    speaking = False
+    speech_started_at = 0.0
+    last_speech_at = 0.0
+    started_at = time.time()
+    last_partial_at = started_at
+
+    def _dispatch_partial() -> None:
+        nonlocal last_partial_at
+        if on_partial_snapshot is None:
+            return
+        now = time.time()
+        if (now - last_partial_at) * 1000.0 < partial_interval_ms:
+            return
+        with frames_lock:
+            snap = b"".join(frames)
+        last_partial_at = now
+        if not snap:
+            return
+        threading.Thread(
+            target=lambda s=snap: on_partial_snapshot(s),
+            daemon=True,
+            name="luna-voice-partial",
+        ).start()
+
+    try:
+        pa = pyaudio.PyAudio()
+        stream = pa.open(
+            format=pyaudio.paInt16,
+            channels=1,
+            rate=sr,
+            input=True,
+            frames_per_buffer=chunk,
+        )
+        while True:
+            try:
+                data = stream.read(chunk, exception_on_overflow=False)
+            except Exception:
+                break
+            with frames_lock:
+                frames.append(data)
+            now = time.time()
+            try:
+                rms = _call_pcm_rms(data)
+            except Exception:
+                rms = 0.0
+            if not speaking:
+                if rms >= on_thr:
+                    speaking = True
+                    speech_started_at = now
+                    last_speech_at = now
+            else:
+                if rms >= off_thr:
+                    last_speech_at = now
+                # End-of-speech: enough silence after enough speech.
+                if (
+                    (now - speech_started_at) >= min_speech_s
+                    and (now - last_speech_at) * 1000.0 >= tail_ms
+                ):
+                    break
+                _dispatch_partial()
+            if (now - started_at) >= max_s:
+                break
+    finally:
+        if stream is not None:
+            try:
+                stream.stop_stream()
+            except Exception:
+                pass
+            try:
+                stream.close()
+            except Exception:
+                pass
+        if pa is not None:
+            try:
+                pa.terminate()
+            except Exception:
+                pass
+
+    if not speaking:
+        return None
+    with frames_lock:
+        return b"".join(frames)
+
 
 def _start_audio_podcast(project_dir_override: str = "") -> tuple[bool, str, str, str]:
     global _audio_podcast_proc
@@ -6536,63 +7295,375 @@ async def _wake_word_loop():
     except Exception as e:
         print(f"[Luna] Wake word error: {e}", flush=True)
 
-async def _handle_wake_word_activation():
-    """After wake word detected, record 5s of audio, transcribe, and reply via TTS."""
+def _wake_record_legacy_5s() -> tuple[bytes | None, str | None]:
+    """Old path: blocking fixed-5s pyaudio capture. Returns (pcm_bytes, wav_path)."""
     try:
-        import pyaudio, wave
-        pa = pyaudio.PyAudio()
-        stream = pa.open(format=pyaudio.paInt16, channels=1, rate=16000, input=True, frames_per_buffer=1024)
+        import pyaudio
+    except Exception:
+        return None, None
+    pa = pyaudio.PyAudio()
+    try:
+        stream = pa.open(format=pyaudio.paInt16, channels=1, rate=16000,
+                         input=True, frames_per_buffer=1024)
         frames = []
         for _ in range(int(16000 / 1024 * 5)):
             frames.append(stream.read(1024, exception_on_overflow=False))
         stream.stop_stream()
         stream.close()
+    finally:
+        try: pa.terminate()
+        except Exception: pass
+    pcm = b"".join(frames)
+    return pcm, None
+
+
+def _wake_emotion_from_pcm(pcm: bytes, text: str) -> dict | None:
+    """Run the existing voice-emotion model on raw PCM by materializing a temp WAV."""
+    if not pcm:
+        return None
+    fd = -1
+    path = None
+    try:
+        wav = _pcm_to_wav_bytes(pcm)
+        if not wav:
+            return None
         fd, path = tempfile.mkstemp(suffix=".wav")
+        os.write(fd, wav)
         os.close(fd)
-        wf = wave.open(path, "wb")
-        wf.setnchannels(1)
-        wf.setsampwidth(2)
-        wf.setframerate(16000)
-        wf.writeframes(b"".join(frames))
-        wf.close()
-        text = await asyncio.to_thread(_whisper_transcribe, path)
-        emo_meta = await asyncio.to_thread(_analyze_voice_clip_emotion, path, (text or ""))
-        os.remove(path)
-        if text and len(text.strip()) > 2:
-            scope = LINKED_SCOPE or "web"
-            tstrip = text.strip()
-            wake_input = tstrip
-            if isinstance(emo_meta, dict):
-                emo = str(emo_meta.get("emotion") or "neutral")
-                vol = str(emo_meta.get("volume") or "normal")
-                conf = emo_meta.get("model_confidence")
-                conf_txt = f", confidence {float(conf):.2f}" if conf is not None else ""
-                wake_input = (
-                    f"[Wake voice emotion]\n"
-                    f"Emotion: {emo}\n"
-                    f"Volume: {vol}{conf_txt}\n\n"
-                    f"{tstrip}"
-                )
-            _cf = _chat_fast_enabled()
-            system = _prepare_main_chat_system(
-                scope, wake_input, fast=_cf, force_stream_mode=_stream_mode_env_on()
+        fd = -1
+        return _analyze_voice_clip_emotion(path, text or "")
+    except Exception:
+        return None
+    finally:
+        if fd != -1:
+            try: os.close(fd)
+            except Exception: pass
+        if path:
+            try: os.unlink(path)
+            except Exception: pass
+
+
+def _wake_format_input(text: str, emo_meta: dict | None) -> str:
+    """Apply the [Wake voice emotion] header used by the legacy wake handler."""
+    tstrip = (text or "").strip()
+    if not isinstance(emo_meta, dict):
+        return tstrip
+    emo = str(emo_meta.get("emotion") or "neutral")
+    vol = str(emo_meta.get("volume") or "normal")
+    conf = emo_meta.get("model_confidence")
+    conf_txt = f", confidence {float(conf):.2f}" if conf is not None else ""
+    return (
+        f"[Wake voice emotion]\n"
+        f"Emotion: {emo}\n"
+        f"Volume: {vol}{conf_txt}\n\n"
+        f"{tstrip}"
+    )
+
+
+async def _handle_wake_word_activation():
+    """After wake word detected: VAD-record (no fixed 5s timer), optionally pre-fire
+    LLM on stable ASR partial, finalize transcript, then stream the reply through
+    sentence-buffered TTS so the user hears Luna start speaking before the full
+    reply finishes generating.
+
+    Pipeline (default ON; each stage is independently opt-out via env):
+      LUNA_VOICE_VAD=1         — replace fixed 5s with VAD silence-tail capture
+      LUNA_VOICE_PREFIRE=1     — fire LLM on stable ASR partial during recording
+      LUNA_VOICE_STREAM_TTS=1  — sentence-buffered, parallel TTS synth + ordered playback
+    """
+    use_vad = _voice_vad_enabled()
+    use_prefire = _voice_prefire_enabled()
+    use_stream_tts = _voice_stream_tts_enabled()
+    scope = LINKED_SCOPE or "web"
+    _cf = _chat_fast_enabled()
+
+    # ---- 1. Speculative state (only used when prefire is on) -----------------
+    spec = {
+        "lock": threading.Lock(),
+        "last_partial": "",
+        "stable_count": 0,
+        "fired": False,
+        "fired_text": "",
+        "stop_event": threading.Event(),
+        "thread": None,
+        "audio_chunks": [],   # list[bytes] in playback order
+        "reply_text": "",
+    }
+
+    def _build_prompt(input_text: str) -> tuple[str, list[dict]]:
+        history = _compact_history(
+            get_recent_conversation(scope, 20), fast=_cf, scope=scope
+        )
+        system = _prepare_main_chat_system(
+            scope, input_text, fast=_cf, force_stream_mode=_stream_mode_env_on()
+        )
+        return system, history
+
+    def _run_speculative_pipeline(fired_text: str) -> None:
+        try:
+            system, history = _build_prompt(fired_text)
+            stream = ollama_stream(
+                fired_text, system=system, scope=scope, history=history,
+                model=OLLAMA_CHAT, compact=_cf,
             )
-            history = _compact_history(get_recent_conversation(scope, 20), fast=_cf)
-            reply = await asyncio.to_thread(
-                lambda: ollama_chat(
-                    wake_input,
-                    system=system,
-                    scope=scope,
-                    history=history,
-                    model=OLLAMA_CHAT,
-                    compact=_cf,
-                )
+            chunks: list[bytes] = []
+            full_text = _play_streaming_tts(
+                stream,
+                stop_event=spec["stop_event"],
+                audio_sink=chunks.append,
             )
-            if reply and not reply.startswith("Ollama offline"):
-                append_exchange(scope, text.strip(), reply)
-                _play_reply_tts(reply, para_mode=False)
+            spec["audio_chunks"] = chunks
+            spec["reply_text"] = (full_text or "").strip()
+        except Exception as e:
+            print(f"[Luna] Speculative pipeline error: {e}", flush=True)
+
+    def _on_partial_snapshot(pcm_snapshot: bytes) -> None:
+        if not use_prefire or spec["fired"]:
+            return
+        text = _voice_pcm_whisper(pcm_snapshot)
+        if not text:
+            return
+        text = (text or "").strip()
+        if len(text) < 3:
+            return
+        with spec["lock"]:
+            if not spec["last_partial"]:
+                spec["last_partial"] = text
+                return
+            if text == spec["last_partial"]:
+                spec["stable_count"] += 1
+            else:
+                spec["last_partial"] = text
+                spec["stable_count"] = 0
+                return
+            if spec["stable_count"] >= 1 and not spec["fired"]:
+                spec["fired"] = True
+                spec["fired_text"] = text
+        if spec["fired"] and spec["thread"] is None:
+            t = threading.Thread(
+                target=_run_speculative_pipeline,
+                args=(spec["fired_text"],),
+                daemon=True,
+                name="luna-spec-llm",
+            )
+            spec["thread"] = t
+            t.start()
+
+    # ---- 2. Capture audio ----------------------------------------------------
+    try:
+        if use_vad:
+            pcm = await asyncio.to_thread(
+                _voice_record_vad,
+                max_s=_voice_vad_max_s(),
+                tail_ms=_voice_vad_tail_ms(),
+                min_speech_s=_voice_vad_min_s(),
+                on_partial_snapshot=(_on_partial_snapshot if use_prefire else None),
+                partial_interval_ms=_voice_partial_interval_ms(),
+            )
+        else:
+            pcm, _ = await asyncio.to_thread(_wake_record_legacy_5s)
     except Exception as e:
-        print(f"[Luna] Wake word handling error: {e}", flush=True)
+        print(f"[Luna] Wake word capture error: {e}", flush=True)
+        spec["stop_event"].set()
+        return
+    if not pcm:
+        spec["stop_event"].set()
+        return
+
+    # ---- 3. Final transcript -------------------------------------------------
+    final_text = await asyncio.to_thread(_voice_pcm_whisper, pcm)
+    if not final_text or len(final_text.strip()) <= 2:
+        spec["stop_event"].set()
+        return
+    final_text = final_text.strip()
+
+    # Voice emotion (best-effort) on the full clip.
+    emo_meta = await asyncio.to_thread(_wake_emotion_from_pcm, pcm, final_text)
+    wake_input = _wake_format_input(final_text, emo_meta)
+
+    # ---- 4. Speculative match: keep buffered audio + play in order -----------
+    if spec["fired"] and spec["fired_text"] == final_text:
+        if spec["thread"] is not None:
+            try:
+                await asyncio.to_thread(spec["thread"].join, 30)
+            except Exception:
+                pass
+        chunks = spec["audio_chunks"]
+        reply = spec["reply_text"]
+        if chunks and reply and not reply.lower().startswith("ollama offline"):
+            try:
+                _vrchat_set_talking(True)
+            except Exception:
+                pass
+            for c in chunks:
+                _voice_enqueue_audio(c, manage_vrchat=False)
+            try:
+                await asyncio.to_thread(_tts_turn_queue.join)
+            finally:
+                try:
+                    _vrchat_set_talking(False)
+                except Exception:
+                    pass
+            try:
+                append_exchange(scope, final_text, reply)
+            except Exception:
+                pass
+            return
+
+    # ---- 5. Speculative miss / disabled — drop and run a fresh turn ----------
+    spec["stop_event"].set()
+    if spec["thread"] is not None and spec["thread"].is_alive():
+        try:
+            spec["thread"].join(timeout=2)
+        except Exception:
+            pass
+
+    system, history = _build_prompt(wake_input)
+    if use_stream_tts:
+        def _gen():
+            yield from ollama_stream(
+                wake_input, system=system, scope=scope, history=history,
+                model=OLLAMA_CHAT, compact=_cf,
+            )
+        try:
+            reply = await asyncio.to_thread(_play_streaming_tts, _gen())
+        except Exception as e:
+            print(f"[Luna] Wake stream TTS error: {e}", flush=True)
+            reply = ""
+        reply = (reply or "").strip()
+        if reply and not reply.lower().startswith("ollama offline"):
+            try:
+                append_exchange(scope, final_text, reply)
+            except Exception:
+                pass
+        return
+
+    # Legacy non-streaming fallback
+    try:
+        reply = await asyncio.to_thread(
+            lambda: ollama_chat(
+                wake_input, system=system, scope=scope, history=history,
+                model=OLLAMA_CHAT, compact=_cf,
+            )
+        )
+    except Exception as e:
+        print(f"[Luna] Wake chat error: {e}", flush=True)
+        return
+    if reply and not reply.startswith("Ollama offline"):
+        try:
+            append_exchange(scope, final_text, reply)
+        except Exception:
+            pass
+        _play_reply_tts(reply, para_mode=False)
+
+async def _publish_announce_tick() -> dict:
+    """One RSS/Twitch poll + Discord announces + YouTube→Facebook/X + Twitch→Facebook.
+
+    Used by the background loop and ``POST /api/publish-announce/check``.
+    """
+    out: dict = {
+        "ok": True,
+        "error": None,
+        "discord_posts": 0,
+        "announcement_previews": [],
+        "new_youtube": [],
+        "youtube_facebook": [],
+        "youtube_x": [],
+        "twitch_live_facebook": [],
+    }
+    if not _PUBLISH_ANNOUNCE_CONFIGURED or _poll_publish_announce is None:
+        out["ok"] = False
+        out["error"] = "Publish announce not configured or luna_publish_announce.py missing."
+        return out
+
+    cids = _PUBLISH_ANNOUNCE_DISCORD_CHANNEL_IDS
+
+    def _publish_announce_poll_sync():
+        auth = _twitch_helix_read_auth()
+        return _poll_publish_announce(
+            state_path=_PUBLISH_ANNOUNCE_STATE_PATH,
+            youtube_channel_ids=_PUBLISH_ANNOUNCE_YOUTUBE_IDS,
+            youtube_rss_urls=_PUBLISH_ANNOUNCE_YOUTUBE_RSS,
+            twitch_logins=_PUBLISH_ANNOUNCE_TWITCH_LOGINS,
+            twitch_client_id=(auth[0] if auth else ""),
+            twitch_app_token=(auth[1] if auth else ""),
+            skip_twitch=not bool(auth),
+        )
+
+    msgs, twitch_live, yt_uploads = await asyncio.to_thread(_publish_announce_poll_sync)
+    if msgs and cids:
+        for cid in cids:
+            ch = bot.get_channel(cid)
+            if ch is None:
+                try:
+                    ch = await bot.fetch_channel(cid)
+                except Exception:
+                    ch = None
+            if ch is None:
+                print(f"[Publish announce] Cannot resolve Discord channel id {cid}.", flush=True)
+                continue
+            for body in msgs:
+                body = (body or "").strip()
+                if not body:
+                    continue
+                if len(body) > 1990:
+                    body = body[:1987] + "..."
+                try:
+                    await ch.send(body)
+                    out["discord_posts"] += 1
+                    prev = body[:320]
+                    if prev not in out["announcement_previews"]:
+                        out["announcement_previews"].append(prev)
+                except Exception as e:
+                    print(f"[Publish announce] send failed ({cid}): {e}", flush=True)
+    if yt_uploads and (LUNA_PUBLISH_ANNOUNCE_YOUTUBE_X or LUNA_PUBLISH_ANNOUNCE_YOUTUBE_FACEBOOK):
+        for up in yt_uploads:
+            title = str(up.get("title") or "").strip()
+            url = str(up.get("url") or "").strip()
+            hint = str(up.get("hint") or "").strip()
+            vid = str(up.get("video_id") or "").strip()
+            out["new_youtube"].append({"video_id": vid, "title": title, "url": url})
+            if not url:
+                continue
+            if LUNA_PUBLISH_ANNOUNCE_YOUTUBE_FACEBOOK:
+                fb_body = _format_yt_upload_fb_message(title, url, hint)
+                ok_fb, r_fb = await asyncio.to_thread(_fb_post_plain_status_to_timeline, fb_body)
+                tag = vid or title[:40]
+                out["youtube_facebook"].append({"ok": ok_fb, "detail": r_fb, "video_id": vid})
+                if ok_fb:
+                    print(f"[Publish announce] YouTube → Facebook ok ({tag}): {r_fb}", flush=True)
+                else:
+                    print(f"[Publish announce] YouTube → Facebook failed ({tag}): {r_fb}", flush=True)
+            if LUNA_PUBLISH_ANNOUNCE_YOUTUBE_X:
+                x_body = _format_yt_upload_x_message(title, url, hint)
+                ok_x, r_x = await asyncio.to_thread(_run_x_share, x_body)
+                tag = vid or title[:40]
+                out["youtube_x"].append({"ok": ok_x, "detail": r_x, "video_id": vid})
+                if ok_x:
+                    print(f"[Publish announce] YouTube → X ok ({tag}): {r_x}", flush=True)
+                else:
+                    print(f"[Publish announce] YouTube → X failed ({tag}): {r_x}", flush=True)
+    if LUNA_PUBLISH_ANNOUNCE_TWITCH_LIVE_FACEBOOK and twitch_live:
+        for ev in twitch_live:
+            lg = str(ev.get("login") or "").strip().lower()
+            if not lg or lg not in _PUBLISH_ANNOUNCE_FB_TWITCH_LOGINS:
+                continue
+            st_at = str(ev.get("started_at") or "").strip()
+            if st_at and _last_fb_twitch_stream.get(lg) == st_at:
+                continue
+            fb_body = _format_twitch_live_fb_message(ev)
+            ok_fb, r_fb = await asyncio.to_thread(_fb_post_plain_status_to_timeline, fb_body)
+            out["twitch_live_facebook"].append({"login": lg, "ok": ok_fb, "detail": r_fb})
+            if ok_fb:
+                if st_at:
+                    _last_fb_twitch_stream[lg] = st_at
+                else:
+                    _last_fb_twitch_stream[lg] = str(time.time())
+                print(f"[Publish announce] Facebook go-live post ok ({lg}): {r_fb}", flush=True)
+            else:
+                print(f"[Publish announce] Facebook go-live post failed ({lg}): {r_fb}", flush=True)
+    return out
+
 
 async def _publish_announce_loop():
     """Post to Discord text channel(s) when watched YouTube feeds have a new video or Twitch logins go live."""
@@ -6617,61 +7688,13 @@ async def _publish_announce_loop():
     if LUNA_PUBLISH_ANNOUNCE_TWITCH_LIVE_FACEBOOK:
         _fb_l = ", ".join(sorted(_PUBLISH_ANNOUNCE_FB_TWITCH_LOGINS)) or "(none — set TWITCH_BROADCASTER_LOGIN or LUNA_PUBLISH_ANNOUNCE_FB_FOR_TWITCH_LOGINS)"
         print(f"[Publish announce] Twitch go-live → Facebook: ON for **{_fb_l}**.", flush=True)
+    if LUNA_PUBLISH_ANNOUNCE_YOUTUBE_X:
+        print("[Publish announce] YouTube upload → X cross-post: ON.", flush=True)
+    if LUNA_PUBLISH_ANNOUNCE_YOUTUBE_FACEBOOK:
+        print("[Publish announce] YouTube upload → Facebook cross-post: ON.", flush=True)
     while True:
         try:
-
-            def _publish_announce_poll_sync():
-                auth = _twitch_helix_read_auth()
-                return _poll_publish_announce(
-                    state_path=_PUBLISH_ANNOUNCE_STATE_PATH,
-                    youtube_channel_ids=_PUBLISH_ANNOUNCE_YOUTUBE_IDS,
-                    youtube_rss_urls=_PUBLISH_ANNOUNCE_YOUTUBE_RSS,
-                    twitch_logins=_PUBLISH_ANNOUNCE_TWITCH_LOGINS,
-                    twitch_client_id=(auth[0] if auth else ""),
-                    twitch_app_token=(auth[1] if auth else ""),
-                    skip_twitch=not bool(auth),
-                )
-
-            msgs, twitch_live = await asyncio.to_thread(_publish_announce_poll_sync)
-            if msgs:
-                for cid in cids:
-                    ch = bot.get_channel(cid)
-                    if ch is None:
-                        try:
-                            ch = await bot.fetch_channel(cid)
-                        except Exception:
-                            ch = None
-                    if ch is None:
-                        print(f"[Publish announce] Cannot resolve Discord channel id {cid}.", flush=True)
-                        continue
-                    for body in msgs:
-                        body = (body or "").strip()
-                        if not body:
-                            continue
-                        if len(body) > 1990:
-                            body = body[:1987] + "..."
-                        try:
-                            await ch.send(body)
-                        except Exception as e:
-                            print(f"[Publish announce] send failed ({cid}): {e}", flush=True)
-            if LUNA_PUBLISH_ANNOUNCE_TWITCH_LIVE_FACEBOOK and twitch_live:
-                for ev in twitch_live:
-                    lg = str(ev.get("login") or "").strip().lower()
-                    if not lg or lg not in _PUBLISH_ANNOUNCE_FB_TWITCH_LOGINS:
-                        continue
-                    st_at = str(ev.get("started_at") or "").strip()
-                    if st_at and _last_fb_twitch_stream.get(lg) == st_at:
-                        continue
-                    fb_body = _format_twitch_live_fb_message(ev)
-                    ok_fb, r_fb = await asyncio.to_thread(_fb_post_plain_status_to_timeline, fb_body)
-                    if ok_fb:
-                        if st_at:
-                            _last_fb_twitch_stream[lg] = st_at
-                        else:
-                            _last_fb_twitch_stream[lg] = str(time.time())
-                        print(f"[Publish announce] Facebook go-live post ok ({lg}): {r_fb}", flush=True)
-                    else:
-                        print(f"[Publish announce] Facebook go-live post failed ({lg}): {r_fb}", flush=True)
+            await _publish_announce_tick()
         except Exception as e:
             print(f"[Publish announce] loop error: {e}", flush=True)
         await asyncio.sleep(LUNA_PUBLISH_ANNOUNCE_POLL_SEC)
@@ -8955,9 +9978,17 @@ def _build_x_msg(title: str, url: str) -> str:
     ]
     return random.choice(templates)
 
-def _run_x_share() -> tuple[bool, str]:
-    ok, song = _get_next_channel_song_for_share()
-    if not ok: return False, str(song)
+def _run_x_share(custom_body: str | None = None) -> tuple[bool, str]:
+    """Post one tweet on X. Default = next song from channel rotation.
+
+    *custom_body* — when set, post that exact text instead (used by the YouTube-upload
+    cross-poster). Channel-song rotation, song record, and song-style result text are
+    skipped in that mode.
+    """
+    song: dict | None = None
+    if custom_body is None:
+        ok, song = _get_next_channel_song_for_share()
+        if not ok: return False, str(song)
     if not _x_lock.acquire(blocking=False): return False, "X share already running."
     try:
         from playwright.sync_api import sync_playwright
@@ -9126,7 +10157,10 @@ def _run_x_share() -> tuple[bool, str]:
                         if context.pages: context.close()
                     except Exception: pass
                     return False, "Compose dialog didn't open or text box not found. Log in to X if needed, then try Share Song again."
-                msg = _build_x_msg(song["title"], song["url"])
+                if custom_body is not None:
+                    msg = (custom_body or "").strip()[:280]
+                else:
+                    msg = _build_x_msg(song["title"], song["url"])
                 if tb:
                     tb.click()
                     page.wait_for_timeout(400)
@@ -9233,8 +10267,10 @@ def _run_x_share() -> tuple[bool, str]:
                         "I typed the post but couldn't click **Post**. Click the blue **Post** button in the X window yourself to share, then try Share Song again next time."
                     )
                 page.wait_for_timeout(3000)
-                _record_shared_song(song["url"])
-                return True, f'Shared to X: "{song["title"]}"'
+                if custom_body is None and song is not None:
+                    _record_shared_song(song["url"])
+                    return True, f'Shared to X: "{song["title"]}"'
+                return True, "Posted to X."
         except Exception as e:
             return False, f"X error: {e}"
         finally:
@@ -9553,6 +10589,32 @@ def _run_fb_share() -> tuple[bool, str]:
                 except Exception: pass
         try: _fb_lock.release()
         except Exception: pass
+
+
+def _format_yt_upload_x_message(title: str, url: str, hint: str = "") -> str:
+    """Tweet body for a new YouTube upload (cross-post). Honors LUNA_PUBLISH_ANNOUNCE_YT_X_TEMPLATE."""
+    t = (title or "").strip()
+    u = (url or "").strip()
+    h = (hint or "").strip()
+    tpl = LUNA_PUBLISH_ANNOUNCE_YT_X_TEMPLATE
+    if tpl:
+        return (
+            tpl.replace("{title}", t).replace("{url}", u).replace("{hint}", h)
+        )[:280]
+    return (f'New video: "{t[:120]}"\n{u}')[:280]
+
+
+def _format_yt_upload_fb_message(title: str, url: str, hint: str = "") -> str:
+    """Facebook body for a new YouTube upload (cross-post). Honors LUNA_PUBLISH_ANNOUNCE_YT_FB_TEMPLATE."""
+    t = (title or "").strip()
+    u = (url or "").strip()
+    h = (hint or "").strip()
+    tpl = LUNA_PUBLISH_ANNOUNCE_YT_FB_TEMPLATE
+    if tpl:
+        return (
+            tpl.replace("{title}", t).replace("{url}", u).replace("{hint}", h)
+        )[:900]
+    return f'I just uploaded a new YouTube video — "{t[:160]}"\n\nWatch it here: {u}'[:900]
 
 
 def _format_twitch_live_fb_message(ev: dict) -> str:
@@ -16341,6 +17403,25 @@ def api_recent_social_clear():
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
+
+@web.route("/api/publish-announce/check", methods=["POST"])
+def api_publish_announce_check():
+    """Run one publish-announce poll (YouTube RSS / Twitch + Discord + optional FB/X). Localhost only."""
+    if not _is_direct_localhost_request():
+        return jsonify({"ok": False, "error": "This endpoint is only available on localhost."}), 403
+    loop = getattr(bot, "loop", None)
+    if not loop or not loop.is_running():
+        return jsonify({"ok": False, "error": "Discord bot is not ready yet."}), 503
+    try:
+        fut = asyncio.run_coroutine_threadsafe(_publish_announce_tick(), loop)
+        data = fut.result(timeout=300)
+        return jsonify(data)
+    except TimeoutError:
+        return jsonify({"ok": False, "error": "Timed out after 5 minutes (e.g. Facebook/X browser login)."}), 504
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)[:500]}), 500
+
+
 @web.route("/api/ig-dm", methods=["POST"])
 def api_ig_dm():
     """Send an Instagram DM from the UI popup (continues conversation)."""
@@ -16805,7 +17886,7 @@ def _execute_chat_turn(scope: str, msg: str, data: dict | None = None, *, chat_s
                 _tts(reply)
                 return {"reply": reply}
 
-    history = _compact_history(get_recent_conversation(scope, 30), fast=use_fast)
+    history = _compact_history(get_recent_conversation(scope, 30), fast=use_fast, scope=scope)
     if history:
         prev_luna = next((h["content"] for h in reversed(history) if h.get("role") == "assistant"), "")
         correction = _detect_correction(msg, prev_luna)
@@ -16898,6 +17979,10 @@ def _execute_chat_turn(scope: str, msg: str, data: dict | None = None, *, chat_s
         try:
             _capture_memory(scope, msg, reply)
             _capture_profile(scope, msg)
+        except Exception:
+            pass
+        try:
+            _update_rolling_summary(scope)
         except Exception:
             pass
     threading.Thread(target=_post_chat_memory, daemon=True).start()
@@ -18068,7 +19153,7 @@ def api_stream():
         _last_streamer_luna_at = time.time()
     fast_override = _chat_fast_from_request(data)
     use_fast = _chat_fast_enabled() if fast_override is None else fast_override
-    history = _compact_history(get_recent_conversation(scope, 30), fast=use_fast)
+    history = _compact_history(get_recent_conversation(scope, 30), fast=use_fast, scope=scope)
     # Correction detection (same as api_chat)
     if history:
         prev_luna = next((h["content"] for h in reversed(history) if h.get("role") == "assistant"), "")
@@ -18096,6 +19181,10 @@ def api_stream():
             try:
                 _capture_memory(scope, msg, reply)
                 _capture_profile(scope, msg)
+            except Exception:
+                pass
+            try:
+                _update_rolling_summary(scope)
             except Exception:
                 pass
         threading.Thread(target=_stream_post_memory, daemon=True).start()
@@ -18888,14 +19977,16 @@ async def on_ready():
     bot.loop.create_task(_clipboard_monitor_loop())
     bot.loop.create_task(_knowledge_embedding_loop())
     bot.loop.create_task(_wake_word_loop())
+    bot.loop.create_task(_rolling_summary_backfill_task())
     if _PUBLISH_ANNOUNCE_CONFIGURED:
         bot.loop.create_task(_publish_announce_loop())
     elif LUNA_PUBLISH_ANNOUNCE_ENABLED and _poll_publish_announce is None:
         print("[Publish announce] luna_publish_announce.py missing — install module next to bot_main.", flush=True)
-    elif LUNA_PUBLISH_ANNOUNCE_ENABLED and not _PUBLISH_ANNOUNCE_DISCORD_CHANNEL_IDS:
+    elif LUNA_PUBLISH_ANNOUNCE_ENABLED and not _PUBLISH_ANNOUNCE_HAS_OUTPUT:
         print(
-            "[Publish announce] Set LUNA_PUBLISH_ANNOUNCE_DISCORD_CHANNEL_IDS (comma-separated numeric IDs), "
-            "or legacy LUNA_PUBLISH_ANNOUNCE_DISCORD_CHANNEL_ID.",
+            "[Publish announce] No output configured. Set LUNA_PUBLISH_ANNOUNCE_DISCORD_CHANNEL_IDS, "
+            "LUNA_PUBLISH_ANNOUNCE_YOUTUBE_X=1, LUNA_PUBLISH_ANNOUNCE_YOUTUBE_FACEBOOK=1, "
+            "or LUNA_PUBLISH_ANNOUNCE_TWITCH_LIVE_FACEBOOK=1.",
             flush=True,
         )
     elif LUNA_PUBLISH_ANNOUNCE_ENABLED and not (
@@ -19201,7 +20292,7 @@ async def on_message(message: discord.Message):
     _hist_n = _discord_chat_history_limit() if _df else 30
     history = await asyncio.to_thread(get_recent_conversation, scope, _hist_n)
     history = _discord_filter_error_history(history)
-    history = _compact_history(history, fast=(_df or _cf))
+    history = _compact_history(history, fast=(_df or _cf), scope=scope)
     history = _discord_trim_chat_messages(history) if _df else history
     system = await asyncio.to_thread(
         _prepare_main_chat_system,
@@ -19253,6 +20344,10 @@ async def on_message(message: discord.Message):
         try:
             _capture_memory(scope, text, reply)
             _capture_profile(scope, text)
+        except Exception:
+            pass
+        try:
+            _update_rolling_summary(scope)
         except Exception:
             pass
     threading.Thread(target=_discord_post_memory, daemon=True).start()

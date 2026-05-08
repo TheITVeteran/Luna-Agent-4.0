@@ -117,12 +117,16 @@ def poll_publish_announce(
     twitch_client_id: str,
     twitch_app_token: str,
     skip_twitch: bool = False,
-) -> tuple[list[str], list[dict[str, str]]]:
+) -> tuple[list[str], list[dict[str, str]], list[dict[str, str]]]:
     """
     Single poll tick. Updates state file.
 
-    Returns a tuple ``(discord_messages, twitch_go_live)`` where ``twitch_go_live`` is one dict per
-    channel that **just** transitioned offline→live, with keys: login, display_name, title, url, started_at.
+    Returns ``(discord_messages, twitch_go_live, youtube_uploads)``:
+
+    * ``twitch_go_live`` — one dict per channel that **just** transitioned offline→live
+      (keys: login, display_name, title, url, started_at).
+    * ``youtube_uploads`` — one dict per **new** YouTube upload detected this tick
+      (keys: video_id, title, url, hint).
     """
     ids = [x.strip() for x in youtube_channel_ids if x.strip()]
     rss_extra = [x.strip() for x in youtube_rss_urls if x.strip()]
@@ -142,6 +146,7 @@ def poll_publish_announce(
 
     messages: list[str] = []
     twitch_go_live: list[dict[str, str]] = []
+    youtube_uploads: list[dict[str, str]] = []
 
     with _state_lock:
         state = _load_json(
@@ -178,6 +183,9 @@ def poll_publish_announce(
                 messages.append(
                     f"📺 **New YouTube video** ({hint})\n**{title[:240]}**\n{link}"
                 )
+                youtube_uploads.append(
+                    {"video_id": vid, "title": title, "url": link, "hint": hint}
+                )
                 ann_ids.append(vid)
                 ann_set.add(vid)
 
@@ -211,4 +219,4 @@ def poll_publish_announce(
 
         _save_json(state_path, state)
 
-    return messages, twitch_go_live
+    return messages, twitch_go_live, youtube_uploads

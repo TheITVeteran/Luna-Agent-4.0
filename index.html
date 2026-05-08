@@ -1679,6 +1679,9 @@
       <button class="cmd-btn" onclick="sendQuick('Shadow, share facebook')" title="Share to Facebook">
         <span class="cmd-icon">📘</span> Share Facebook
       </button>
+      <button type="button" class="cmd-btn" id="yt-check-upload-btn" onclick="checkYoutubeUploads()" title="Poll your channel RSS now — Discord announce + Facebook/X if enabled in .env">
+        <span class="cmd-icon">📺</span> Check YouTube uploads
+      </button>
       <button class="cmd-btn" onclick="insertCommand('!suno ')" title="Create a Suno song — add description in box">
         <span class="cmd-icon">🎤</span> Suno Create
       </button>
@@ -3194,6 +3197,50 @@ async function ytLikeFromInput() {
   }
 }
 
+async function checkYoutubeUploads() {
+  var btn = document.getElementById('yt-check-upload-btn');
+  if (btn) {
+    btn.disabled = true;
+    btn.classList.add('loading');
+  }
+  showToast('Checking channel feeds…', false);
+  try {
+    const r = await fetch('/api/publish-announce/check', { method: 'POST' });
+    const d = await r.json().catch(function() { return {}; });
+    if (btn) {
+      btn.disabled = false;
+      btn.classList.remove('loading');
+    }
+    if (!r.ok || (d.error && !d.ok)) {
+      showToast((d && d.error) || 'Request failed.', true);
+      return;
+    }
+    var parts = [];
+    if (d.discord_posts) {
+      parts.push('Discord: ' + d.discord_posts + ' post(s)');
+    }
+    if (d.new_youtube && d.new_youtube.length) {
+      parts.push('New: ' + d.new_youtube.map(function(u) { return (u.title || u.video_id || '').slice(0, 60); }).join(' · '));
+    } else {
+      parts.push('No new video since last state (RSS may lag a few minutes).');
+    }
+    if (d.youtube_facebook && d.youtube_facebook.length) {
+      parts.push('FB: ' + d.youtube_facebook.map(function(x) { return x.ok ? 'ok' : (x.detail || 'fail').slice(0, 80); }).join('; '));
+    }
+    if (d.youtube_x && d.youtube_x.length) {
+      parts.push('X: ' + d.youtube_x.map(function(x) { return x.ok ? 'ok' : (x.detail || 'fail').slice(0, 80); }).join('; '));
+    }
+    var summary = parts.join(' — ');
+    showToast(summary.length > 220 ? summary.slice(0, 217) + '…' : summary, false);
+  } catch (e) {
+    if (btn) {
+      btn.disabled = false;
+      btn.classList.remove('loading');
+    }
+    showToast('Network error or not on localhost.', true);
+  }
+}
+
 async function lunaTtsDispatch(target) {
   var line = (inputEl && inputEl.value || '').trim();
   if (!line) {
@@ -3410,6 +3457,7 @@ const MORE_COMMANDS = {
       { label: 'Suno ready', icon: '✓', desc: "Tell Luna you're logged into Suno (!suno_ready)", run: function() { sendQuick('!suno_ready'); } },
       { label: 'Share song (cmd)', icon: '𝕏', desc: 'Same as the Share Song button (!share_song)', run: function() { sendQuick('!share_song'); } },
       { label: 'Share Facebook (cmd)', icon: '📘', desc: 'Same as Share Facebook (!share_facebook)', run: function() { sendQuick('!share_facebook'); } },
+      { label: 'Check YT uploads', icon: '📺', desc: 'Poll channel RSS — Discord + FB/X if configured', run: function() { checkYoutubeUploads(); } },
       { label: 'Vision source', icon: '👁', desc: 'Choose Camera or Screen share for live vision', run: function() { toggleVision(); } },
       { label: 'YT watch stop', icon: '⏹', desc: 'Stop live YT watch-react session (!yt_watch_stop)', run: function() { sendQuick('!yt_watch_stop'); } },
     ]

@@ -1,10 +1,16 @@
 {
   "youtube": {
-    "yt_channel:UChFYxSLRuthZ84d5nH15k_A": {
-      "video_id": "F0ThidOkBWQ"
+    "yt_channel:UCku_e8Nbe1qP7D_nxa1GGaA": {
+      "video_id": "9kdpo7FTer8"
     },
     "yt_rss:0:81aa9db7fab8e368": {
       "video_id": "icM1BT-Hvpc"
+    },
+    "yt_channel:UCDuvdl2D8l3PhA4fknLLWEw": {
+      "video_id": "PKuOqmVbZLc"
+    },
+    "yt_channel:UChFYxSLRuthZ84d5nH15k_A": {
+      "video_id": "F0ThidOkBWQ"
     }
   },
   "twitch": {
@@ -12,5 +18,8 @@
       "live": false
     }
   },
-  "yt_announced_ids": []
+  "yt_announced_ids": [
+    "m0PxHr6k0h4",
+    "9kdpo7FTer8"
+  ]
 }
