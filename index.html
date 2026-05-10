@@ -1697,6 +1697,9 @@
       <button class="cmd-btn" onclick="insertCommand('!twitch_title ', 'new stream title, then Send')" title="Update Twitch stream title (broadcaster OAuth required)">
         <span class="cmd-icon">🏷</span> Twitch title
       </button>
+      <button type="button" class="cmd-btn" id="twitch-say-btn" onclick="twitchSayPrompt()" title="Send a one-shot Luna message to a Twitch channel (e.g. #justrayen_ch). Same cooldowns/permissions as !twitch_say.">
+        <span class="cmd-icon">💜</span> Twitch say
+      </button>
       <button class="cmd-btn" onclick="insertCommand('!twitch_poll ', 'topic OR title | option1 | option2, then Send')" title="Create Twitch poll (auto from topic, or manual options with | separators)">
         <span class="cmd-icon">📊</span> Twitch poll
       </button>
@@ -3002,7 +3005,7 @@ async function readImageFileAsVisionFrame(file) {
   const iw = Number(img.naturalWidth || 0);
   const ih = Number(img.naturalHeight || 0);
   if (!(iw > 0 && ih > 0)) return null;
-  const maxW = 768;
+  const maxW = 1280;
   const scale = Math.min(1, maxW / iw);
   const w = Math.max(64, Math.round(iw * scale));
   const h = Math.max(64, Math.round(ih * scale));
@@ -3012,7 +3015,7 @@ async function readImageFileAsVisionFrame(file) {
   const cx = cv.getContext('2d');
   if (!cx) return null;
   cx.drawImage(img, 0, 0, w, h);
-  const outDataUrl = cv.toDataURL('image/jpeg', 0.72);
+  const outDataUrl = cv.toDataURL('image/jpeg', 0.82);
   const b64 = String(outDataUrl.split(',', 2)[1] || '').trim();
   if (!b64) return null;
   return { mime: 'image/jpeg', b64 };
@@ -3034,10 +3037,7 @@ async function sendMessage() {
   let liveVisionFrame = null;
   let liveVisionMediaState = null;
   if (!hasImage && cameraStream && visionSource) {
-    liveVisionFrame = await captureLiveVisionFrameForChat(
-      visionSource === 'screen' ? 960 : 768,
-      visionSource === 'screen' ? 0.78 : 0.72
-    );
+    liveVisionFrame = await captureLiveVisionFrameForChat(1280, 0.82);
     liveVisionMediaState = {
       active: true,
       type: visionSource === 'screen' ? 'screen' : 'camera',
@@ -3194,6 +3194,41 @@ async function ytLikeFromInput() {
   } catch (e) {
     if (btn) { btn.disabled = false; btn.classList.remove('loading'); }
     showToast('Network error.', true);
+  }
+}
+
+async function twitchSayPrompt() {
+  var lastChan = '';
+  try { lastChan = (localStorage.getItem('lunaTwitchSayChannel') || '').trim(); } catch (e) {}
+  var defaultChan = lastChan || 'justrayen_ch';
+  var chan = window.prompt('Twitch channel login (no #):', defaultChan);
+  if (chan === null) return;
+  chan = chan.trim().replace(/^#/, '');
+  if (!chan) { showToast('Channel login is required.', true); return; }
+  var msg = window.prompt('Message to send to #' + chan + ':', '');
+  if (msg === null) return;
+  msg = msg.trim();
+  if (!msg) { showToast('Message is required.', true); return; }
+  try { localStorage.setItem('lunaTwitchSayChannel', chan); } catch (e) {}
+  var btn = document.getElementById('twitch-say-btn');
+  if (btn) { btn.disabled = true; btn.classList.add('loading'); }
+  showToast('Sending to #' + chan + '…', false);
+  try {
+    const r = await fetch('/api/twitch/say', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ channel: chan, message: msg })
+    });
+    const d = await r.json().catch(function() { return {}; });
+    if (btn) { btn.disabled = false; btn.classList.remove('loading'); }
+    if (!r.ok || !d.ok) {
+      showToast((d && (d.result || d.error)) || ('Send failed (HTTP ' + r.status + ').'), true);
+      return;
+    }
+    showToast(d.result || ('Sent to #' + chan + '.'), false);
+  } catch (e) {
+    if (btn) { btn.disabled = false; btn.classList.remove('loading'); }
+    showToast('Network error or not on localhost.', true);
   }
 }
 
@@ -3458,6 +3493,7 @@ const MORE_COMMANDS = {
       { label: 'Share song (cmd)', icon: '𝕏', desc: 'Same as the Share Song button (!share_song)', run: function() { sendQuick('!share_song'); } },
       { label: 'Share Facebook (cmd)', icon: '📘', desc: 'Same as Share Facebook (!share_facebook)', run: function() { sendQuick('!share_facebook'); } },
       { label: 'Check YT uploads', icon: '📺', desc: 'Poll channel RSS — Discord + FB/X if configured', run: function() { checkYoutubeUploads(); } },
+      { label: 'Twitch say', icon: '💜', desc: 'Send Luna a one-shot line to a Twitch channel (e.g. #justrayen_ch)', run: function() { twitchSayPrompt(); } },
       { label: 'Vision source', icon: '👁', desc: 'Choose Camera or Screen share for live vision', run: function() { toggleVision(); } },
       { label: 'YT watch stop', icon: '⏹', desc: 'Stop live YT watch-react session (!yt_watch_stop)', run: function() { sendQuick('!yt_watch_stop'); } },
     ]
@@ -3593,8 +3629,8 @@ function getCurrentCameraFrameBase64() {
 
 /** JPEG frame + base64 payload for `/api/chat` `vision_frame` (matches manual upload shape). */
 async function captureLiveVisionFrameForChat(maxW, quality) {
-  maxW = maxW || 768;
-  if (quality == null) quality = 0.72;
+  maxW = maxW || 1280;
+  if (quality == null) quality = 0.82;
   if (!cameraStream || !visionSource || !cameraCaptureCanvas || !cameraCaptureVideo || !cameraCaptureCtx) {
     return null;
   }
@@ -3762,7 +3798,7 @@ async function startVision(source) {
       }
     } else {
       cameraStream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } }
+        video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } }
       });
       visionSource = 'camera';
     }
@@ -3780,8 +3816,8 @@ async function startVision(source) {
     await video.play();
     cameraCaptureVideo = video;
     const canvas = document.createElement('canvas');
-    canvas.width = visionSource === 'screen' ? 1280 : 640;
-    canvas.height = visionSource === 'screen' ? 720 : 480;
+    canvas.width = 1280;
+    canvas.height = 720;
     const ctx = canvas.getContext('2d');
     cameraCaptureCanvas = canvas;
     cameraCaptureCtx = ctx;

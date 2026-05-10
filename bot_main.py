@@ -89,6 +89,11 @@ LUNA_CHAT_GGUF_THREADS = int(_env("LUNA_CHAT_GGUF_THREADS", "0") or "0")
 OLLAMA_SMALL = _env("OLLAMA_MODEL_SMALL") or OLLAMA_MODEL
 OLLAMA_FALLBACK = _env("OLLAMA_FALLBACK_MODEL", "qwen2.5:1.5b").strip()
 OLLAMA_RATE_LIMIT_FALLBACK = _env("OLLAMA_RATE_LIMIT_FALLBACK_MODEL", "llama3.2:latest").strip()
+_OLLAMA_NUM_GPU_RAW = (_env("OLLAMA_NUM_GPU", "").strip() or _env("LUNA_OLLAMA_NUM_GPU", "").strip())
+try:
+    OLLAMA_NUM_GPU = int(_OLLAMA_NUM_GPU_RAW) if _OLLAMA_NUM_GPU_RAW else None
+except Exception:
+    OLLAMA_NUM_GPU = None
 # Vision model for camera/screen reads. Defaults to the main chat model when not explicitly set.
 OLLAMA_VISION_MODEL = _env("OLLAMA_VISION_MODEL", OLLAMA_CHAT).strip()
 OLLAMA_VISION_TIMEOUT = max(20, min(240, int(_env("OLLAMA_VISION_TIMEOUT", "90") or "90")))
@@ -396,6 +401,15 @@ except Exception:
 _DM_GREET_STATE_PATH = os.path.join(_DATA, "dm_greetings_state.json")
 _dm_greet_state_lock = threading.Lock()
 _CONVERSATIONS_PATH = os.path.join(_DATA, "conversations.json")
+_CONVERSATION_SUMMARIES_PATH = os.path.join(_DATA, "conversation_summaries.json")
+
+# DM-greet blocklist: spammers / dead users we should NEVER try to DM-greet.
+# Auto-populated when (a) Discord refuses delivery (no mutual guilds, DMs disabled, unknown user)
+# or (b) someone fires promotional invite-link spam at Luna (e.g. discord.gg/... + @everyone).
+_DM_GREET_BLOCKLIST_PATH = os.path.join(_DATA, "dm_greet_blocklist.json")
+_dm_greet_block_lock = threading.Lock()
+# discord.gg/<code>, discordapp.com/invite/<code>, discord.com/invite/<code>
+_PROMO_INVITE_RE = re.compile(r"\b(?:discord(?:app)?\.com/invite|discord\.gg)/[A-Za-z0-9-]{2,}", re.I)
 
 # Social / media URLs
 SUNO_CREATE_URL  = _env("SUNO_CREATE_URL", "https://suno.com/create")
@@ -3083,8 +3097,115 @@ def _relationship_top_text(scope_hint: str, limit: int = 10) -> str:
     return "\n".join(lines)
 
 
+def _dm_greet_allowlisted(uid: int) -> bool:
+    """Allowlist always wins over blocklist (linked user, admin, configured sync IDs, configured extras)."""
+    if uid <= 0:
+        return False
+    if _linked_int and uid == _linked_int:
+        return True
+    if _admin_int and uid == _admin_int:
+        return True
+    if uid in _dm_sync_ids:
+        return True
+    if uid in _greet_extra:
+        return True
+    return False
+
+
+def _dm_greet_load_blocklist() -> dict:
+    data = _load_json(_DM_GREET_BLOCKLIST_PATH, {})
+    return data if isinstance(data, dict) else {}
+
+
+def _dm_greet_blocked(uid: int) -> bool:
+    if uid <= 0 or _dm_greet_allowlisted(uid):
+        return False
+    return str(uid) in _dm_greet_load_blocklist()
+
+
+def _dm_greet_block(uid: int, reason: str) -> bool:
+    """Persist a DM-greet block for ``uid``. Returns True if newly blocked.
+
+    Allowlisted users (linked / admin / configured) are immune.
+    """
+    if uid <= 0 or _dm_greet_allowlisted(uid):
+        return False
+    with _dm_greet_block_lock:
+        bl = _dm_greet_load_blocklist()
+        key = str(uid)
+        was_new = key not in bl
+        entry = bl.get(key) or {}
+        entry["hits"] = int(entry.get("hits") or 0) + 1
+        entry["reason"] = (str(reason or "").strip() or entry.get("reason") or "")[:240]
+        if not entry.get("blocked_at"):
+            entry["blocked_at"] = datetime.now(timezone.utc).isoformat()
+        entry["last_at"] = datetime.now(timezone.utc).isoformat()
+        bl[key] = entry
+        _save_json(_DM_GREET_BLOCKLIST_PATH, bl)
+    if LUNA_CALL_DEBUG and was_new:
+        print(
+            f"[CallDebug {datetime.now().strftime('%H:%M:%S')}] dm_greet_block | uid={uid} reason={(reason or '')[:120]}",
+            flush=True,
+        )
+    return was_new
+
+
+def _dm_greet_drop_conversation(uid: int) -> None:
+    """Drop ``discord:user:<uid>`` from conversations + rolling summary so the spammer disappears from the recipient pool."""
+    if uid <= 0:
+        return
+    key = f"discord:user:{uid}"
+    for path in (_CONVERSATIONS_PATH, _CONVERSATION_SUMMARIES_PATH):
+        try:
+            data = _load_json(path, {})
+            if isinstance(data, dict) and key in data:
+                data.pop(key, None)
+                _save_json(path, data)
+        except Exception:
+            pass
+
+
+def _dm_send_failure_is_permanent(err: Exception) -> bool:
+    """Whether a DM send error means we should give up on this user permanently.
+
+    Discord error codes we treat as permanent:
+      * 50278 - cannot send messages to this user (no mutual guilds)
+      * 50007 - cannot send messages to this user (DMs disabled / blocked Luna)
+      * 10013 - unknown user (account deleted)
+    HTTP 403 Forbidden without a recognized code is also treated as permanent.
+    """
+    s = str(err or "").lower()
+    for code in ("50278", "50007", "10013"):
+        if code in s:
+            return True
+    if "no mutual guilds" in s:
+        return True
+    if "cannot send messages to this user" in s:
+        return True
+    if "unknown user" in s:
+        return True
+    if "403 forbidden" in s or "forbidden:" in s:
+        return True
+    return False
+
+
+def _looks_like_promo_invite_spam(text: str) -> tuple[bool, str]:
+    """Detect Discord-invite promo spam (e.g. discord.gg/foo + @everyone). Returns (matched, reason)."""
+    s = (text or "").strip()
+    if not s:
+        return False, ""
+    inv = _PROMO_INVITE_RE.search(s)
+    if not inv:
+        return False, ""
+    low = s.lower()
+    has_mass_ping = ("@everyone" in low) or ("@here" in low)
+    if has_mass_ping:
+        return True, f"invite+mass_ping: {inv.group(0)[:80]}"
+    return False, ""
+
+
 def _dm_greeting_recipient_ids() -> list[int]:
-    """Users who should receive scheduled greetings: config IDs + known Discord conversation scopes."""
+    """Users who should receive scheduled greetings: config IDs + known Discord conversation scopes (minus blocklist)."""
     ids: set[int] = set()
     ids |= _dm_sync_ids
     if _linked_int:
@@ -3092,7 +3213,6 @@ def _dm_greeting_recipient_ids() -> list[int]:
     if _admin_int:
         ids.add(_admin_int)
     ids |= _greet_extra
-    # Include everyone Luna has chatted with under discord:user:<id> scope.
     conv = _load_json(_CONVERSATIONS_PATH, {})
     if isinstance(conv, dict):
         for k in conv.keys():
@@ -3103,7 +3223,7 @@ def _dm_greeting_recipient_ids() -> list[int]:
                 ids.add(int(m.group(1)))
             except Exception:
                 pass
-    return sorted(ids)
+    return sorted(uid for uid in ids if not _dm_greet_blocked(uid))
 
 
 def _dm_greet_local_now() -> datetime:
@@ -3334,11 +3454,14 @@ async def _dm_send_greeting_to_uid(uid: int, kind: str) -> bool:
         await ch.send(msg)
         return True
     except Exception as e:
+        es = str(e)[:200]
         if LUNA_CALL_DEBUG:
             print(
-                f"[CallDebug {datetime.now().strftime('%H:%M:%S')}] dm_greet_send | uid={uid} err={str(e)[:200]}",
+                f"[CallDebug {datetime.now().strftime('%H:%M:%S')}] dm_greet_send | uid={uid} err={es}",
                 flush=True,
             )
+        if _dm_send_failure_is_permanent(e):
+            _dm_greet_block(uid, f"send_failed: {es[:160]}")
         return False
 
 
@@ -3367,11 +3490,14 @@ async def _dm_send_midday_to_uid(uid: int) -> bool:
         await ch.send(text)
         return True
     except Exception as e:
+        es = str(e)[:200]
         if LUNA_CALL_DEBUG:
             print(
-                f"[CallDebug {datetime.now().strftime('%H:%M:%S')}] dm_midday_send | uid={uid} err={str(e)[:200]}",
+                f"[CallDebug {datetime.now().strftime('%H:%M:%S')}] dm_midday_send | uid={uid} err={es}",
                 flush=True,
             )
+        if _dm_send_failure_is_permanent(e):
+            _dm_greet_block(uid, f"send_failed: {es[:160]}")
         return False
 
 
@@ -4443,8 +4569,13 @@ def _ollama_chat_once(
     to = timeout if timeout is not None else (180 if compact else 120)
     # `think: false` is top-level (not in options). Avoids empty `content` on thinking models.
     payload: dict = {"model": model, "messages": messages, "stream": False, "think": False}
+    options: dict = {}
     if compact:
-        payload["options"] = {"temperature": 0.75, "num_predict": 768}
+        options.update({"temperature": 0.75, "num_predict": 768})
+    if OLLAMA_NUM_GPU is not None:
+        options["num_gpu"] = OLLAMA_NUM_GPU
+    if options:
+        payload["options"] = options
     body = json.dumps(payload).encode()
     req = urllib.request.Request(f"{OLLAMA_BASE}/api/chat", data=body,
         headers={"Content-Type": "application/json"}, method="POST")
@@ -4468,14 +4599,15 @@ def ollama_chat(
     image_bytes: bytes | None = None,
 ) -> str:
     use_model = (model or OLLAMA_MODEL).strip()
-    call_to = timeout if timeout is not None else (180 if compact else 120)
+    # Luna chat: no hard timeout — wait as long as the model needs.
+    call_to = timeout if timeout is not None else 86400
     provider = (LUNA_CHAT_PROVIDER or "ollama").strip().lower()
     multimodal = bool(image_bytes)
     try:
         raw = _run_with_model_guard(
             kind="chat",
             queue_wait_sec=_MODEL_CHAT_QUEUE_WAIT_SEC,
-            hard_timeout_sec=max(call_to + 8, _MODEL_CHAT_GUARD_TIMEOUT_SEC),
+            hard_timeout_sec=None,
             fn=lambda: _chat_provider_once(
                 msg,
                 system,
@@ -4489,7 +4621,6 @@ def ollama_chat(
         )
         return _sanitize_luna_reply(raw)
     except Exception as primary_err:
-        # If primary chat model is throttled (HTTP 429), retry on a stable local fallback (default: llama3.2).
         is_rate_limited = (
             isinstance(primary_err, urllib.error.HTTPError) and int(getattr(primary_err, "code", 0) or 0) == 429
         ) or ("429" in str(primary_err or "").lower()) or ("too many requests" in str(primary_err or "").lower())
@@ -4497,11 +4628,11 @@ def ollama_chat(
             rl_model = (OLLAMA_RATE_LIMIT_FALLBACK or "llama3.2:latest").strip()
             if rl_model and rl_model != use_model:
                 try:
-                    rl_to = timeout if timeout is not None else 90
+                    rl_to = timeout if timeout is not None else 86400
                     raw = _run_with_model_guard(
                         kind="chat",
                         queue_wait_sec=_MODEL_CHAT_QUEUE_WAIT_SEC,
-                        hard_timeout_sec=max(rl_to + 8, _MODEL_CHAT_GUARD_TIMEOUT_SEC),
+                        hard_timeout_sec=None,
                         fn=lambda: _chat_provider_once(
                             msg,
                             system,
@@ -4518,11 +4649,11 @@ def ollama_chat(
                     pass
         if provider in ("ollama", "gguf") and OLLAMA_FALLBACK and OLLAMA_FALLBACK != use_model and not multimodal:
             try:
-                fb_to = timeout if timeout is not None else 90
+                fb_to = timeout if timeout is not None else 86400
                 raw = _run_with_model_guard(
                     kind="chat",
                     queue_wait_sec=_MODEL_CHAT_QUEUE_WAIT_SEC,
-                    hard_timeout_sec=max(fb_to + 8, _MODEL_CHAT_GUARD_TIMEOUT_SEC),
+                    hard_timeout_sec=None,
                     fn=lambda: _chat_provider_once(
                         msg,
                         system,
@@ -4540,15 +4671,14 @@ def ollama_chat(
         if isinstance(primary_err, TimeoutError):
             em = str(primary_err or "")
             if "queue_busy" in em and not multimodal:
-                # Voice/chat bursts can briefly saturate the single chat slot.
-                # Retry once with a longer queue wait before giving up.
+                # Voice/chat bursts can briefly saturate the single chat slot. Retry once with a longer queue wait.
                 try:
                     retry_wait = max(_MODEL_CHAT_QUEUE_WAIT_SEC, 12)
-                    retry_to = timeout if timeout is not None else (75 if compact else 60)
+                    retry_to = timeout if timeout is not None else 86400
                     raw = _run_with_model_guard(
                         kind="chat",
                         queue_wait_sec=retry_wait,
-                        hard_timeout_sec=max(retry_to + 8, _MODEL_CHAT_GUARD_TIMEOUT_SEC),
+                        hard_timeout_sec=None,
                         fn=lambda: _chat_provider_once(
                             msg,
                             system,
@@ -4563,8 +4693,6 @@ def ollama_chat(
                     return _sanitize_luna_reply(raw)
                 except Exception:
                     return "Luna is busy with other requests right now. Try again in a few seconds."
-            if "timeout" in em:
-                return "Luna took too long to answer and was timed out. Try again."
         if isinstance(primary_err, urllib.error.URLError):
             return f"Ollama offline: {primary_err.reason}"
         return f"Error: {primary_err}"
@@ -4599,8 +4727,13 @@ def ollama_stream(
             yield "Something went wrong."
         return
     payload: dict = {"model": use_model, "messages": messages, "stream": True, "think": False}
+    options: dict = {}
     if compact:
-        payload["options"] = {"temperature": 0.75, "num_predict": 768}
+        options.update({"temperature": 0.75, "num_predict": 768})
+    if OLLAMA_NUM_GPU is not None:
+        options["num_gpu"] = OLLAMA_NUM_GPU
+    if options:
+        payload["options"] = options
     body = json.dumps(payload).encode()
     req = urllib.request.Request(f"{OLLAMA_BASE}/api/chat", data=body,
         headers={"Content-Type": "application/json"}, method="POST")
@@ -7687,11 +7820,11 @@ async def _publish_announce_loop():
         )
     if LUNA_PUBLISH_ANNOUNCE_TWITCH_LIVE_FACEBOOK:
         _fb_l = ", ".join(sorted(_PUBLISH_ANNOUNCE_FB_TWITCH_LOGINS)) or "(none — set TWITCH_BROADCASTER_LOGIN or LUNA_PUBLISH_ANNOUNCE_FB_FOR_TWITCH_LOGINS)"
-        print(f"[Publish announce] Twitch go-live → Facebook: ON for **{_fb_l}**.", flush=True)
+        print(f"[Publish announce] Twitch go-live -> Facebook: ON for **{_fb_l}**.", flush=True)
     if LUNA_PUBLISH_ANNOUNCE_YOUTUBE_X:
-        print("[Publish announce] YouTube upload → X cross-post: ON.", flush=True)
+        print("[Publish announce] YouTube upload -> X cross-post: ON.", flush=True)
     if LUNA_PUBLISH_ANNOUNCE_YOUTUBE_FACEBOOK:
-        print("[Publish announce] YouTube upload → Facebook cross-post: ON.", flush=True)
+        print("[Publish announce] YouTube upload -> Facebook cross-post: ON.", flush=True)
     while True:
         try:
             await _publish_announce_tick()
@@ -17404,6 +17537,39 @@ def api_recent_social_clear():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@web.route("/api/twitch/say", methods=["POST"])
+def api_twitch_say():
+    """One-shot IRC line to a Twitch channel.
+
+    Localhost-only — the operator owns the machine, so no Discord-linked admin
+    is required. Cooldowns, ``TWITCH_OUTBOUND_ONLY_HOME``,
+    ``TWITCH_EXTRA_IRC_CHANNELS``, and ``TWITCH_ALLOWED_CHAT_TARGETS`` all still
+    apply (handled inside ``_twitch_exec_say``).
+    """
+    if not _is_direct_localhost_request():
+        return jsonify({"ok": False, "error": "This endpoint is only available on localhost."}), 403
+    data = request.get_json(force=True, silent=True) or {}
+    channel = (data.get("channel") or "").strip().lstrip("#")
+    message = (data.get("message") or "").strip()
+    if not channel:
+        return jsonify({"ok": False, "error": "Missing channel login."}), 400
+    if not message:
+        return jsonify({"ok": False, "error": "Missing message."}), 400
+    arg = f"{channel} {message}"
+    try:
+        result = _twitch_exec_say(arg, bypass_permission=True)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)[:300]}), 500
+    text = (result or "").strip()
+    sent = text.startswith("✅")
+    return jsonify({
+        "ok": sent,
+        "channel": channel,
+        "message": message,
+        "result": text,
+    })
+
+
 @web.route("/api/publish-announce/check", methods=["POST"])
 def api_publish_announce_check():
     """Run one publish-announce poll (YouTube RSS / Twitch + Discord + optional FB/X). Localhost only."""
@@ -18142,8 +18308,13 @@ def _twitch_exec_say(
     *,
     twitch_login: str | None = None,
     discord_uid: int | None = None,
+    bypass_permission: bool = False,
 ) -> str:
-    if not _twitch_redirect_manage_allowed(twitch_login=twitch_login, discord_uid=discord_uid):
+    """Send a one-shot IRC line. Permission check is skipped when
+    ``bypass_permission=True`` — used by the localhost Hub endpoint, which is
+    already gated by ``_is_direct_localhost_request()`` so the operator
+    physically owns the machine."""
+    if not bypass_permission and not _twitch_redirect_manage_allowed(twitch_login=twitch_login, discord_uid=discord_uid):
         return "❌ Only the broadcaster or linked Discord admin can use !twitch_say."
     parts = (arg or "").strip().split(None, 1)
     if len(parts) < 2:
@@ -20031,6 +20202,21 @@ async def on_message(message: discord.Message):
 
     # Celine: voice clips
     effective = (message.content or "").strip()
+
+    # Auto-prune Discord-invite promo spammers (e.g. "discord.gg/foo @everyone").
+    # Catches both DM raid bots and in-guild mass-pingers so they never enter Luna's
+    # DM-greet recipient pool (and any prior conversation/summary scope is dropped).
+    try:
+        spam, reason = _looks_like_promo_invite_spam(effective)
+        if spam:
+            uid = int(getattr(message.author, "id", 0) or 0)
+            if uid > 0 and not _dm_greet_allowlisted(uid):
+                if _dm_greet_block(uid, f"promo_spam: {reason}"):
+                    _dm_greet_drop_conversation(uid)
+                return
+    except Exception:
+        pass
+
     celine_route = None
     voice_from_clip = False
     voice_emotion_meta = None
@@ -21222,6 +21408,19 @@ def main():
     except discord.LoginFailure:
         print("Invalid token. Use the BOT token from Developer Portal → Bot tab.")
         raise SystemExit(1)
+    except discord.HTTPException as e:
+        # 429 during static_login — too many connection attempts / Discord edge throttle.
+        if getattr(e, "status", None) == 429:
+            ra = getattr(e, "retry_after", None)
+            hint = f" Retry after ~{ra}s." if ra else ""
+            print(
+                "Discord login rate limited (HTTP 429). Wait 5–15 minutes before restarting; "
+                "do not run multiple copies of Luna with the same token."
+                + hint,
+                flush=True,
+            )
+            raise SystemExit(2)
+        raise
 
 if __name__ == "__main__":
     main()

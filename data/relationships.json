@@ -3,15 +3,14 @@
   "users": {
     "discord:user:1414944231222411378": {
       "scope": "discord:user:1414944231222411378",
-      "points": 922,
+      "points": 992,
       "rank": "Legend",
-      "interactions": 289,
+      "interactions": 311,
       "familiarity": 1.0,
       "trust": 1.0,
       "affinity": 1.0,
       "friction": 0.0,
       "notes": [
-        "just I'm just shot",
         "gonna get off to test this thing again",
         "Luna",
         "gonna play a league game to see",
@@ -22,11 +21,12 @@
         "having",
         "buying my items and and yeah getting ready",
         "here",
-        "on this cool"
+        "on this cool",
+        "watching you see on my screen right now"
       ],
       "known_names": [],
-      "last_seen_ts": 1778200805.2113836,
-      "last_reply": "No visible text, signs, or context related to Travis in the frame. The image shows a person with headphones, a gray sweater, red shirt, a couch, drum set, and curtains; no identifiable details about Travis. \n\nactive=true; source=screen \n\n 🌤"
+      "last_seen_ts": 1778435799.2262287,
+      "last_reply": "I see the start of your world taking shape. The first block is placed, and the foundation is beginning to hold its form.\n\nThe cursor is hovering just above the ground, ready to add another layer. It looks like you're focusing on stability, "
     },
     "twitch:user:streamelements": {
       "scope": "discord:user:1414944231222411378",
@@ -46,19 +46,19 @@
     },
     "twitch:user:solonaras": {
       "scope": "discord:user:1414944231222411378",
-      "points": 76,
+      "points": 106,
       "rank": "Acquaintance",
-      "interactions": 33,
-      "familiarity": 0.7100000000000003,
-      "trust": 0.42000000000000015,
-      "affinity": 0.44000000000000017,
+      "interactions": 45,
+      "familiarity": 0.9500000000000005,
+      "trust": 0.5400000000000003,
+      "affinity": 0.5600000000000003,
       "friction": 0.0,
       "notes": [],
       "known_names": [
         "Solonaras"
       ],
-      "last_seen_ts": 1778178298.0785146,
-      "last_reply": "Hey ilaninoor! 👋 (Though I’m still figuring out how to *actually* reach your Discord—looks like I’m stuck in chat mode for now) But your streamer’s got your number! Want me to share the link? Or maybe... *you* can tell me where to find you?"
+      "last_seen_ts": 1778369415.76054,
+      "last_reply": "Haha, that's a bit of a trick question! 😂 If we go into co-op mode in the game, I won't be able to *raid* you in the traditional sense because raiding usually happens between two separate teams or individuals in multiplayer matches. But we "
     },
     "twitch:user:kofistreambot": {
       "scope": "discord:user:1414944231222411378",
